@@ -83,6 +83,11 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
 
 		proc.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
 		proc.on('close', (code) => {
+			// Don't synthesize fallback on non-zero exit without explicit result — surface the error
+			if (code !== 0 && !state.result) {
+				fail(new Error(stderr.trim() || `${opts.harness.binary} exited with code ${code}`));
+				return;
+			}
 			const final = opts.harness.extractResult(state);
 			if (final) {
 				if (!final.result) final.result = state.streamedText;

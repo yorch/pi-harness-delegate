@@ -324,15 +324,19 @@ async function delegate(
 		scopeText = pr.stdout ? `Pull request diff (${target || 'current branch'}):\n${pr.stdout}` : `Could not resolve the PR diff${pr.stderr ? ` — ${pr.stderr.trim().slice(0, 300)}` : ''}.`;
 	}
 
-	// permission: normalized, danger requires allowDangerous
+	// permission: normalized, danger requires explicit per-call allowDangerous:true
 	let permission: NormalizedPermission = template.permission;
-	if (opts.allowDangerous) permission = 'danger';
-	else if (template.permission === 'danger' && !config.allowDangerous && !opts.allowDangerous) {
-		// template wants danger but not allowed — downgrade to edit with warning? keep as edit
-		permission = 'edit';
-	}
 	const nativePerm = template.nativePermission;
-	// if template has nativePermission, use it; otherwise map normalized via harness
+	const isNativeDanger = !!nativePerm && ['bypassPermissions', 'danger-full-access', 'danger'].includes(nativePerm);
+	if (template.permission === 'danger' || isNativeDanger) {
+		if (opts.allowDangerous !== true) {
+			throw new Error(`template "${mode}" requires danger permission — pass allowDangerous:true to run it (never a default)`);
+		}
+		permission = 'danger';
+	} else if (opts.allowDangerous === true) {
+		// explicit per-call escalation for any template
+		permission = 'danger';
+	}
 	const permissionForDisplay = nativePerm ?? permission;
 
 	const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
@@ -652,7 +656,7 @@ export default function (pi: ExtensionAPI) {
 		const templates = loadTemplates(ctx.cwd, harnessName);
 		const resolved = resolveDefaults(parsed, templates);
 		const template = parsed.mode ? templates.get(parsed.mode) : undefined;
-		const isDanger = template?.permission === 'danger' || template?.permissionMode === 'bypassPermissions';
+		const isDanger = template?.permission === 'danger' || (template?.nativePermission ? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission) : false);
 
 		if (!resolved) {
 			if (parsed.mode) ctx.ui.notify?.(`/delegate ${parsed.mode} <what to do> — give a prompt for the "${parsed.mode}" mode`, 'warning');

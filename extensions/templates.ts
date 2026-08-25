@@ -140,25 +140,24 @@ function legacyProjectTemplatesDir(cwd: string): string {
 	return join(cwd, '.pi', 'claude-delegate', 'templates');
 }
 
-/** Shared < harness builtins < user-global < project-local (later wins). */
+/** Legacy root < shared < harness builtins < legacyUser < user < user/harness < legacyProject < project < project/harness (later wins). */
 export function loadTemplates(cwd: string, harnessName?: string): Map<string, DelegateTemplate> {
 	const out = new Map<string, DelegateTemplate>();
 	const harness = harnessName ?? 'claude';
-	// shared
-	loadDir(sharedTemplatesDir(), out);
-	// legacy builtins at templates/*.md (keep for compat, lowestpriority before shared? actually after shared so harness overrides)
+	// legacy root builtins (templates/*.md) lowest — for migration from pi-claude-delegate
 	loadDir(builtinTemplatesDir(), out);
+	// shared canonical bodies
+	loadDir(sharedTemplatesDir(), out);
 	// harness-specific builtins override shared
 	loadDir(builtinHarnessTemplatesDir(harness), out);
-	loadDir(builtinHarnessTemplatesDir('shared'), out);
-	// user globals
+	// user globals: legacy before new so new wins
+	loadDir(legacyUserTemplatesDir(), out);
 	loadDir(userTemplatesDir(), out);
 	loadDir(userTemplatesDir(harness), out);
-	loadDir(legacyUserTemplatesDir(), out);
-	// project locals
+	// project locals: legacy before new so new wins
+	loadDir(legacyProjectTemplatesDir(cwd), out);
 	loadDir(projectTemplatesDir(cwd), out);
 	loadDir(projectTemplatesDir(cwd, harness), out);
-	loadDir(legacyProjectTemplatesDir(cwd), out);
 	return out;
 }
 

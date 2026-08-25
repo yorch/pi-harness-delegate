@@ -106,7 +106,8 @@ export const claudeHarness: Harness = {
 		}
 	},
 	buildArgs(opts: BuildArgsOpts): string[] {
-		const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-mode', PERMISSION_MAP[opts.permission] ?? 'acceptEdits'];
+		const mode = opts.nativePermission ?? PERMISSION_MAP[opts.permission] ?? 'acceptEdits';
+		const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-mode', mode];
 		if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
 		else args.push('--no-session-persistence');
 		if (opts.model) args.push('--model', opts.model);

@@ -127,9 +127,11 @@ export const codexHarness: Harness = {
 	},
 	buildArgs(opts: BuildArgsOpts): string[] {
 		// codex exec --json <prompt> --sandbox <level> --ask-for-approval <level>
-		const args = ['exec', '--json', opts.prompt, '--sandbox', SANDBOX_MAP[opts.permission] ?? 'workspace-write'];
-		if (opts.permission === 'danger') args.push('--ask-for-approval', 'never');
+		const sandbox = opts.nativePermission ?? SANDBOX_MAP[opts.permission] ?? 'workspace-write';
+		const args = ['exec', '--json', opts.prompt, '--sandbox', sandbox];
+		if (opts.permission === 'danger' || sandbox === 'danger-full-access') args.push('--ask-for-approval', 'never');
 		else if (opts.permission === 'readonly') args.push('--ask-for-approval', 'never');
+		else args.push('--ask-for-approval', 'on-request');
 		if (opts.model) args.push('--model', opts.model);
 		if (opts.resumeSessionId) args.push('--thread-id', opts.resumeSessionId);
 		// maxBudgetUsd not natively supported; pass as env hint via --config if needed

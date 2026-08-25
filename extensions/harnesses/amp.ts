@@ -97,7 +97,8 @@ export const ampHarness: Harness = {
 		}
 	},
 	buildArgs(opts: BuildArgsOpts): string[] {
-		const args = ['--output', 'jsonl', opts.prompt, '--permission', PERMISSION_MAP[opts.permission] ?? 'workspace'];
+		const perm = opts.nativePermission ?? PERMISSION_MAP[opts.permission] ?? 'workspace';
+		const args = ['--output', 'jsonl', opts.prompt, '--permission', perm];
 		if (opts.model) args.push('--model', opts.model);
 		if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
 		for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);

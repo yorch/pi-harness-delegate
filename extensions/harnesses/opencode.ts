@@ -98,7 +98,8 @@ export const opencodeHarness: Harness = {
 	buildArgs(opts: BuildArgsOpts): string[] {
 		const args = ['run', '--format', 'json', opts.prompt];
 		// permission not fully standardized; pass as --permission if supported
-		args.push('--permission', PERMISSION_MAP[opts.permission] ?? 'allow-edit');
+		const perm = opts.nativePermission ?? PERMISSION_MAP[opts.permission] ?? 'allow-edit';
+		args.push('--permission', perm);
 		if (opts.model) args.push('--model', opts.model);
 		if (opts.resumeSessionId) args.push('--session', opts.resumeSessionId);
 		for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
