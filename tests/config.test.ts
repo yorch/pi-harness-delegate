@@ -1,9 +1,8 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { test } from 'node:test';
 
 test('config: delegate key preferred over claudeDelegate', async () => {
 	const dir = join(tmpdir(), `cfg-test-${Date.now()}`);
@@ -12,10 +11,13 @@ test('config: delegate key preferred over claudeDelegate', async () => {
 	process.env.PI_CODING_AGENT_DIR = dir;
 	try {
 		// write settings with both keys, delegate should win
-		writeFileSync(join(dir, 'settings.json'), JSON.stringify({
-			delegate: { defaultHarness: 'codex', defaultMode: 'plan', modelAliases: { economy: 'haiku' } },
-			claudeDelegate: { defaultMode: 'review', model: 'sonnet' },
-		}));
+		writeFileSync(
+			join(dir, 'settings.json'),
+			JSON.stringify({
+				delegate: { defaultHarness: 'codex', defaultMode: 'plan', modelAliases: { economy: 'haiku' } },
+				claudeDelegate: { defaultMode: 'review', model: 'sonnet' },
+			}),
+		);
 		const { loadConfig } = await import('../extensions/config.ts');
 		// need to reimport fresh? loadConfig reads file each time
 		const cfg = loadConfig();
@@ -33,9 +35,12 @@ test('config: legacy claudeDelegate migrates', async () => {
 	const prev = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = dir;
 	try {
-		writeFileSync(join(dir, 'settings.json'), JSON.stringify({
-			claudeDelegate: { defaultMode: 'review', model: 'opus', maxConcurrent: 2 },
-		}));
+		writeFileSync(
+			join(dir, 'settings.json'),
+			JSON.stringify({
+				claudeDelegate: { defaultMode: 'review', model: 'opus', maxConcurrent: 2 },
+			}),
+		);
 		// dynamic import to get fresh load
 		// use eval to bypass cache? Node will cache, but loadConfig re-reads file
 		const { loadConfig } = await import('../extensions/config.ts');

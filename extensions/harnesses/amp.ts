@@ -1,6 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Harness, BuildArgsOpts, NormalizedPermission, ParseOutcome, ParseState, StreamedResult } from './types.ts';
+import type {
+	BuildArgsOpts,
+	Harness,
+	NormalizedPermission,
+	ParseOutcome,
+	ParseState,
+	StreamedResult,
+} from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,7 +46,8 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
 		const name = typeof o.name === 'string' ? o.name : 'tool';
 		if (typeStr.includes('start') || o.type === 'tool_use') {
 			activities.push({ kind: 'tool_start', name });
-			if (isRecord(o.input)) activities.push({ kind: 'tool_input', name, input: o.input as Record<string, unknown> });
+			if (isRecord(o.input))
+				activities.push({ kind: 'tool_input', name, input: o.input as Record<string, unknown> });
 		} else {
 			activities.push({ kind: 'tool_result', isError: o.is_error === true });
 		}

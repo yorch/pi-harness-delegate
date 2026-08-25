@@ -1,7 +1,15 @@
 /** @deprecated use extensions/harnesses/claude.ts parse directly */
-export type { StreamedUsage, StreamedResult, ActivityEvent, StreamParseOutcome, ParseState, ParseOutcome } from './harnesses/types.ts';
-import type { ParseState, StreamParseOutcome } from './harnesses/types.ts';
+export type {
+	ActivityEvent,
+	ParseOutcome,
+	ParseState,
+	StreamedResult,
+	StreamedUsage,
+	StreamParseOutcome,
+} from './harnesses/types.ts';
+
 import { parseClaudeLine } from './harnesses/claude.ts';
+import type { ParseState, StreamParseOutcome } from './harnesses/types.ts';
 
 export function parseStreamLines(lines: Iterable<string>): StreamParseOutcome {
 	const state: ParseState = { streamedText: '', activities: [], result: null };

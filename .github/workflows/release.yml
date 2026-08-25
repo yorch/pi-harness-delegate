@@ -1,0 +1,164 @@
+# Publishes pi-harness-delegate to npm (single-package adaptation of colophon process).
+#
+# Two-step by design. A push to main that carries changesets makes this open a
+# "Version Packages" pull request: version bump + CHANGELOG, as a diff to review.
+# Merging that PR is what publishes. Nothing reaches npm without a human approving
+# the version number, and an npm version cannot be unpublished after 72 hours.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  # npm trusted publishing — mints an OIDC token so npm can verify
+  # the release came from this workflow in this repository, with no
+  # long-lived credential and a provenance attestation on the tarball.
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # changesets compares against base branch
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Re-verify here — publishing is irreversible, so it does not
+      # inherit trust from the CI run on the same commit.
+      - name: Verify
+        run: bun run verify
+
+      # Pinned by commit, not by the `v2` tag. Moving major tags are
+      # the vector of CVE-2025-30066 (tags v1..v45.0.7 repointed at a
+      # credential-dumping commit). This job can mint an npm token, so
+      # it is the last place to accept a mutable dependency.
+      - uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
+        with:
+          version-script: bun run version-packages
+          publish-script: bun run release
+          commit-message: 'chore: version packages'
+          pr-title: 'chore: version packages'
+          create-github-releases: false
+          push-git-tags: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Single-package tag: one `vX.Y.Z` for the package, pinned to $GITHUB_SHA.
+      - name: Tag and release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Read name+version from the commit that triggered this workflow,
+          # not the working tree (avoids ghost tags like v0.1.2 in colophon).
+          pkg=$(git show "$GITHUB_SHA:package.json")
+          pkg_name=$(jq -r '.name' <<< "$pkg")
+          pkg_version=$(jq -r '.version' <<< "$pkg")
+          packages="$pkg_name $pkg_version"
+
+          if [ -z "$pkg_name" ] || [ -z "$pkg_version" ] || [ "$pkg_version" = "null" ]; then
+            echo "Failed to read name/version from package.json at $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          tag="v$pkg_version"
+
+          {
+            echo 'packages<<PACKAGES_EOF'
+            echo "$packages"
+            echo 'PACKAGES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          # Tag is the record of what has been released. Every push
+          # that does not bump the version finds it already there and
+          # stops — makes re-runs safe.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already released."
+            echo 'released=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # CHANGELOG.md at repo root for single-package repos
+          if [ -f CHANGELOG.md ]; then
+            awk -v v="$pkg_version" '
+              /^## / { if (found) exit; if ($2 == v) { found = 1; next } }
+              found
+            ' CHANGELOG.md > release-notes.md
+          else
+            echo "Release $tag" > release-notes.md
+          fi
+
+          {
+            printf '\n### Package\n\n'
+            awk -v n="$pkg_name" -v v="$pkg_version" 'END { printf "- `%s@%s` — https://www.npmjs.com/package/%s/v/%s\n", n, v, n, v }' <<< ""
+          } >> release-notes.md
+
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --notes-file release-notes.md
+
+          echo 'released=true' >> "$GITHUB_OUTPUT"
+
+      - name: Check dist-tags
+        if: steps.release.outputs.released == 'true'
+        env:
+          PACKAGES: ${{ steps.release.outputs.packages }}
+        run: |
+          set -euo pipefail
+
+          attempts=8
+          delay=15
+          pending=$PACKAGES
+          for attempt in $(seq "$attempts"); do
+            pending=$(
+              while read -r name version _; do
+                actual=$(npm view "$name@latest" version --prefer-online 2>/dev/null || true)
+                [ "$actual" = "$version" ] && continue
+                printf '%s %s %s\n' "$name" "$version" "${actual:-<none>}"
+              done <<< "$pending"
+            )
+            [ -n "$pending" ] || break
+            [ "$attempt" -eq "$attempts" ] || sleep "$delay"
+          done
+
+          if [ -n "$pending" ]; then
+            {
+              echo 'The `latest` dist-tag does not point at the released version.'
+              echo
+              printf '  %-34s %-10s %s\n' PACKAGE RELEASED 'latest points at'
+              awk '{ printf "  %-34s %-10s %s\n", $1, $2, $3 }' <<< "$pending"
+              echo
+              echo 'Where the version is on the registry, the repair is:'
+              echo
+              awk '{ printf "  npm dist-tag add %s@%s latest\n", $1, $2 }' <<< "$pending"
+              echo
+              echo 'Check `release` in package.json for a `--tag`,'
+              echo '`publishConfig.tag` in manifests, and .changeset/pre.json.'
+            } >&2
+            exit 1
+          fi
+
+          echo 'latest points at the released version.'
+

@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { parseTemplate } from '../extensions/templates.ts';
 
 test('parseTemplate permission normalized readonly', () => {

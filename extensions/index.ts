@@ -17,21 +17,46 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
+import {
+	type Component,
+	Container,
+	Key,
+	Markdown,
+	matchesKey,
+	type OverlayHandle,
+	type SelectItem,
+	SelectList,
+	Text,
+	truncateToWidth,
+} from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { Container, Key, Markdown, matchesKey, SelectList, Text, truncateToWidth, type Component, type OverlayHandle, type SelectItem } from '@earendil-works/pi-tui';
-import { runHarness } from './runner.ts';
+import {
+	buildReportContent,
+	buildTranscript,
+	collectActivityLog,
+	formatMetrics,
+	formatToolUse,
+	parseTranscriptMeta,
+	pruneOutputs,
+	safeSegmentName,
+} from './activity.ts';
+import { parseClaudeCommand, parseDelegateCommand, resolveDefaults } from './command.ts';
+import {
+	agentDir,
+	outputsDir as getOutputsDir,
+	legacyOutputsDir,
+	loadConfig,
+	resolveModelForHarness,
+} from './config.ts';
+import { ALIASES, getHarness, HARNESS_NAMES, isKnownHarness } from './harnesses/registry.ts';
+import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { DEFAULT_TIMEOUT_MS } from './harnesses/types.ts';
-import { parseDelegateCommand, parseClaudeCommand, resolveDefaults } from './command.ts';
 import { delegationHint, stripMarker } from './hint.ts';
-import { progressWindow, type FeedEntry } from './progress.ts';
-import { loadTemplates, type DelegateTemplate } from './templates.ts';
+import { type FeedEntry, progressWindow } from './progress.ts';
+import { runHarness } from './runner.ts';
+import { type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { buildReportContent, buildTranscript, collectActivityLog, formatMetrics, formatToolUse, parseTranscriptMeta, pruneOutputs, safeSegmentName } from './activity.ts';
-import { loadConfig, outputsDir as getOutputsDir, legacyOutputsDir, resolveModelForHarness, agentDir } from './config.ts';
-import { getHarness, HARNESS_NAMES, ALIASES, isKnownHarness } from './harnesses/registry.ts';
-import type { ActivityEvent } from './harnesses/types.ts';
-import type { NormalizedPermission } from './harnesses/types.ts';
 
 interface DelegateOptions {
 	harness?: string;
@@ -83,7 +108,13 @@ function outputsDirFor(harness: string): string {
 }
 
 function formatTemplateRow(t: DelegateTemplate): string {
-	const parts = [t.name, `[${t.permission}]`, t.model ? `model=${t.model}` : '', t.defaultTask ? '↳ default task' : '', t.harness ? `(${t.harness})` : ''];
+	const parts = [
+		t.name,
+		`[${t.permission}]`,
+		t.model ? `model=${t.model}` : '',
+		t.defaultTask ? '↳ default task' : '',
+		t.harness ? `(${t.harness})` : '',
+	];
 	return `${parts.filter(Boolean).join('  ')}  —  ${t.description}`;
 }
 
@@ -109,7 +140,10 @@ async function showModes(ctx: ExtensionContext, harnessFilter?: string): Promise
 		const height = 12;
 		return {
 			render(width: number): string[] {
-				const header = theme.fg('accent', `delegate — modes${harnessFilter ? ` (${harnessFilter})` : ''} (↑↓ scroll · any key to close)`);
+				const header = theme.fg(
+					'accent',
+					`delegate — modes${harnessFilter ? ` (${harnessFilter})` : ''} (↑↓ scroll · any key to close)`,
+				);
 				const visible = rows.slice(offset, offset + height);
 				return [header, ...visible.map((l) => theme.fg('muted', truncateToWidth(l, width)))];
 			},
@@ -153,7 +187,14 @@ function readHistory(dir: string, harness: string): HistoryEntry[] {
 					cost = meta.cost;
 					sessionId = meta.sessionId;
 				} catch {}
-				return { file, mode, harness, cost, sessionId, mtime: statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0 };
+				return {
+					file,
+					mode,
+					harness,
+					cost,
+					sessionId,
+					mtime: statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0,
+				};
 			})
 			.sort((a, b) => b.mtime - a.mtime);
 	} catch {
@@ -181,7 +222,14 @@ function readAllHistory(): HistoryEntry[] {
 				cost = meta.cost;
 				sessionId = meta.sessionId;
 			} catch {}
-			entries.push({ file, mode, harness: 'claude', cost, sessionId, mtime: statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0 });
+			entries.push({
+				file,
+				mode,
+				harness: 'claude',
+				cost,
+				sessionId,
+				mtime: statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0,
+			});
 		}
 	} catch {}
 	return entries.sort((a, b) => b.mtime - a.mtime);
@@ -272,8 +320,21 @@ function saveOutput(harness: string, mode: string, text: string): string {
 	return file;
 }
 
-function buildPrompt(template: DelegateTemplate, task: string, scopeText: string | null, cwd: string, harness: string): string {
-	let prompt = [`You are being delegated a subtask by the pi coding agent.`, `Working directory: ${cwd}`, `Harness: ${harness}`, `Mode: ${template.name}`, ``, template.prompt].join('\n');
+function buildPrompt(
+	template: DelegateTemplate,
+	task: string,
+	scopeText: string | null,
+	cwd: string,
+	harness: string,
+): string {
+	let prompt = [
+		`You are being delegated a subtask by the pi coding agent.`,
+		`Working directory: ${cwd}`,
+		`Harness: ${harness}`,
+		`Mode: ${template.name}`,
+		``,
+		template.prompt,
+	].join('\n');
 	prompt += `\n\n# Task\n${task}`;
 	if (scopeText) prompt += `\n\n# Scope\n${scopeText}`;
 	if (template.skill) prompt += `\n\nUse the "${template.skill}" skill.`;
@@ -284,29 +345,43 @@ async function delegate(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	opts: DelegateOptions,
-): Promise<{ content: string; details: Record<string, unknown>; result: import('./harnesses/types.ts').StreamedResult & { streamedText: string; harness: string }; activityLog: string[] }> {
+): Promise<{
+	content: string;
+	details: Record<string, unknown>;
+	result: import('./harnesses/types.ts').StreamedResult & { streamedText: string; harness: string };
+	activityLog: string[];
+}> {
 	const config = loadConfig();
 	const harnessName = opts.harness ?? config.defaultHarness ?? 'claude';
 	const harness = getHarness(harnessName);
-	if (!harness) throw new Error(`unknown harness "${harnessName}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`);
+	if (!harness)
+		throw new Error(
+			`unknown harness "${harnessName}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
+		);
 	const templates = loadTemplates(ctx.cwd, harnessName);
 	const mode = opts.mode || config.defaultMode;
 	const template = templates.get(mode);
-	if (!template) throw new Error(`unknown delegate mode "${mode}" for harness "${harnessName}". Available: ${[...templates.keys()].sort().join(', ')}`);
+	if (!template)
+		throw new Error(
+			`unknown delegate mode "${mode}" for harness "${harnessName}". Available: ${[...templates.keys()].sort().join(', ')}`,
+		);
 	const task = opts.task || template.defaultTask;
 	if (!task) throw new Error(`delegate mode "${mode}" requires a task`);
 
 	// concurrency guard
 	const maxGlobal = getMaxConcurrentGlobal();
 	const perHarnessCount = activeRuns.get(harnessName) ?? 0;
-	if (maxGlobal > 0 && globalActiveRuns >= maxGlobal) throw new Error('another delegate run is already in progress (global limit)');
+	if (maxGlobal > 0 && globalActiveRuns >= maxGlobal)
+		throw new Error('another delegate run is already in progress (global limit)');
 	// per-harness limit if configured as object
 	const perHarnessLimit = (() => {
 		const mc = config.maxConcurrent as unknown as { perHarness?: Record<string, number> };
-		if (mc && typeof mc === 'object' && mc.perHarness && typeof mc.perHarness[harnessName] === 'number') return mc.perHarness[harnessName]!;
+		if (mc && typeof mc === 'object' && mc.perHarness && typeof mc.perHarness[harnessName] === 'number')
+			return mc.perHarness[harnessName]!;
 		return maxGlobal;
 	})();
-	if (perHarnessLimit > 0 && perHarnessCount >= perHarnessLimit) throw new Error(`another ${harnessName} run is already in progress`);
+	if (perHarnessLimit > 0 && perHarnessCount >= perHarnessLimit)
+		throw new Error(`another ${harnessName} run is already in progress`);
 	activeRuns.set(harnessName, perHarnessCount + 1);
 	globalActiveRuns++;
 	const release = () => {
@@ -317,11 +392,15 @@ async function delegate(
 	let scopeText: string | null = opts.scope ?? null;
 	if (opts.scope === 'diff') {
 		const diff = await pi.exec('git', ['diff', 'HEAD'], { cwd: ctx.cwd });
-		scopeText = diff.stdout ? `Current git diff (working tree vs HEAD):\n${diff.stdout}` : 'No git diff vs HEAD (working tree clean).';
+		scopeText = diff.stdout
+			? `Current git diff (working tree vs HEAD):\n${diff.stdout}`
+			: 'No git diff vs HEAD (working tree clean).';
 	} else if (opts.scope === 'pr' || opts.pr) {
 		const target = opts.pr ?? '';
 		const pr = await pi.exec('gh', target ? ['pr', 'diff', target] : ['pr', 'diff'], { cwd: ctx.cwd });
-		scopeText = pr.stdout ? `Pull request diff (${target || 'current branch'}):\n${pr.stdout}` : `Could not resolve the PR diff${pr.stderr ? ` — ${pr.stderr.trim().slice(0, 300)}` : ''}.`;
+		scopeText = pr.stdout
+			? `Pull request diff (${target || 'current branch'}):\n${pr.stdout}`
+			: `Could not resolve the PR diff${pr.stderr ? ` — ${pr.stderr.trim().slice(0, 300)}` : ''}.`;
 	}
 
 	// permission: normalized, danger requires explicit per-call allowDangerous:true
@@ -330,7 +409,9 @@ async function delegate(
 	const isNativeDanger = !!nativePerm && ['bypassPermissions', 'danger-full-access', 'danger'].includes(nativePerm);
 	if (template.permission === 'danger' || isNativeDanger) {
 		if (opts.allowDangerous !== true) {
-			throw new Error(`template "${mode}" requires danger permission — pass allowDangerous:true to run it (never a default)`);
+			throw new Error(
+				`template "${mode}" requires danger permission — pass allowDangerous:true to run it (never a default)`,
+			);
 		}
 		permission = 'danger';
 	} else if (opts.allowDangerous === true) {
@@ -352,7 +433,11 @@ async function delegate(
 			cwd: ctx.cwd,
 			permission,
 			model,
-			maxBudgetUsd: opts.maxBudgetUsd ?? template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd,
+			maxBudgetUsd:
+				opts.maxBudgetUsd ??
+				template.maxBudgetUsd ??
+				config.maxBudgetUsd ??
+				config.harnesses[harnessName]?.maxBudgetUsd,
 			signal: opts.signal,
 			timeoutMs: config.harnesses[harnessName]?.timeoutMs ?? config.timeoutMs,
 			resumeSessionId: opts.sessionId,
@@ -399,11 +484,16 @@ async function delegate(
 	}
 	release();
 
-	if (result.isError && !result.result && !result.streamedText) throw new Error(`${harnessName} reported an error and produced no output`);
+	if (result.isError && !result.result && !result.streamedText)
+		throw new Error(`${harnessName} reported an error and produced no output`);
 
 	const actualModel = result.model ?? model ?? null;
-	const promptTokens = result.usage === null ? null : result.usage.inputTokens + result.usage.cacheCreationInputTokens + result.usage.cacheReadInputTokens;
-	const contextPercent = promptTokens !== null && result.contextWindow ? (promptTokens / result.contextWindow) * 100 : null;
+	const promptTokens =
+		result.usage === null
+			? null
+			: result.usage.inputTokens + result.usage.cacheCreationInputTokens + result.usage.cacheReadInputTokens;
+	const contextPercent =
+		promptTokens !== null && result.contextWindow ? (promptTokens / result.contextWindow) * 100 : null;
 
 	const file = saveOutput(
 		harnessName,
@@ -472,10 +562,26 @@ interface PendingReport {
 	details: Record<string, unknown>;
 }
 let pendingReport: PendingReport | null = null;
-function injectReport(_ctx: ExtensionContext, opts: { harness: string; mode: string; metrics: string; body: string; file?: string; sessionId?: string }): void {
+function injectReport(
+	_ctx: ExtensionContext,
+	opts: { harness: string; mode: string; metrics: string; body: string; file?: string; sessionId?: string },
+): void {
 	pendingReport = {
-		content: buildReportContent({ harness: opts.harness, mode: opts.mode, metrics: opts.metrics, body: opts.body, file: opts.file, sessionId: opts.sessionId }),
-		details: { harness: opts.harness, mode: opts.mode, file: opts.file, sessionId: opts.sessionId, metrics: opts.metrics },
+		content: buildReportContent({
+			harness: opts.harness,
+			mode: opts.mode,
+			metrics: opts.metrics,
+			body: opts.body,
+			file: opts.file,
+			sessionId: opts.sessionId,
+		}),
+		details: {
+			harness: opts.harness,
+			mode: opts.mode,
+			file: opts.file,
+			sessionId: opts.sessionId,
+			metrics: opts.metrics,
+		},
 	};
 }
 
@@ -498,17 +604,61 @@ export default function (pi: ExtensionAPI) {
 			'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission).',
 		],
 		parameters: Type.Object({
-			harness: Type.Optional(Type.String({ description: 'Harness to use: claude, codex, opencode, amp (aliases: omp). Defaults to config defaultHarness.' })),
+			harness: Type.Optional(
+				Type.String({
+					description:
+						'Harness to use: claude, codex, opencode, amp (aliases: omp). Defaults to config defaultHarness.',
+				}),
+			),
 			task: Type.String({ description: 'The task/intent to delegate. Be specific.' }),
-			mode: Type.Optional(Type.String({ description: 'Template/mode to run: review, plan, implement, security-audit, docs, general, or custom. Defaults to config defaultMode.' })),
-			scope: Type.Optional(Type.String({ description: 'Restrict the work: diff (git diff), pr (PR diff), comma/space-separated path list, or omit for whole repo.' })),
-			model: Type.Optional(Type.String({ description: 'Model (e.g. sonnet, opus, gpt-5). Defaults to template/config.' })),
+			mode: Type.Optional(
+				Type.String({
+					description:
+						'Template/mode to run: review, plan, implement, security-audit, docs, general, or custom. Defaults to config defaultMode.',
+				}),
+			),
+			scope: Type.Optional(
+				Type.String({
+					description:
+						'Restrict the work: diff (git diff), pr (PR diff), comma/space-separated path list, or omit for whole repo.',
+				}),
+			),
+			model: Type.Optional(
+				Type.String({ description: 'Model (e.g. sonnet, opus, gpt-5). Defaults to template/config.' }),
+			),
 			maxBudgetUsd: Type.Optional(Type.Number({ description: 'Hard spend cap in USD for the run.' })),
-			sessionId: Type.Optional(Type.String({ description: 'Resume an existing delegated session (pass its session id from a previous run details).' })),
-			allowDangerous: Type.Optional(Type.Boolean({ description: 'Escalate to danger permission (unrestricted). Only with explicit user approval.' })),
+			sessionId: Type.Optional(
+				Type.String({
+					description:
+						'Resume an existing delegated session (pass its session id from a previous run details).',
+				}),
+			),
+			allowDangerous: Type.Optional(
+				Type.Boolean({
+					description: 'Escalate to danger permission (unrestricted). Only with explicit user approval.',
+				}),
+			),
 			pr: Type.Optional(Type.String({ description: 'GitHub PR number/URL (alternative to scope pr).' })),
 		}),
-		async execute(_toolCallId: string, params: { harness?: string; task: string; mode?: string; scope?: string; model?: string; maxBudgetUsd?: number; allowDangerous?: boolean; sessionId?: string; pr?: string }, signal: AbortSignal | undefined, onUpdate: ((u: { content: { type: string; text: string }[]; details: { progress: number } }) => void) | undefined, ctx: ExtensionContext) {
+		async execute(
+			_toolCallId: string,
+			params: {
+				harness?: string;
+				task: string;
+				mode?: string;
+				scope?: string;
+				model?: string;
+				maxBudgetUsd?: number;
+				allowDangerous?: boolean;
+				sessionId?: string;
+				pr?: string;
+			},
+			signal: AbortSignal | undefined,
+			onUpdate:
+				| ((u: { content: { type: string; text: string }[]; details: { progress: number } }) => void)
+				| undefined,
+			ctx: ExtensionContext,
+		) {
 			const config = loadConfig();
 			const feed: string[] = [];
 			let liveTail = '';
@@ -520,7 +670,8 @@ export default function (pi: ExtensionAPI) {
 				if (now - lastPushAt < THROTTLE_MS) return;
 				lastPushAt = now;
 				const lines: string[] = [...feed.slice(-6)];
-				if (thinkingChars > 0) lines.push(config.inspectThinking ? `💭 thinking… (${thinkingChars} chars)` : '💭 thinking…');
+				if (thinkingChars > 0)
+					lines.push(config.inspectThinking ? `💭 thinking… (${thinkingChars} chars)` : '💭 thinking…');
 				if (liveTail) lines.push(`✍ ${liveTail}`);
 				if (lines.length === 0) return;
 				onUpdate?.({ content: [{ type: 'text', text: lines.join('\n') }], details: { progress: 0.5 } });
@@ -553,23 +704,43 @@ export default function (pi: ExtensionAPI) {
 			});
 			const summary = summarize(content);
 			const resumed = details.resumed ? ' · resumed' : '';
-			const head = result.isError ? `⚠ ${details.harness} reported an error` : `${details.harness} ${details.mode} (${result.numTurns} turn(s), $${result.totalCostUsd.toFixed(3)})${resumed}`;
+			const head = result.isError
+				? `⚠ ${details.harness} reported an error`
+				: `${details.harness} ${details.mode} (${result.numTurns} turn(s), $${result.totalCostUsd.toFixed(3)})${resumed}`;
 			const body = result.isError ? `\n${summary.text}` : `\n\n${summary.text}`;
 			const footer = summary.truncated ? `\nFull output: ${details.file}` : `\nTranscript: ${details.file}`;
 			(details as Record<string, unknown>).markdown = summary.text;
-			return { content: [{ type: 'text', text: `${head}${body}${footer}` }], details, usage: result.usage ? mapClaudeUsage({ ...result.usage, totalCostUsd: result.totalCostUsd }) : undefined };
+			return {
+				content: [{ type: 'text', text: `${head}${body}${footer}` }],
+				details,
+				usage: result.usage
+					? mapClaudeUsage({ ...result.usage, totalCostUsd: result.totalCostUsd })
+					: undefined,
+			};
 		},
-		renderCall(args: unknown, theme: { fg: (c: string, s: string) => string; bg: (c: string, s: string) => string }) {
+		renderCall(
+			args: unknown,
+			theme: { fg: (c: string, s: string) => string; bg: (c: string, s: string) => string },
+		) {
 			const params = args as { harness?: string; mode?: string; task?: string };
 			const harness = params.harness ?? 'delegate';
 			const mode = params.mode ?? 'general';
 			const task = params.task ?? '';
 			const taskStr = task ? ` — ${task.length > 60 ? `${task.slice(0, 59)}…` : task}` : '';
-			return new Text(theme.fg('accent', `${harness} ${mode}`) + theme.fg('dim', taskStr), 1, 1, (s) => theme.bg('toolPendingBg', s));
+			return new Text(theme.fg('accent', `${harness} ${mode}`) + theme.fg('dim', taskStr), 1, 1, (s) =>
+				theme.bg('toolPendingBg', s),
+			);
 		},
-		renderResult(result: { content?: { type: string; text: string }[]; details?: Record<string, unknown> }, options: { isPartial: boolean }, theme: { fg: (c: string, s: string) => string; bg: (c: string, s: string) => string }) {
+		renderResult(
+			result: { content?: { type: string; text: string }[]; details?: Record<string, unknown> },
+			options: { isPartial: boolean },
+			theme: { fg: (c: string, s: string) => string; bg: (c: string, s: string) => string },
+		) {
 			if (options.isPartial) {
-				const text = (result.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+				const text = (result.content ?? [])
+					.filter((c) => c.type === 'text')
+					.map((c) => c.text)
+					.join('\n');
 				return new Text(text, 1, 1, (s) => theme.bg('toolPendingBg', s));
 			}
 			const details = (result.details ?? {}) as Record<string, unknown>;
@@ -582,11 +753,23 @@ export default function (pi: ExtensionAPI) {
 			const file = typeof details.file === 'string' ? details.file : null;
 			const sessionId = typeof details.sessionId === 'string' ? details.sessionId : null;
 			const container = new Container();
-			container.addChild(new Text(theme.fg(isError ? 'error' : 'accent', `${harness} ${mode}`) + theme.fg('dim', ` · ${turns} turn(s) · `) + theme.fg('warning', `$${cost.toFixed(3)}`) + (resumed ? theme.fg('dim', ' · resumed') : ''), 1, 1));
+			container.addChild(
+				new Text(
+					theme.fg(isError ? 'error' : 'accent', `${harness} ${mode}`) +
+						theme.fg('dim', ` · ${turns} turn(s) · `) +
+						theme.fg('warning', `$${cost.toFixed(3)}`) +
+						(resumed ? theme.fg('dim', ' · resumed') : ''),
+					1,
+					1,
+				),
+			);
 			const md = typeof details.markdown === 'string' && details.markdown ? details.markdown : null;
 			if (md) container.addChild(new Markdown(md, 1, 1, getMarkdownTheme()));
 			else {
-				const text = (result.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+				const text = (result.content ?? [])
+					.filter((c) => c.type === 'text')
+					.map((c) => c.text)
+					.join('\n');
 				container.addChild(new Text(text, 1, 1));
 			}
 			const foot: string[] = [];
@@ -603,15 +786,38 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: 'claude_delegate',
 		label: 'Claude Delegate (deprecated)',
-		description: 'Deprecated alias for delegate{harness:claude}. Use delegate tool with harness:claude instead. ' + (delegateToolDef as { description: string }).description,
+		description:
+			'Deprecated alias for delegate{harness:claude}. Use delegate tool with harness:claude instead. ' +
+			(delegateToolDef as { description: string }).description,
 		promptSnippet: 'Delegate a subtask to Claude Code (deprecated alias)',
 		promptGuidelines: [...(delegateToolDef as unknown as { promptGuidelines: string[] }).promptGuidelines],
 		parameters: (delegateToolDef as { parameters: unknown }).parameters as never,
-		async execute(toolCallId: string, params: { harness?: string; task: string; mode?: string; scope?: string; model?: string; maxBudgetUsd?: number; allowDangerous?: boolean; sessionId?: string; pr?: string }, signal: AbortSignal | undefined, onUpdate: never, ctx: ExtensionContext) {
-			return (delegateToolDef as unknown as { execute: (a: string, b: unknown, c: unknown, d: unknown, e: unknown) => Promise<unknown> }).execute(toolCallId, { ...params, harness: 'claude' }, signal, onUpdate, ctx);
+		async execute(
+			toolCallId: string,
+			params: {
+				harness?: string;
+				task: string;
+				mode?: string;
+				scope?: string;
+				model?: string;
+				maxBudgetUsd?: number;
+				allowDangerous?: boolean;
+				sessionId?: string;
+				pr?: string;
+			},
+			signal: AbortSignal | undefined,
+			onUpdate: never,
+			ctx: ExtensionContext,
+		) {
+			return (
+				delegateToolDef as unknown as {
+					execute: (a: string, b: unknown, c: unknown, d: unknown, e: unknown) => Promise<unknown>;
+				}
+			).execute(toolCallId, { ...params, harness: 'claude' }, signal, onUpdate, ctx);
 		},
 		renderCall: (delegateToolDef as unknown as { renderCall: (a: unknown, b: unknown) => unknown }).renderCall,
-		renderResult: (delegateToolDef as unknown as { renderResult: (a: unknown, b: unknown, c: unknown) => unknown }).renderResult,
+		renderResult: (delegateToolDef as unknown as { renderResult: (a: unknown, b: unknown, c: unknown) => unknown })
+			.renderResult,
 	} as unknown as Parameters<typeof pi.registerTool>[0]);
 
 	// ── Commands ─────────────────────────────────────────────────────────────
@@ -622,7 +828,10 @@ export default function (pi: ExtensionAPI) {
 				activeOverlay.show();
 				activeOverlay.focus();
 			} else {
-				ctx.ui.notify?.('No active delegate run to show — start one with /delegate <harness> <mode> <prompt>', 'info');
+				ctx.ui.notify?.(
+					'No active delegate run to show — start one with /delegate <harness> <mode> <prompt>',
+					'info',
+				);
 			}
 			return;
 		}
@@ -656,11 +865,23 @@ export default function (pi: ExtensionAPI) {
 		const templates = loadTemplates(ctx.cwd, harnessName);
 		const resolved = resolveDefaults(parsed, templates);
 		const template = parsed.mode ? templates.get(parsed.mode) : undefined;
-		const isDanger = template?.permission === 'danger' || (template?.nativePermission ? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission) : false);
+		const isDanger =
+			template?.permission === 'danger' ||
+			(template?.nativePermission
+				? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission)
+				: false);
 
 		if (!resolved) {
-			if (parsed.mode) ctx.ui.notify?.(`/delegate ${parsed.mode} <what to do> — give a prompt for the "${parsed.mode}" mode`, 'warning');
-			else ctx.ui.notify?.('Usage: /delegate [--harness=claude|codex|opencode|amp] [--mode=…] [--model=…] [--scope=…] <prompt>', 'warning');
+			if (parsed.mode)
+				ctx.ui.notify?.(
+					`/delegate ${parsed.mode} <what to do> — give a prompt for the "${parsed.mode}" mode`,
+					'warning',
+				);
+			else
+				ctx.ui.notify?.(
+					'Usage: /delegate [--harness=claude|codex|opencode|amp] [--mode=…] [--model=…] [--scope=…] <prompt>',
+					'warning',
+				);
 			return;
 		}
 		const modeForDisplay = parsed.mode ?? 'general';
@@ -685,7 +906,10 @@ export default function (pi: ExtensionAPI) {
 			chipLastPush = now;
 			const theme = ctx.ui.theme;
 			const activity = chipActivity ? ` ${chipActivity}` : theme.fg('dim', ' running…');
-			ctx.ui.setStatus('delegate', theme.fg('accent', '●') + theme.fg('dim', ` ${harnessForDisplay} ${modeForDisplay}`) + activity);
+			ctx.ui.setStatus(
+				'delegate',
+				theme.fg('accent', '●') + theme.fg('dim', ` ${harnessForDisplay} ${modeForDisplay}`) + activity,
+			);
 		};
 		const onActivity = (ev: ActivityEvent) => {
 			if (ev.kind === 'tool_input') {
@@ -695,7 +919,8 @@ export default function (pi: ExtensionAPI) {
 			} else if (ev.kind === 'tool_result') {
 				if (chipActivity.startsWith('▶')) chipActivity += ev.isError ? ' ✗' : ' ✓';
 				const last = feed.length - 1;
-				if (last >= 0 && feed[last].kind === 'tool') feed[last] = { ...feed[last], ok: ev.isError ? false : true };
+				if (last >= 0 && feed[last].kind === 'tool')
+					feed[last] = { ...feed[last], ok: ev.isError ? false : true };
 			} else if (ev.kind === 'thinking') {
 				chipActivity = '💭 thinking…';
 				thinkingChars += ev.chars;
@@ -741,7 +966,11 @@ export default function (pi: ExtensionAPI) {
 						closeWindow = () => done(undefined);
 						return progressWindow(tui, theme, {
 							mode: `${harnessForDisplay} ${modeForDisplay}`,
-							model: parsed.model ?? template?.model ?? loadConfig().harnesses[harnessName]?.model ?? loadConfig().model,
+							model:
+								parsed.model ??
+								template?.model ??
+								loadConfig().harnesses[harnessName]?.model ??
+								loadConfig().model,
 							startedAt: Date.now(),
 							getEntries,
 							dangerous: isDanger,
@@ -755,7 +984,15 @@ export default function (pi: ExtensionAPI) {
 							},
 						});
 					},
-					{ overlay: true, overlayOptions: { width: '70%', maxHeight: '60%', anchor: 'top-center' }, onHandle: (h) => { overlayHandle = h; activeOverlay = { show: () => h.setHidden(false), focus: () => h.focus(), runId }; h.focus(); } },
+					{
+						overlay: true,
+						overlayOptions: { width: '70%', maxHeight: '60%', anchor: 'top-center' },
+						onHandle: (h) => {
+							overlayHandle = h;
+							activeOverlay = { show: () => h.setHidden(false), focus: () => h.focus(), runId };
+							h.focus();
+						},
+					},
 				)
 				.catch(() => {});
 			result = await run;
@@ -768,7 +1005,11 @@ export default function (pi: ExtensionAPI) {
 		if (cancelled || !result) {
 			if (ctx.hasUI) ctx.ui.setStatus('delegate', undefined);
 			const message = runState.error ? runState.error.message : cancelled ? 'cancelled' : 'delegation failed';
-			if (ctx.hasUI) ctx.ui.notify(`delegate ${cancelled ? 'cancelled' : 'failed'}: ${message}`, cancelled ? 'warning' : 'error');
+			if (ctx.hasUI)
+				ctx.ui.notify(
+					`delegate ${cancelled ? 'cancelled' : 'failed'}: ${message}`,
+					cancelled ? 'warning' : 'error',
+				);
 			else process.stderr.write(`${message}\n`);
 			return;
 		}
@@ -777,28 +1018,69 @@ export default function (pi: ExtensionAPI) {
 		const file = (details.file as string) ?? null;
 		const sessionId = (details.sessionId as string) ?? null;
 		const resumeHint = sessionId ? ` · resume: /delegate --resume=${sessionId} <prompt>` : '';
-		const usage = details.usage as { inputTokens?: number; outputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number } | undefined;
-		const promptTokens = usage ? (usage.inputTokens ?? 0) + (usage.cacheCreationInputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0) : 0;
+		const usage = details.usage as
+			| {
+					inputTokens?: number;
+					outputTokens?: number;
+					cacheCreationInputTokens?: number;
+					cacheReadInputTokens?: number;
+			  }
+			| undefined;
+		const promptTokens = usage
+			? (usage.inputTokens ?? 0) + (usage.cacheCreationInputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0)
+			: 0;
 		const metrics = formatMetrics({
 			numTurns: (details.numTurns as number) ?? 0,
 			totalCostUsd: (details.totalCostUsd as number) ?? 0,
 			promptTokens,
 			contextPercent: typeof details.contextPercent === 'number' ? (details.contextPercent as number) : null,
-			durationMs: typeof details.durationMs === 'number' && details.durationMs !== null ? (details.durationMs as number) : null,
+			durationMs:
+				typeof details.durationMs === 'number' && details.durationMs !== null
+					? (details.durationMs as number)
+					: null,
 		});
-		injectReport(ctx, { harness: details.harness as string, mode: details.mode as string, metrics, body: summary.text, file: file ?? undefined, sessionId: sessionId ?? undefined });
+		injectReport(ctx, {
+			harness: details.harness as string,
+			mode: details.mode as string,
+			metrics,
+			body: summary.text,
+			file: file ?? undefined,
+			sessionId: sessionId ?? undefined,
+		});
 		if (ctx.hasUI) {
 			ctx.ui.setStatus('delegate', undefined);
-			ctx.ui.notify(`${details.harness} ${details.mode} done — ${metrics}${resumeHint} · transcript: ${file}`, 'info');
+			ctx.ui.notify(
+				`${details.harness} ${details.mode} done — ${metrics}${resumeHint} · transcript: ${file}`,
+				'info',
+			);
 		} else process.stdout.write(`${summary.text}\n`);
 	};
 
-	pi.registerCommand('delegate', { description: 'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>', handler: makeHandler() });
-	pi.registerCommand('claude', { description: 'Alias for /delegate --harness=claude. Usage: /claude [--mode=...] <prompt>', handler: makeHandler('claude') });
-	pi.registerCommand('codex', { description: 'Alias for /delegate --harness=codex. Usage: /codex [--mode=...] <prompt>', handler: makeHandler('codex') });
-	pi.registerCommand('opencode', { description: 'Alias for /delegate --harness=opencode. Usage: /opencode [--mode=...] <prompt>', handler: makeHandler('opencode') });
-	pi.registerCommand('amp', { description: 'Alias for /delegate --harness=amp. Usage: /amp [--mode=...] <prompt>', handler: makeHandler('amp') });
-	pi.registerCommand('omp', { description: 'Alias for /delegate --harness=amp (omp compat). Usage: /omp [--mode=...] <prompt>', handler: makeHandler('amp') });
+	pi.registerCommand('delegate', {
+		description:
+			'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>',
+		handler: makeHandler(),
+	});
+	pi.registerCommand('claude', {
+		description: 'Alias for /delegate --harness=claude. Usage: /claude [--mode=...] <prompt>',
+		handler: makeHandler('claude'),
+	});
+	pi.registerCommand('codex', {
+		description: 'Alias for /delegate --harness=codex. Usage: /codex [--mode=...] <prompt>',
+		handler: makeHandler('codex'),
+	});
+	pi.registerCommand('opencode', {
+		description: 'Alias for /delegate --harness=opencode. Usage: /opencode [--mode=...] <prompt>',
+		handler: makeHandler('opencode'),
+	});
+	pi.registerCommand('amp', {
+		description: 'Alias for /delegate --harness=amp. Usage: /amp [--mode=...] <prompt>',
+		handler: makeHandler('amp'),
+	});
+	pi.registerCommand('omp', {
+		description: 'Alias for /delegate --harness=amp (omp compat). Usage: /omp [--mode=...] <prompt>',
+		handler: makeHandler('amp'),
+	});
 
 	pi.on('input', async (event, ctx) => {
 		if (event.source === 'extension') return { action: 'continue' };

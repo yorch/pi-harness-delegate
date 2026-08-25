@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { parseDelegateCommand } from '../extensions/command.ts';
 
 const MODES = new Set(['review', 'plan', 'implement', 'general']);

@@ -8,8 +8,8 @@
  *     re-show with /delegate watch)
  */
 
-import { Key, matchesKey, truncateToWidth, visibleWidth, type Component, type TUI } from '@earendil-works/pi-tui';
 import type { Theme } from '@earendil-works/pi-coding-agent';
+import { type Component, Key, matchesKey, type TUI, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPIN_INTERVAL_MS = 100;
@@ -87,7 +87,9 @@ export function progressWindow(tui: TUI, theme: Theme, opts: ProgressWindowOptio
 			// title bar: ⠋ <harness> <mode> · <model> · ⏱ elapsed
 			const harness = opts.harness ?? 'delegate';
 			const title = `${SPINNER[frame % SPINNER.length]} ${harness} ${opts.mode}`;
-			const status = [opts.model ?? '', `⏱ ${fmtElapsed(Date.now() - opts.startedAt)}`].filter(Boolean).join(' · ');
+			const status = [opts.model ?? '', `⏱ ${fmtElapsed(Date.now() - opts.startedAt)}`]
+				.filter(Boolean)
+				.join(' · ');
 			const titleStr = status ? `${title} · ${status}` : title;
 			const dash = '─'.repeat(Math.max(1, inner - visibleWidth(titleStr) - 2));
 			out.push(theme.fg('accent', `╭─ ${titleStr} ${dash}─╮`));

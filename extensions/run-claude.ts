@@ -1,6 +1,7 @@
 /** @deprecated use extensions/runner.ts + harnesses/claude.ts directly */
-import type { ActivityEvent, StreamedResult } from './harnesses/types.ts';
+
 import { claudeHarness } from './harnesses/claude.ts';
+import type { ActivityEvent, StreamedResult } from './harnesses/types.ts';
 import { runHarness } from './runner.ts';
 
 export interface RunClaudeOptions {
@@ -31,9 +32,17 @@ function mapPerm(mode: string): 'readonly' | 'edit' | 'danger' {
 
 export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
 	const perm = mapPerm(opts.permissionMode);
-	const nativePerm = perm === 'readonly' && opts.permissionMode !== 'plan' ? opts.permissionMode : perm === 'danger' && opts.permissionMode !== 'bypassPermissions' ? opts.permissionMode : undefined;
+	const nativePerm =
+		perm === 'readonly' && opts.permissionMode !== 'plan'
+			? opts.permissionMode
+			: perm === 'danger' && opts.permissionMode !== 'bypassPermissions'
+				? opts.permissionMode
+				: undefined;
 	// normalize: if caller passed a non-standard mode, preserve as native
-	const isStandard = opts.permissionMode === 'plan' || opts.permissionMode === 'acceptEdits' || opts.permissionMode === 'bypassPermissions';
+	const isStandard =
+		opts.permissionMode === 'plan' ||
+		opts.permissionMode === 'acceptEdits' ||
+		opts.permissionMode === 'bypassPermissions';
 	return runHarness({
 		harness: claudeHarness,
 		prompt: opts.prompt,

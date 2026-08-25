@@ -71,7 +71,10 @@ export function buildReportContent(opts: {
 	const header = `## ${harness} ${opts.mode} (${opts.metrics})`;
 	const foot: string[] = [];
 	if (opts.file) foot.push(`transcript: ${opts.file}`);
-	if (opts.sessionId) foot.push(`resume: \`/delegate --harness=${opts.harness} --resume=${opts.sessionId} <prompt>\` (or /${opts.harness} --resume=${opts.sessionId})`);
+	if (opts.sessionId)
+		foot.push(
+			`resume: \`/delegate --harness=${opts.harness} --resume=${opts.sessionId} <prompt>\` (or /${opts.harness} --resume=${opts.sessionId})`,
+		);
 	return [header, '', opts.body, foot.length > 0 ? `\n_${foot.join(' · ')}_` : ''].join('\n');
 }
 
@@ -138,37 +141,52 @@ export function collectActivityLog(events: ActivityEvent[]): string[] {
 }
 
 /** Full transcript written to the outputs dir: metadata + activity + output. */
-export function buildTranscript(opts: {
-	harness?: string;
-	mode: string;
-	permission?: string;
-	permissionMode?: string;
-	nativePermission?: string;
-	model: string | null;
-	cwd: string;
-	sessionId: string | null;
-	resumed: boolean;
-	numTurns: number;
-	totalCostUsd: number;
-	isError: boolean;
-	stopReason: string | null;
-	durationMs: number | null;
-	usage: { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number } | null;
-	contextPercent: number | null;
-	contextWindow: number | null;
-	activityLog: string[];
-	output: string;
-} & Record<string, unknown>): string {
+export function buildTranscript(
+	opts: {
+		harness?: string;
+		mode: string;
+		permission?: string;
+		permissionMode?: string;
+		nativePermission?: string;
+		model: string | null;
+		cwd: string;
+		sessionId: string | null;
+		resumed: boolean;
+		numTurns: number;
+		totalCostUsd: number;
+		isError: boolean;
+		stopReason: string | null;
+		durationMs: number | null;
+		usage: {
+			inputTokens: number;
+			outputTokens: number;
+			cacheCreationInputTokens: number;
+			cacheReadInputTokens: number;
+		} | null;
+		contextPercent: number | null;
+		contextWindow: number | null;
+		activityLog: string[];
+		output: string;
+	} & Record<string, unknown>,
+): string {
 	const harness = (opts.harness as string | undefined) ?? 'claude';
-	const permissionRaw = (opts.permission as string | undefined) ?? (opts.permissionMode as string | undefined) ?? 'edit';
+	const permissionRaw =
+		(opts.permission as string | undefined) ?? (opts.permissionMode as string | undefined) ?? 'edit';
 	let permission = permissionRaw;
 	let nativePermission = opts.nativePermission as string | undefined;
 	// map legacy permissionMode to normalized if needed
 	if ((opts as Record<string, unknown>).permissionMode && !opts.permission) {
 		const pm = (opts as Record<string, unknown>).permissionMode as string;
-		if (pm === 'plan') { permission = 'readonly'; nativePermission = pm; }
-		else if (pm === 'bypassPermissions') { permission = 'danger'; nativePermission = pm; }
-		else { permission = 'edit'; nativePermission = pm; }
+		if (pm === 'plan') {
+			permission = 'readonly';
+			nativePermission = pm;
+		} else if (pm === 'bypassPermissions') {
+			permission = 'danger';
+			nativePermission = pm;
+		} else {
+			permission = 'edit';
+			nativePermission = pm;
+		}
 	}
 	const u = opts.usage;
 	const tokens = u
@@ -225,7 +243,12 @@ export function buildClaudeTranscript(opts: {
 	isError: boolean;
 	stopReason: string | null;
 	durationMs: number | null;
-	usage: { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number } | null;
+	usage: {
+		inputTokens: number;
+		outputTokens: number;
+		cacheCreationInputTokens: number;
+		cacheReadInputTokens: number;
+	} | null;
 	contextPercent: number | null;
 	contextWindow: number | null;
 	activityLog: string[];
@@ -234,7 +257,12 @@ export function buildClaudeTranscript(opts: {
 	return buildTranscript({
 		harness: 'claude',
 		mode: opts.mode,
-		permission: opts.permissionMode === 'plan' ? 'readonly' : opts.permissionMode === 'bypassPermissions' ? 'danger' : 'edit',
+		permission:
+			opts.permissionMode === 'plan'
+				? 'readonly'
+				: opts.permissionMode === 'bypassPermissions'
+					? 'danger'
+					: 'edit',
 		nativePermission: opts.permissionMode,
 		model: opts.model,
 		cwd: opts.cwd,

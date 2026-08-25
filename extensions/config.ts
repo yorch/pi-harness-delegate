@@ -61,12 +61,14 @@ export function loadConfig(): DelegateConfig {
 		// Legacy claudeDelegate -> delegate.harnesses.claude migration
 		if (settings.claudeDelegate && !settings.delegate) {
 			const c = settings.claudeDelegate as Partial<DelegateConfig>;
-			if (typeof c.model === 'string') cfg.harnesses['claude'] = { ...(cfg.harnesses['claude'] ?? {}), model: c.model };
+			if (typeof c.model === 'string')
+				cfg.harnesses['claude'] = { ...(cfg.harnesses['claude'] ?? {}), model: c.model };
 			if (typeof c.timeoutMs === 'number' && c.timeoutMs > 0) cfg.timeoutMs = c.timeoutMs;
 			if (typeof c.defaultMode === 'string') cfg.defaultMode = c.defaultMode;
 			if (typeof c.allowDangerous === 'boolean') cfg.allowDangerous = c.allowDangerous;
 			if (typeof c.inspectThinking === 'boolean') cfg.inspectThinking = c.inspectThinking;
-			if (typeof (c as DelegateConfig).maxBudgetUsd === 'number' && (c as DelegateConfig).maxBudgetUsd! > 0) cfg.maxBudgetUsd = (c as DelegateConfig).maxBudgetUsd;
+			if (typeof (c as DelegateConfig).maxBudgetUsd === 'number' && (c as DelegateConfig).maxBudgetUsd! > 0)
+				cfg.maxBudgetUsd = (c as DelegateConfig).maxBudgetUsd;
 			if (typeof c.autoDelegateHints === 'boolean') cfg.autoDelegateHints = c.autoDelegateHints;
 			if ((c as DelegateConfig).modelAliases && typeof (c as DelegateConfig).modelAliases === 'object') {
 				for (const [k, v] of Object.entries((c as DelegateConfig).modelAliases!)) {
@@ -90,7 +92,8 @@ export function loadConfig(): DelegateConfig {
 			if (typeof c.maxTranscripts === 'number' && c.maxTranscripts >= 0) cfg.maxTranscripts = c.maxTranscripts;
 			if (c.harnesses && typeof c.harnesses === 'object') {
 				for (const [k, v] of Object.entries(c.harnesses)) {
-					if (v && typeof v === 'object') cfg.harnesses[k] = { ...(cfg.harnesses[k] ?? {}), ...(v as HarnessConfig) };
+					if (v && typeof v === 'object')
+						cfg.harnesses[k] = { ...(cfg.harnesses[k] ?? {}), ...(v as HarnessConfig) };
 				}
 			}
 			// also map harnesses.claude if any
@@ -143,7 +146,12 @@ export function loadConfig(): DelegateConfig {
 	return cfg;
 }
 
-export function resolveModelForHarness(cfg: DelegateConfig, harness: string, model?: string, templateModel?: string): string | undefined {
+export function resolveModelForHarness(
+	cfg: DelegateConfig,
+	harness: string,
+	model?: string,
+	templateModel?: string,
+): string | undefined {
 	const resolve = (m?: string) => (m ? (cfg.modelAliases[m] ?? m) : undefined);
 	return resolve(model) ?? resolve(templateModel) ?? resolve(cfg.harnesses[harness]?.model) ?? resolve(cfg.model);
 }

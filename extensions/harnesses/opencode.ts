@@ -1,6 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Harness, BuildArgsOpts, NormalizedPermission, ParseOutcome, ParseState, StreamedResult } from './types.ts';
+import type {
+	BuildArgsOpts,
+	Harness,
+	NormalizedPermission,
+	ParseOutcome,
+	ParseState,
+	StreamedResult,
+} from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -38,10 +45,16 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
 	const typeStr = typeof o.type === 'string' ? o.type : '';
 
 	if (typeStr.includes('tool') || o.type === 'tool_use' || o.type === 'tool_result') {
-		const name = typeof o.name === 'string' ? o.name : typeof (o as Record<string, unknown>).tool === 'string' ? (o as Record<string, unknown>).tool as string : 'tool';
+		const name =
+			typeof o.name === 'string'
+				? o.name
+				: typeof (o as Record<string, unknown>).tool === 'string'
+					? ((o as Record<string, unknown>).tool as string)
+					: 'tool';
 		if (typeStr.includes('start') || o.type === 'tool_use') {
 			activities.push({ kind: 'tool_start', name });
-			if (isRecord(o.input)) activities.push({ kind: 'tool_input', name, input: o.input as Record<string, unknown> });
+			if (isRecord(o.input))
+				activities.push({ kind: 'tool_input', name, input: o.input as Record<string, unknown> });
 		} else if (typeStr.includes('result') || typeStr.includes('completed') || o.type === 'tool_result') {
 			activities.push({ kind: 'tool_result', isError: o.is_error === true || o.error === true });
 		}
@@ -56,7 +69,12 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
 	if (o.type === 'result' || o.type === 'completed' || o.type === 'done') {
 		const usage = isRecord(o.usage) ? o.usage : null;
 		const result: StreamedResult = {
-			result: typeof o.result === 'string' ? o.result : typeof o.output === 'string' ? o.output : state.streamedText + (streamedText ?? ''),
+			result:
+				typeof o.result === 'string'
+					? o.result
+					: typeof o.output === 'string'
+						? o.output
+						: state.streamedText + (streamedText ?? ''),
 			isError: o.is_error === true,
 			numTurns: typeof o.num_turns === 'number' ? o.num_turns : 0,
 			totalCostUsd: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : 0,

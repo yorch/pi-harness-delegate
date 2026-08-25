@@ -1,6 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Harness, BuildArgsOpts, NormalizedPermission, ParseOutcome, ParseState, StreamedResult } from './types.ts';
+import type {
+	BuildArgsOpts,
+	Harness,
+	NormalizedPermission,
+	ParseOutcome,
+	ParseState,
+	StreamedResult,
+} from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,7 +37,11 @@ export function parseClaudeLine(line: string, state: ParseState): ParseOutcome {
 		const delta = isRecord(ev.delta) ? ev.delta : undefined;
 		if (ev.type === 'content_block_delta' && delta?.type === 'text_delta' && typeof delta.text === 'string') {
 			streamedText = delta.text;
-		} else if (ev.type === 'content_block_delta' && delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+		} else if (
+			ev.type === 'content_block_delta' &&
+			delta?.type === 'thinking_delta' &&
+			typeof delta.thinking === 'string'
+		) {
 			activities.push({ kind: 'thinking', chars: delta.thinking.length });
 		} else if (ev.type === 'content_block_start' && isRecord(ev.content_block)) {
 			const cb = ev.content_block;
@@ -41,7 +52,11 @@ export function parseClaudeLine(line: string, state: ParseState): ParseOutcome {
 	} else if (o.type === 'assistant' && isRecord(o.message)) {
 		for (const block of Array.isArray(o.message.content) ? o.message.content : []) {
 			if (isRecord(block) && block.type === 'tool_use' && typeof block.name === 'string') {
-				activities.push({ kind: 'tool_input', name: block.name, input: isRecord(block.input) ? block.input : {} });
+				activities.push({
+					kind: 'tool_input',
+					name: block.name,
+					input: isRecord(block.input) ? block.input : {},
+				});
 			}
 		}
 	} else if (o.type === 'user' && isRecord(o.message)) {
@@ -82,8 +97,10 @@ export function parseClaudeLine(line: string, state: ParseState): ParseOutcome {
 				? {
 						inputTokens: typeof u.input_tokens === 'number' ? u.input_tokens : 0,
 						outputTokens: typeof u.output_tokens === 'number' ? u.output_tokens : 0,
-						cacheCreationInputTokens: typeof u.cache_creation_input_tokens === 'number' ? u.cache_creation_input_tokens : 0,
-						cacheReadInputTokens: typeof u.cache_read_input_tokens === 'number' ? u.cache_read_input_tokens : 0,
+						cacheCreationInputTokens:
+							typeof u.cache_creation_input_tokens === 'number' ? u.cache_creation_input_tokens : 0,
+						cacheReadInputTokens:
+							typeof u.cache_read_input_tokens === 'number' ? u.cache_read_input_tokens : 0,
 					}
 				: null,
 		};
@@ -107,7 +124,16 @@ export const claudeHarness: Harness = {
 	},
 	buildArgs(opts: BuildArgsOpts): string[] {
 		const mode = opts.nativePermission ?? PERMISSION_MAP[opts.permission] ?? 'acceptEdits';
-		const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-mode', mode];
+		const args = [
+			'-p',
+			opts.prompt,
+			'--output-format',
+			'stream-json',
+			'--verbose',
+			'--include-partial-messages',
+			'--permission-mode',
+			mode,
+		];
 		if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
 		else args.push('--no-session-persistence');
 		if (opts.model) args.push('--model', opts.model);

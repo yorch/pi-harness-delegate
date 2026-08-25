@@ -53,5 +53,8 @@ export function claudeDelegationHint(text: string, cfg: HintConfig): string | nu
 
 /** Remove the @harness prefix marker from the text before sending. */
 export function stripMarker(text: string): string {
-	return text.replace(/(?:^|\s)@(?:claude|codex|opencode|amp|delegate)\b/g, ' ').replace(/\s{2,}/g, ' ').trim();
+	return text
+		.replace(/(?:^|\s)@(?:claude|codex|opencode|amp|delegate)\b/g, ' ')
+		.replace(/\s{2,}/g, ' ')
+		.trim();
 }

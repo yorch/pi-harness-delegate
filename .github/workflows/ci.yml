@@ -2,17 +2,40 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+          fetch-depth: 0 # changesets diffs against base branch
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 26
+
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test
+      - run: node scripts/check-packables.mjs
+
+      # Fail PRs that touch publishable code without a changeset.
+      # Skipped on main (changesets already consumed) and on the
+      # version-packages PR itself (it *consumes* them, so it has none).
+      - name: Changeset present
+        if: >-
+          github.event_name == 'pull_request' &&
+          !startsWith(github.head_ref, 'changeset-release/')
+        run: bun changeset status --since=origin/${{ github.base_ref }}

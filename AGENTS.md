@@ -9,13 +9,18 @@ Guidance for AI coding agents working in this repository.
 ## Commands
 
 | Command | What it does |
-|---|---|
-| `npm run typecheck` | `tsc --noEmit` over `extensions/` (strict, `allowImportingTsExtensions`) |
-| `npm test` | `node --experimental-strip-types --test tests/**/*.test.ts` (62 tests, node:test) |
-| `npm publish --access public` | Publish to npm (unscoped — no --access flag needed for public) |
+| --- | --- |
+| `bun run typecheck` | `tsc --noEmit` over `extensions/` (strict, `allowImportingTsExtensions`) |
+| `bun test` | `node --experimental-strip-types --test tests/**/*.test.ts` (62 tests, node:test) |
+| `bun run lint` | `biome check .` (tabs, 120 cols, single quotes) |
+| `bun run lint:fix` | `biome check --write .` |
+| `bun run verify` | `lint + typecheck + test` — CI and release both run this |
+| `bun changeset` | Create a changeset `.md` (commit it); `--empty` for docs/CI-only |
+| `bun run version-packages` | Changesets bump + CHANGELOG (run by release workflow) |
+| `bun run release` | `typecheck + check-packables + changeset publish` (OIDC) |
 | `pi -e <path> -p "…" --no-tools` | Load local package as temp extension; smoke-tests manifest + factory |
 
-CI runs typecheck + tests on every push (`.github/workflows/ci.yml`).
+CI (`.github/workflows/ci.yml`) runs `verify` + `check-packables` + changeset presence on every push/PR. Release (`.github/workflows/release.yml`) is changesets + OIDC trusted publishing — no npm token.
 
 ## Architecture
 
@@ -40,7 +45,7 @@ CI runs typecheck + tests on every push (`.github/workflows/ci.yml`).
 
 ## Conventions
 
-- **Tabs**, single quotes, 120-col lines.
+- **Tabs**, single quotes, 120-col lines — enforced by Biome (`biome.json`: tab, 120, singleQuote, trailing all). Run `bun run lint:fix` if a diff looks unformatted.
 - TypeScript strict; explicit types on exported functions.
 - Relative imports **must include `.ts`** (`./runner.ts`) — jiti + `allowImportingTsExtensions`.
 - **Templates live as .md files with frontmatter**, never as code strings. Frontmatter: `name, description, permission: readonly|edit|danger, model, maxBudgetUsd, skill, defaultTask, defaultScope`. Legacy `permissionMode`/`sandbox` preserved as native escape hatch.
@@ -48,23 +53,29 @@ CI runs typecheck + tests on every push (`.github/workflows/ci.yml`).
 - Guard UI calls (`ctx.ui.*`) with `ctx.hasUI` — tools run in all modes.
 - Scope `diff`/`pr` resolved in-process via `git diff HEAD` / `gh pr diff`; don't rely on harness running git.
 
-## Release process
+## Release process (changesets + OIDC)
 
-1. Edit → `npm run typecheck && npm test`.
-2. Bump `version` in `package.json` by hand.
-3. Commit + push.
-4. `npm publish --access public`.
-5. `pi update --extensions` on installed machines.
+Changesets + OIDC trusted publishing. No manual `version` bump, no `npm publish`.
 
-Load-test: `pi -e <repo path> -p "Reply with exactly: OK" --no-tools`. Engine can be exercised without pi: `node --experimental-strip-types --input-type=module -e "import {runHarness} from './extensions/runner.ts'; import {claudeHarness} from './extensions/harnesses/claude.ts'; …"`.
+1. Edit code → `bun run verify`.
+2. `bun changeset` (or `bun changeset --empty` for docs/CI) → commit `.changeset/*.md`.
+3. PR → CI checks `changeset status --since=origin/main`.
+4. Merge to `main` → Release workflow opens/updates `chore: version packages` PR (bumps `package.json` + `CHANGELOG.md`).
+5. Review version numbers → Merge Version Packages PR → Release workflow runs `bun run release` (`typecheck + check-packables + changeset publish`), creates tag `vX.Y.Z` pinned to `$GITHUB_SHA` + one GitHub Release, verifies `latest` dist-tag.
+6. On machines with the package installed: `pi update --extensions`.
 
-## Gotchas
+Load-test a local change: `pi -e <repo path> -p "Reply with exactly: OK" --no-tools`. Engine can be exercised without pi: `node --experimental-strip-types --input-type=module -e "import {runHarness} from './extensions/runner.ts'; import {claudeHarness} from './extensions/harnesses/claude.ts'; …"`.
+
+Load-test the release guard: `node scripts/check-packables.mjs` — must pass; fails on `0.0.0` or empty `extensions/`.
+
+## Gotchas (each cost real time — don't rediscover them)
 
 - Unscoped `pi-harness-delegate` — no `--access public` dance for scoped name; but keep `files: ["extensions","templates"]` so subdirs ship.
 - `stream-json` requires `--verbose` for claude (do not drop).
 - `--no-session-persistence` keeps claude runs from littering session files; other harnesses use their own session flags.
 - Peer deps `"*"` (`pi-ai`, `pi-coding-agent`, `pi-tui`, `typebox`) — pi bundles them; never add to `dependencies`.
 - Harness CLIs change args often — version-gate `detect()` and snapshot one real JSONL transcript before locking parser.
+- **Bun for dev, npm for publish.** CI/release use `bun install`/`bun run` everywhere, but `bun run release` calls `changeset publish` which runs `npm publish --provenance` via npm (OIDC). No npm token in repo — `id-token: write` mints it. First publish of a new package must be local with 2FA (`bun run release`).
 
 ## Scope notes
 

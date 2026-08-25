@@ -1,16 +1,31 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { parseAmpLine } from '../extensions/harnesses/amp.ts';
 import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
 import { parseCodexLine } from '../extensions/harnesses/codex.ts';
 import { parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
-import { parseAmpLine } from '../extensions/harnesses/amp.ts';
 import { getHarness, HARNESS_NAMES, resolveHarnessName } from '../extensions/harnesses/registry.ts';
 
 test('claude harness parses stream deltas and result', () => {
 	const state = { streamedText: '', activities: [], result: null };
-	const out1 = parseClaudeLine(JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } } }), state);
+	const out1 = parseClaudeLine(
+		JSON.stringify({
+			type: 'stream_event',
+			event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } },
+		}),
+		state,
+	);
 	assert.equal(out1.streamedText, 'hi');
-	const out2 = parseClaudeLine(JSON.stringify({ type: 'result', result: 'done', total_cost_usd: 0.1, session_id: 'abc', usage: { input_tokens: 1, output_tokens: 1 } }), { streamedText: 'hi', activities: [], result: null });
+	const out2 = parseClaudeLine(
+		JSON.stringify({
+			type: 'result',
+			result: 'done',
+			total_cost_usd: 0.1,
+			session_id: 'abc',
+			usage: { input_tokens: 1, output_tokens: 1 },
+		}),
+		{ streamedText: 'hi', activities: [], result: null },
+	);
 	assert.ok(out2.result);
 	assert.equal(out2.result!.sessionId, 'abc');
 });
@@ -23,7 +38,15 @@ test('codex harness parses plain text fallback', () => {
 
 test('codex harness parses json result', () => {
 	const state = { streamedText: 'partial', activities: [], result: null };
-	const out = parseCodexLine(JSON.stringify({ type: 'result', result: 'final', session_id: 'sess-1', usage: { input_tokens: 5, output_tokens: 5 } }), state);
+	const out = parseCodexLine(
+		JSON.stringify({
+			type: 'result',
+			result: 'final',
+			session_id: 'sess-1',
+			usage: { input_tokens: 5, output_tokens: 5 },
+		}),
+		state,
+	);
 	assert.ok(out.result);
 	assert.equal(out.result!.sessionId, 'sess-1');
 });

@@ -4,13 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NormalizedPermission } from './harnesses/types.ts';
 
-export type PermissionMode =
-	| 'plan'
-	| 'acceptEdits'
-	| 'bypassPermissions'
-	| 'dontAsk'
-	| 'auto'
-	| 'manual';
+export type PermissionMode = 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk' | 'auto' | 'manual';
 
 const PERMISSION_MODES = new Set<PermissionMode>([
 	'plan',
@@ -38,13 +32,24 @@ export interface DelegateTemplate {
 	harness?: string;
 }
 
-export function normalizePermission(raw: string | undefined, fallbackMode: string | undefined): { permission: NormalizedPermission; nativePermission?: string; permissionMode: PermissionMode } {
+export function normalizePermission(
+	raw: string | undefined,
+	fallbackMode: string | undefined,
+): { permission: NormalizedPermission; nativePermission?: string; permissionMode: PermissionMode } {
 	// Prefer normalized permission
 	if (raw) {
 		const lower = raw.trim().toLowerCase();
-		if (lower === 'readonly' || lower === 'read-only' || lower === 'read_only') return { permission: 'readonly', permissionMode: 'plan' };
-		if (lower === 'edit' || lower === 'acceptEdits' || lower === 'accept-edits') return { permission: 'edit', permissionMode: 'acceptEdits' };
-		if (lower === 'danger' || lower === 'bypassPermissions' || lower === 'danger-full-access' || lower === 'danger_full_access') return { permission: 'danger', permissionMode: 'bypassPermissions' };
+		if (lower === 'readonly' || lower === 'read-only' || lower === 'read_only')
+			return { permission: 'readonly', permissionMode: 'plan' };
+		if (lower === 'edit' || lower === 'acceptEdits' || lower === 'accept-edits')
+			return { permission: 'edit', permissionMode: 'acceptEdits' };
+		if (
+			lower === 'danger' ||
+			lower === 'bypassPermissions' ||
+			lower === 'danger-full-access' ||
+			lower === 'danger_full_access'
+		)
+			return { permission: 'danger', permissionMode: 'bypassPermissions' };
 		// Unknown native — treat as native escape hatch
 		return { permission: 'edit', nativePermission: raw.trim(), permissionMode: 'acceptEdits' };
 	}

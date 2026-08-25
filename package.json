@@ -1,58 +1,71 @@
 {
-	"name": "pi-harness-delegate",
-	"version": "0.1.0",
-	"description": "Delegate work to any harness (Claude Code, Muse, OpenCode, Amp) from the pi coding agent — code reviews, plans, implementation, security audits, docs, or your own custom templates.",
-	"type": "module",
-	"files": [
-		"extensions",
-		"templates",
-		"README.md",
-		"LICENSE"
-	],
-	"keywords": [
-		"pi-package",
-		"pi",
-		"coding-agent",
-		"claude",
-		"codex",
-		"opencode",
-		"amp",
-		"delegate",
-		"subagent",
-		"code-review",
-		"harness"
-	],
-	"license": "MIT",
-	"author": "Jorge Barnaby",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/yorch/pi-harness-delegate.git"
-	},
-	"bugs": {
-		"url": "https://github.com/yorch/pi-harness-delegate/issues"
-	},
-	"scripts": {
-		"typecheck": "tsc --noEmit",
-		"test": "node --experimental-strip-types --test tests/**/*.test.ts"
-	},
-	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
-		"typebox": "*"
-	},
-	"devDependencies": {
-		"@earendil-works/pi-ai": "^0.84.1",
-		"@earendil-works/pi-coding-agent": "^0.84.1",
-		"@earendil-works/pi-tui": "^0.84.1",
-		"@types/node": "24.x",
-		"typebox": "^1.3.7",
-		"typescript": "^5.9.0"
-	},
-	"pi": {
-		"extensions": [
-			"./extensions/index.ts"
-		],
-		"image": "https://raw.githubusercontent.com/yorch/pi-harness-delegate/main/docs/assets/claude-delegate-preview.png"
-	}
+  "name": "pi-harness-delegate",
+  "version": "0.1.0",
+  "description": "Delegate work to any harness (Claude Code, Muse, OpenCode, Amp) from the pi coding agent — code reviews, plans, implementation, security audits, docs, or your own custom templates.",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "engines": {
+    "node": "26"
+  },
+  "files": [
+    "extensions",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "claude",
+    "codex",
+    "opencode",
+    "amp",
+    "delegate",
+    "subagent",
+    "code-review",
+    "harness"
+  ],
+  "license": "MIT",
+  "author": "Jorge Barnaby",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yorch/pi-harness-delegate.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yorch/pi-harness-delegate/issues"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "verify": "bun run lint && bun run typecheck && bun run test",
+    "changeset": "changeset",
+    "version-packages": "changeset version && bun install",
+    "release": "bun run typecheck && node scripts/check-packables.mjs && changeset publish"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@changesets/changelog-github": "^0.5.1",
+    "@changesets/cli": "^2.29.5",
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
+    "@types/node": "26.x",
+    "typebox": "^1.3.7",
+    "typescript": "^5.9.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/yorch/pi-harness-delegate/main/docs/assets/claude-delegate-preview.png"
+  }
 }
