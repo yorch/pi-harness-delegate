@@ -58,7 +58,13 @@ CI (`.github/workflows/ci.yml`) runs `verify` + `check-packables` + changeset pr
 Changesets + OIDC trusted publishing. No manual `version` bump, no `npm publish`.
 
 1. Edit code → `bun run verify`.
-2. `bun changeset` (or `bun changeset --empty` for docs/CI) → commit `.changeset/*.md`.
+2. `bun changeset` (or `bun changeset --empty` for docs/CI) → commit `.changeset/*.md`. **Important:** `package.json:files` includes `README.md` (and `templates/` for this repo), so even README/docs-only PRs are considered a package change — `ci: Changeset present` (`changeset status --since=origin/main`) will fail without a changeset. For docs-only that should not bump the version, run after `bun install`:
+   ```bash
+   bun install
+   ./node_modules/.bin/changeset add --empty   # creates .changeset/*.md with ---/--- (no bump)
+   git add .changeset/*.md && git commit
+   ```
+   This satisfies CI with `Packages to be bumped:` empty.
 3. PR → CI checks `changeset status --since=origin/main`.
 4. Merge to `main` → Release workflow opens/updates `chore: version packages` PR (bumps `package.json` + `CHANGELOG.md`).
 5. Review version numbers → Merge Version Packages PR → Release workflow runs `bun run release` (`typecheck + check-packables + changeset publish`), creates tag `vX.Y.Z` pinned to `$GITHUB_SHA` + one GitHub Release, verifies `latest` dist-tag.
