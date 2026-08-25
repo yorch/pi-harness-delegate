@@ -5,10 +5,15 @@ import { parseTemplate } from '../extensions/templates.ts';
 
 const MODES = new Set(['review', 'plan', 'implement', 'security-audit', 'docs', 'general']);
 
+function mustParse(s: string) {
+  const t = parseTemplate(s);
+  if (!t) throw new Error('failed to parse template fixture');
+  return t;
+}
 const TEMPLATES = new Map([
-  ['review', parseTemplate('---\nname: review\ndefaultTask: Review the git diff\ndefaultScope: diff\n---\nbody')!],
-  ['security-audit', parseTemplate('---\nname: security-audit\ndefaultTask: Audit the repo\n---\nbody')!],
-  ['plan', parseTemplate('---\nname: plan\n---\nbody')!],
+  ['review', mustParse('---\nname: review\ndefaultTask: Review the git diff\ndefaultScope: diff\n---\nbody')],
+  ['security-audit', mustParse('---\nname: security-audit\ndefaultTask: Audit the repo\n---\nbody')],
+  ['plan', mustParse('---\nname: plan\n---\nbody')],
 ]);
 
 test('bare mode name as first word', () => {

@@ -16,22 +16,22 @@ maxBudgetUsd: 5
 ---
 Review the code.`);
   assert.ok(t);
-  assert.equal(t!.name, 'review');
-  assert.equal(t!.description, 'Review code');
-  assert.equal(t!.permissionMode, 'plan');
-  assert.equal(t!.model, 'sonnet');
-  assert.equal(t!.maxBudgetUsd, 5);
-  assert.equal(t!.prompt, 'Review the code.');
+  assert.equal(t?.name, 'review');
+  assert.equal(t?.description, 'Review code');
+  assert.equal(t?.permissionMode, 'plan');
+  assert.equal(t?.model, 'sonnet');
+  assert.equal(t?.maxBudgetUsd, 5);
+  assert.equal(t?.prompt, 'Review the code.');
 });
 
 test('parseTemplate defaults missing permission to acceptEdits', () => {
   const t = parseTemplate('---\nname: x\n---\nbody');
-  assert.equal(t!.permissionMode, 'acceptEdits');
+  assert.equal(t?.permissionMode, 'acceptEdits');
 });
 
 test('parseTemplate rejects invalid permissionMode', () => {
   const t = parseTemplate('---\nname: x\npermissionMode: nope\n---\nbody');
-  assert.equal(t!.permissionMode, 'acceptEdits');
+  assert.equal(t?.permissionMode, 'acceptEdits');
 });
 
 test('parseTemplate returns null without name', () => {
@@ -46,7 +46,7 @@ test('built-in templates all parse with valid modes', () => {
     if (!f.endsWith('.md')) continue;
     const t = parseTemplate(readFileSync(join(dir, f), 'utf8'));
     assert.ok(t, `template ${f} should parse`);
-    assert.ok(t!.name && t!.prompt, `template ${f} needs name + body`);
+    assert.ok(t?.name && t?.prompt, `template ${f} needs name + body`);
     count++;
   }
   assert.equal(count, 6);

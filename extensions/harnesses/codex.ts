@@ -10,23 +10,15 @@ import type {
 } from './types.ts';
 
 const execFileAsync = promisify(execFile);
-
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
-
 const SANDBOX_MAP: Record<NormalizedPermission, string> = {
   readonly: 'read-only',
   edit: 'workspace-write',
   danger: 'danger-full-access',
 };
-
-function extractTextFromCodexEvent(o: Record<string, unknown>, state: ParseState): string | undefined {
-  // Codex JSON variants: try common shapes
-  // 1. {type:"item.completed", item:{type:"agent_message", text:"..."}}
-  // 2. {type:"thread.item.completed", item:{type:"agent_message", ...}}
-  // 3. {type:"event", event:{type:"response.output_text.delta", delta:"..."}}
-  // 4. Plain {"text":"..."} or {"output":"..."}
+function extractTextFromCodexEvent(o: Record<string, unknown>, _state: ParseState): string | undefined {
   if (typeof o.text === 'string' && o.type !== 'tool_use') return o.text;
   if (typeof o.output === 'string') return o.output;
   if (typeof o.delta === 'string') return o.delta;
@@ -35,31 +27,66 @@ function extractTextFromCodexEvent(o: Record<string, unknown>, state: ParseState
     return (o.event as Record<string, unknown>).delta as string;
   if (isRecord(o.item) && typeof o.item.text === 'string') return o.item.text;
   if (isRecord(o.item) && typeof o.item.output === 'string') return o.item.output;
-  // agent_message
   if (o.type === 'agent_message' && typeof o.text === 'string') return o.text;
+  if (o.type === 'error' && typeof o.message === 'string') return o.message;
+  if (typeof o.error === 'string') return o.error;
   return undefined;
 }
-
 export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
   let o: unknown;
   try {
     o = JSON.parse(line);
   } catch {
-    // Non-JSON line: treat as streamed text (codex may emit plain text)
-    if (line.trim().length > 0) return { streamedText: line + '\n', activities: [] };
+    if (line.trim().length > 0) return { streamedText: `${line}\n`, activities: [] };
     return { activities: [] };
   }
   if (!isRecord(o)) return { activities: [] };
-
   const activities: ParseOutcome['activities'] = [];
   let streamedText: string | undefined;
-
-  // Tool activity heuristics
-  // Codex may emit: {type:"item.started", item:{type:"tool_use", name:"...", input:{}}}
-  // or {type:"tool_use", name:"..."}
-  const item = isRecord(o.item) ? o.item : null;
   const typeStr = typeof o.type === 'string' ? o.type : '';
-
+  const item = isRecord(o.item) ? o.item : null;
+  // latch thread_id from thread.started
+  if (typeStr === 'thread.started' && typeof o.thread_id === 'string') {
+    (state as unknown as Record<string, unknown>)._harness = {
+      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
+      sessionId: o.thread_id,
+    };
+    return { activities, streamedText };
+  }
+  if (typeStr === 'turn.started') return { activities, streamedText };
+  if (typeStr === 'error' && typeof o.message === 'string') {
+    streamedText = o.message;
+  }
+  if (typeof o.error === 'string' && !streamedText) streamedText = o.error;
+  if (typeStr === 'turn.failed') {
+    const msg =
+      isRecord(o.error) && typeof o.error.message === 'string'
+        ? o.error.message
+        : typeof o.error === 'string'
+          ? o.error
+          : typeof o.message === 'string'
+            ? o.message
+            : state.streamedText + (streamedText ?? '');
+    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+      ?.sessionId as string | undefined;
+    const result: StreamedResult = {
+      result: msg,
+      isError: true,
+      numTurns: 1,
+      totalCostUsd: 0,
+      sessionId: typeof o.thread_id === 'string' ? o.thread_id : (latched ?? null),
+      stopReason: 'error',
+      permissionDenials: [],
+      durationMs: null,
+      durationApiMs: null,
+      ttftMs: null,
+      model: null,
+      contextWindow: null,
+      maxOutputTokens: null,
+      usage: null,
+    };
+    return { activities, streamedText, result };
+  }
   if (typeStr.includes('tool') || typeStr.includes('item.started') || typeStr.includes('function_call')) {
     const toolName = (item && typeof item.name === 'string' ? item.name : typeof o.name === 'string' ? o.name : null) as
       | string
@@ -68,38 +95,33 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
       if (typeStr.includes('started') || o.type === 'tool_use') {
         activities.push({ kind: 'tool_start', name: toolName });
         if (item && isRecord(item.input))
-          activities.push({
-            kind: 'tool_input',
-            name: toolName,
-            input: item.input as Record<string, unknown>,
-          });
+          activities.push({ kind: 'tool_input', name: toolName, input: item.input as Record<string, unknown> });
         else if (isRecord(o.input))
           activities.push({ kind: 'tool_input', name: toolName, input: o.input as Record<string, unknown> });
-      } else if (typeStr.includes('completed') || typeStr.includes('result')) {
+      } else if (typeStr.includes('completed') || typeStr.includes('result'))
         activities.push({ kind: 'tool_result', isError: o.is_error === true || o.error === true });
-      }
     }
   }
-  if (o.type === 'tool_result' || (typeStr === 'item.completed' && item?.type === 'tool_result')) {
+  if (o.type === 'tool_result' || (typeStr === 'item.completed' && item?.type === 'tool_result'))
     activities.push({ kind: 'tool_result', isError: (o as Record<string, unknown>).is_error === true });
-  }
   if (typeStr.includes('thinking') || o.type === 'reasoning' || item?.type === 'reasoning') {
     const thinkingText = extractTextFromCodexEvent(o, state);
     if (thinkingText) activities.push({ kind: 'thinking', chars: thinkingText.length });
     else activities.push({ kind: 'thinking', chars: 10 });
   }
-
-  // Text extraction
   const text = extractTextFromCodexEvent(o, state);
-  if (text && !typeStr.includes('tool') && !typeStr.includes('thinking')) {
-    // Avoid double-counting tool inputs as text
+  if (
+    text &&
+    !typeStr.includes('tool') &&
+    !typeStr.includes('thinking') &&
+    typeStr !== 'error' &&
+    typeStr !== 'turn.failed'
+  )
     streamedText = text;
-  }
-
-  // Result detection: final result often {type:"result", result:"...", total_cost_usd, usage, ...}
-  // or {type:"thread.completed", ...}
   if (o.type === 'result' || o.type === 'thread.completed' || o.type === 'task.completed') {
     const usage = isRecord(o.usage) ? o.usage : null;
+    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+      ?.sessionId as string | undefined;
     const result: StreamedResult = {
       result:
         typeof o.result === 'string'
@@ -117,7 +139,7 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
             ? o.thread_id
             : typeof o.id === 'string'
               ? o.id
-              : null,
+              : (latched ?? null),
       stopReason: typeof o.stop_reason === 'string' ? o.stop_reason : null,
       permissionDenials: Array.isArray(o.permission_denials) ? o.permission_denials : [],
       durationMs: typeof o.duration_ms === 'number' ? o.duration_ms : null,
@@ -153,10 +175,8 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
     };
     return { activities, streamedText, result };
   }
-
   return { activities, streamedText };
 }
-
 export const codexHarness: Harness = {
   name: 'codex',
   displayName: 'Muse',
@@ -170,7 +190,6 @@ export const codexHarness: Harness = {
     }
   },
   buildArgs(opts: BuildArgsOpts): string[] {
-    // codex exec --json <prompt> --sandbox <level> --ask-for-approval <level>
     const sandbox = opts.nativePermission ?? SANDBOX_MAP[opts.permission] ?? 'workspace-write';
     const args = ['exec', '--json', opts.prompt, '--sandbox', sandbox];
     if (opts.permission === 'danger' || sandbox === 'danger-full-access') args.push('--ask-for-approval', 'never');
@@ -178,7 +197,6 @@ export const codexHarness: Harness = {
     else args.push('--ask-for-approval', 'on-request');
     if (opts.model) args.push('--model', opts.model);
     if (opts.resumeSessionId) args.push('--thread-id', opts.resumeSessionId);
-    // maxBudgetUsd not natively supported; pass as env hint via --config if needed
     for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
     return args;
   },
@@ -187,14 +205,15 @@ export const codexHarness: Harness = {
   },
   extractResult(state: ParseState): StreamedResult | null {
     if (state.result) return state.result;
-    // Fallback: if no explicit result, synthesize from streamed text if any
     if (state.streamedText.trim().length > 0) {
+      const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+        ?.sessionId as string | undefined;
       return {
         result: state.streamedText,
         isError: false,
         numTurns: 1,
         totalCostUsd: 0,
-        sessionId: null,
+        sessionId: latched ?? null,
         stopReason: null,
         permissionDenials: [],
         durationMs: null,
@@ -208,9 +227,5 @@ export const codexHarness: Harness = {
     }
     return null;
   },
-  permissionMap: {
-    readonly: ['read-only'],
-    edit: ['workspace-write'],
-    danger: ['danger-full-access'],
-  },
+  permissionMap: { readonly: ['read-only'], edit: ['workspace-write'], danger: ['danger-full-access'] },
 };

@@ -14,7 +14,7 @@ test('fmtElapsed formats mm:ss', () => {
 test('renderEntry styles by kind', () => {
   const theme = {
     fg: (c: string, s: string) => `${c}:${s}`,
-    bg: (c: string, s: string) => s,
+    bg: (_c: string, s: string) => s,
     bold: (s: string) => s,
   };
   assert.equal(renderEntry({ kind: 'tool', text: 'Bash: ls', ok: true }, theme), 'accent:▶ muted:Bash: lssuccess: ✓');

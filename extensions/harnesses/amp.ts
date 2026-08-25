@@ -10,82 +10,179 @@ import type {
 } from './types.ts';
 
 const execFileAsync = promisify(execFile);
-
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
-
 const PERMISSION_MAP: Record<NormalizedPermission, string> = {
   readonly: 'read-only',
   edit: 'workspace',
   danger: 'danger',
 };
-
 function extractAmpText(o: Record<string, unknown>): string | undefined {
   if (typeof o.text === 'string') return o.text;
   if (typeof o.output === 'string') return o.output;
   if (typeof o.delta === 'string') return o.delta;
   if (typeof o.content === 'string') return o.content;
+  if (isRecord(o.part) && typeof o.part.text === 'string') return o.part.text;
   return undefined;
 }
-
 export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
   let o: unknown;
   try {
     o = JSON.parse(line);
   } catch {
-    if (line.trim().length > 0) return { streamedText: line + '\n', activities: [] };
+    if (line.trim().length > 0) return { streamedText: `${line}\n`, activities: [] };
     return { activities: [] };
   }
   if (!isRecord(o)) return { activities: [] };
   const activities: ParseOutcome['activities'] = [];
   let streamedText: string | undefined;
   const typeStr = typeof o.type === 'string' ? o.type : '';
-
+  // latch session id
+  if (typeStr === 'session' && typeof o.id === 'string') {
+    (state as unknown as Record<string, unknown>)._harness = {
+      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
+      sessionId: o.id,
+    };
+  }
+  if (isRecord(o.part) && typeof (o.part as Record<string, unknown>).sessionID === 'string') {
+    (state as unknown as Record<string, unknown>)._harness = {
+      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
+      sessionId: (o.part as Record<string, unknown>).sessionID as string,
+    };
+  }
+  if (typeStr === 'session' && typeof (o as Record<string, unknown>).sessionID === 'string') {
+    (state as unknown as Record<string, unknown>)._harness = {
+      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
+      sessionId: (o as Record<string, unknown>).sessionID as string,
+    };
+  }
   if (typeStr.includes('tool') || o.type === 'tool_use') {
     const name = typeof o.name === 'string' ? o.name : 'tool';
     if (typeStr.includes('start') || o.type === 'tool_use') {
       activities.push({ kind: 'tool_start', name });
       if (isRecord(o.input)) activities.push({ kind: 'tool_input', name, input: o.input as Record<string, unknown> });
-    } else {
-      activities.push({ kind: 'tool_result', isError: o.is_error === true });
-    }
+    } else activities.push({ kind: 'tool_result', isError: o.is_error === true });
   }
   if (typeStr.includes('thinking')) activities.push({ kind: 'thinking', chars: 10 });
-
+  if (typeStr === 'message_update' && isRecord(o.assistantMessageEvent)) {
+    const ev = o.assistantMessageEvent as Record<string, unknown>;
+    if (ev.type === 'thinking_delta' && typeof ev.delta === 'string')
+      activities.push({ kind: 'thinking', chars: ev.delta.length });
+    else if (ev.type === 'text_delta' && typeof ev.delta === 'string') streamedText = ev.delta;
+    else if (ev.type === 'thinking_start') activities.push({ kind: 'thinking', chars: 5 });
+  }
+  if (typeStr === 'turn_end' || typeStr === 'agent_end') {
+    const msg = isRecord(o.message) ? o.message : null;
+    if (msg && Array.isArray(msg.content)) {
+      for (const block of msg.content as unknown[]) {
+        if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') streamedText = block.text;
+        if (isRecord(block) && block.type === 'thinking' && typeof block.thinking === 'string')
+          activities.push({ kind: 'thinking', chars: (block.thinking as string).length });
+      }
+    }
+    if (Array.isArray(o.messages)) {
+      const last = o.messages[o.messages.length - 1] as unknown;
+      if (isRecord(last) && Array.isArray(last.content)) {
+        for (const block of last.content as unknown[]) {
+          if (isRecord(block) && block.type === 'text' && typeof block.text === 'string' && !streamedText)
+            streamedText = block.text as string;
+        }
+      }
+    }
+  }
   const text = extractAmpText(o);
-  if (text && !typeStr.includes('tool')) streamedText = text;
-
-  if (o.type === 'result' || o.type === 'done' || o.type === 'completed') {
-    const usage = isRecord(o.usage) ? o.usage : null;
+  if (text && !typeStr.includes('tool') && !streamedText) streamedText = text;
+  if (
+    o.type === 'result' ||
+    o.type === 'done' ||
+    o.type === 'completed' ||
+    typeStr === 'turn_end' ||
+    typeStr === 'agent_end'
+  ) {
+    const usage = isRecord(o.usage)
+      ? o.usage
+      : isRecord(o.message) && isRecord((o.message as Record<string, unknown>).usage)
+        ? ((o.message as Record<string, unknown>).usage as Record<string, unknown>)
+        : null;
+    const actualUsage = isRecord(usage)
+      ? usage
+      : isRecord(o.message) && isRecord((o.message as Record<string, unknown>).usage)
+        ? ((o.message as Record<string, unknown>).usage as Record<string, unknown>)
+        : null;
+    const msg = isRecord(o.message) ? o.message : null;
+    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+      ?.sessionId as string | undefined;
+    const cost =
+      isRecord(actualUsage) && typeof (actualUsage as Record<string, unknown>).total === 'number'
+        ? ((actualUsage as Record<string, unknown>).total as number)
+        : typeof o.total_cost_usd === 'number'
+          ? o.total_cost_usd
+          : 0;
+    const inputTokens = isRecord(actualUsage)
+      ? typeof (actualUsage as Record<string, unknown>).input === 'number'
+        ? ((actualUsage as Record<string, unknown>).input as number)
+        : typeof (actualUsage as Record<string, unknown>).input_tokens === 'number'
+          ? ((actualUsage as Record<string, unknown>).input_tokens as number)
+          : 0
+      : 0;
+    const outputTokens = isRecord(actualUsage)
+      ? typeof (actualUsage as Record<string, unknown>).output === 'number'
+        ? ((actualUsage as Record<string, unknown>).output as number)
+        : typeof (actualUsage as Record<string, unknown>).output_tokens === 'number'
+          ? ((actualUsage as Record<string, unknown>).output_tokens as number)
+          : 0
+      : 0;
     const result: StreamedResult = {
-      result: typeof o.result === 'string' ? o.result : state.streamedText + (streamedText ?? ''),
+      result:
+        typeof o.result === 'string'
+          ? o.result
+          : streamedText
+            ? state.streamedText + streamedText
+            : state.streamedText || (text ?? ''),
       isError: o.is_error === true,
-      numTurns: typeof o.num_turns === 'number' ? o.num_turns : 0,
-      totalCostUsd: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : 0,
-      sessionId: typeof o.session_id === 'string' ? o.session_id : null,
-      stopReason: typeof o.stop_reason === 'string' ? o.stop_reason : null,
+      numTurns: 1,
+      totalCostUsd: typeof cost === 'number' ? cost : 0,
+      sessionId: typeof o.session_id === 'string' ? o.session_id : typeof o.id === 'string' ? o.id : (latched ?? null),
+      stopReason:
+        typeof o.stop_reason === 'string'
+          ? o.stop_reason
+          : typeof msg?.stopReason === 'string'
+            ? (msg.stopReason as string)
+            : null,
       permissionDenials: [],
-      durationMs: typeof o.duration_ms === 'number' ? o.duration_ms : null,
+      durationMs:
+        typeof o.duration_ms === 'number'
+          ? o.duration_ms
+          : typeof (o as Record<string, unknown>).duration === 'number'
+            ? ((o as Record<string, unknown>).duration as number)
+            : null,
       durationApiMs: null,
-      ttftMs: null,
-      model: typeof o.model === 'string' ? o.model : null,
+      ttftMs:
+        typeof (o as Record<string, unknown>).ttft === 'number'
+          ? ((o as Record<string, unknown>).ttft as number)
+          : null,
+      model: typeof o.model === 'string' ? o.model : typeof msg?.model === 'string' ? (msg.model as string) : null,
       contextWindow: null,
       maxOutputTokens: null,
-      usage: usage
-        ? {
-            inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : 0,
-            outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : 0,
-            cacheCreationInputTokens: 0,
-            cacheReadInputTokens: 0,
-          }
-        : null,
+      usage:
+        actualUsage && (inputTokens || outputTokens)
+          ? {
+              inputTokens,
+              outputTokens,
+              cacheCreationInputTokens: 0,
+              cacheReadInputTokens:
+                typeof (actualUsage as Record<string, unknown>).cacheRead === 'number'
+                  ? ((actualUsage as Record<string, unknown>).cacheRead as number)
+                  : 0,
+            }
+          : null,
     };
+    if (!result.result) result.result = state.streamedText + (streamedText ?? '');
     return { activities, streamedText, result };
   }
   return { activities, streamedText };
 }
-
 export const ampHarness: Harness = {
   name: 'amp',
   displayName: 'Amp',
@@ -117,12 +214,14 @@ export const ampHarness: Harness = {
   extractResult(state: ParseState): StreamedResult | null {
     if (state.result) return state.result;
     if (state.streamedText.trim().length > 0) {
+      const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+        ?.sessionId as string | undefined;
       return {
         result: state.streamedText,
         isError: false,
         numTurns: 1,
         totalCostUsd: 0,
-        sessionId: null,
+        sessionId: latched ?? null,
         stopReason: null,
         permissionDenials: [],
         durationMs: null,
@@ -136,9 +235,5 @@ export const ampHarness: Harness = {
     }
     return null;
   },
-  permissionMap: {
-    readonly: ['read-only'],
-    edit: ['workspace'],
-    danger: ['danger'],
-  },
+  permissionMap: { readonly: ['read-only'], edit: ['workspace'], danger: ['danger'] },
 };

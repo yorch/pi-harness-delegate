@@ -61,16 +61,17 @@ export function loadConfig(): DelegateConfig {
     // Legacy claudeDelegate -> delegate.harnesses.claude migration
     if (settings.claudeDelegate && !settings.delegate) {
       const c = settings.claudeDelegate as Partial<DelegateConfig>;
-      if (typeof c.model === 'string') cfg.harnesses['claude'] = { ...(cfg.harnesses['claude'] ?? {}), model: c.model };
+      if (typeof c.model === 'string') cfg.harnesses.claude = { ...(cfg.harnesses.claude ?? {}), model: c.model };
       if (typeof c.timeoutMs === 'number' && c.timeoutMs > 0) cfg.timeoutMs = c.timeoutMs;
       if (typeof c.defaultMode === 'string') cfg.defaultMode = c.defaultMode;
       if (typeof c.allowDangerous === 'boolean') cfg.allowDangerous = c.allowDangerous;
       if (typeof c.inspectThinking === 'boolean') cfg.inspectThinking = c.inspectThinking;
-      if (typeof (c as DelegateConfig).maxBudgetUsd === 'number' && (c as DelegateConfig).maxBudgetUsd! > 0)
-        cfg.maxBudgetUsd = (c as DelegateConfig).maxBudgetUsd;
+      const maxBudgetLegacy = (c as DelegateConfig).maxBudgetUsd;
+      if (typeof maxBudgetLegacy === 'number' && maxBudgetLegacy > 0) cfg.maxBudgetUsd = maxBudgetLegacy;
       if (typeof c.autoDelegateHints === 'boolean') cfg.autoDelegateHints = c.autoDelegateHints;
-      if ((c as DelegateConfig).modelAliases && typeof (c as DelegateConfig).modelAliases === 'object') {
-        for (const [k, v] of Object.entries((c as DelegateConfig).modelAliases!)) {
+      const legacyAliases = (c as DelegateConfig).modelAliases;
+      if (legacyAliases && typeof legacyAliases === 'object') {
+        for (const [k, v] of Object.entries(legacyAliases)) {
           if (typeof v === 'string' && v) cfg.modelAliases[k] = v;
         }
       }
@@ -134,8 +135,8 @@ export function loadConfig(): DelegateConfig {
     // also support legacy claudeDelegate merged when delegate also present (delegate wins)
     if (settings.claudeDelegate) {
       const c = settings.claudeDelegate as Partial<DelegateConfig>;
-      if (typeof c.model === 'string' && !cfg.harnesses['claude']?.model) {
-        cfg.harnesses['claude'] = { ...(cfg.harnesses['claude'] ?? {}), model: c.model };
+      if (typeof c.model === 'string' && !cfg.harnesses.claude?.model) {
+        cfg.harnesses.claude = { ...(cfg.harnesses.claude ?? {}), model: c.model };
       }
     }
   } catch {
@@ -158,7 +159,10 @@ export function getMaxConcurrent(cfg: DelegateConfig, harness?: string): number 
   if (typeof cfg.maxConcurrent === 'number') return cfg.maxConcurrent;
   // if object shape {global, perHarness}
   const mc = cfg.maxConcurrent as unknown as { global?: number; perHarness?: Record<string, number> };
-  if (harness && mc.perHarness && typeof mc.perHarness[harness] === 'number') return mc.perHarness[harness]!;
+  if (harness && mc.perHarness && typeof mc.perHarness[harness] === 'number') {
+    const v = mc.perHarness[harness];
+    if (typeof v === 'number') return v;
+  }
   if (typeof mc.global === 'number') return mc.global;
   return 1;
 }

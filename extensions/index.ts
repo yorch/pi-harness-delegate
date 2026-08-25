@@ -451,10 +451,11 @@ async function delegate(
     throw new Error('another delegate run is already in progress (global limit)');
   // per-harness limit if configured as object
   const perHarnessLimit = (() => {
-    // SAFETY: maxConcurrent shape checked for perHarness record before access
-    const mc = config.maxConcurrent as unknown as { perHarness?: Record<string, number> }; // SAFETY: shape checked before access
-    if (mc && typeof mc === 'object' && mc.perHarness && typeof mc.perHarness[harnessName] === 'number')
-      return mc.perHarness[harnessName]!;
+    const mc = config.maxConcurrent as unknown as { perHarness?: Record<string, number> };
+    if (mc && typeof mc === 'object' && mc.perHarness && typeof mc.perHarness[harnessName] === 'number') {
+      const v = mc.perHarness[harnessName];
+      if (typeof v === 'number') return v;
+    }
     return maxGlobal;
   })();
   if (perHarnessLimit > 0 && perHarnessCount >= perHarnessLimit)
@@ -1034,7 +1035,7 @@ export default function (pi: ExtensionAPI) {
       } else if (ev.kind === 'tool_result') {
         if (chipActivity.startsWith('▶')) chipActivity += ev.isError ? ' ✗' : ' ✓';
         const last = feed.length - 1;
-        if (last >= 0 && feed[last].kind === 'tool') feed[last] = { ...feed[last], ok: ev.isError ? false : true };
+        if (last >= 0 && feed[last].kind === 'tool') feed[last] = { ...feed[last], ok: !ev.isError };
       } else if (ev.kind === 'thinking') {
         chipActivity = '💭 thinking…';
         thinkingChars += ev.chars;

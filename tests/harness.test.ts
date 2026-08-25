@@ -27,7 +27,7 @@ test('claude harness parses stream deltas and result', () => {
     { streamedText: 'hi', activities: [], result: null },
   );
   assert.ok(out2.result);
-  assert.equal(out2.result!.sessionId, 'abc');
+  assert.equal(out2.result?.sessionId, 'abc');
 });
 
 test('codex harness parses plain text fallback', () => {
@@ -48,7 +48,7 @@ test('codex harness parses json result', () => {
     state,
   );
   assert.ok(out.result);
-  assert.equal(out.result!.sessionId, 'sess-1');
+  assert.equal(out.result?.sessionId, 'sess-1');
 });
 
 test('opencode harness parses text', () => {
@@ -75,7 +75,8 @@ test('registry returns harnesses and normalizes aliases', () => {
 });
 
 test('harness buildArgs respect permission', () => {
-  const claude = getHarness('claude')!;
+  const claude = getHarness('claude');
+  assert.ok(claude);
   const argsRo = claude.buildArgs({ prompt: 'hi', cwd: '/tmp', permission: 'readonly' });
   assert.ok(argsRo.includes('plan'));
   const argsEdit = claude.buildArgs({ prompt: 'hi', cwd: '/tmp', permission: 'edit' });
@@ -83,7 +84,8 @@ test('harness buildArgs respect permission', () => {
   const argsDanger = claude.buildArgs({ prompt: 'hi', cwd: '/tmp', permission: 'danger' });
   assert.ok(argsDanger.includes('bypassPermissions'));
 
-  const codex = getHarness('codex')!;
+  const codex = getHarness('codex');
+  assert.ok(codex);
   const cArgsRo = codex.buildArgs({ prompt: 'hi', cwd: '/tmp', permission: 'readonly' });
   assert.ok(cArgsRo.includes('read-only'));
 });
