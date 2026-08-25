@@ -1,5 +1,4 @@
 name: CI
-
 on:
   push:
     branches: [main]
@@ -28,14 +27,14 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run lint
       - run: bun run typecheck
-      - run: bun run test
+      - run: bun test
       - run: node scripts/check-packables.mjs
 
-      # Fail PRs that touch publishable code without a changeset.
+      # Fail PRs that touch publishable package without a changeset.
       # Skipped on main (changesets already consumed) and on the
       # version-packages PR itself (it *consumes* them, so it has none).
       - name: Changeset present
         if: >-
           github.event_name == 'pull_request' &&
           !startsWith(github.head_ref, 'changeset-release/')
-        run: bun changeset status --since=origin/${{ github.base_ref }}
+        run: bun run changeset status --since=origin/${{ github.base_ref }}
