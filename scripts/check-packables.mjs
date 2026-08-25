@@ -45,6 +45,7 @@ try {
       .map(f => ({ path: f }));
     if (files.length === 0) fail('pack produced no files');
     const hasExtensions = files.some(f => f.path.startsWith('extensions/'));
+    const hasTemplates = files.some(f => f.path.startsWith('templates/'));
     if (!hasExtensions) {
       fail(
         `Tarball for ${name}@${version} contains no files under extensions/. ` +
@@ -52,7 +53,15 @@ try {
           'Check `files` in package.json and that extensions/ exists.',
       );
     }
-    console.log(`check-packables: ${name}@${version} — pack contains ${files.length} files, including extensions/ ✓`);
+    if (!hasTemplates) {
+      fail(
+        `Tarball for ${name}@${version} contains no files under templates/. ` +
+          'Check `files` in package.json and that templates/ exists.',
+      );
+    }
+    console.log(
+      `check-packables: ${name}@${version} — pack contains ${files.length} files, including extensions/ and templates/ ✓`,
+    );
     process.exit(0);
   } catch {
     fail(`Failed to run pack dry-run: ${e.message}`);
@@ -74,6 +83,7 @@ if (!Array.isArray(files) || files.length === 0) {
 }
 
 const hasExtensions = files.some(f => (f.path ?? f).startsWith('extensions/'));
+const hasTemplates = files.some(f => (f.path ?? f).startsWith('templates/'));
 if (!hasExtensions) {
   const list = files
     .slice(0, 20)
@@ -85,5 +95,14 @@ if (!hasExtensions) {
       `First 20 files in tarball:\n${list}`,
   );
 }
+if (!hasTemplates) {
+  const list = files
+    .slice(0, 20)
+    .map(f => `  - ${f.path ?? f}`)
+    .join('\n');
+  fail(`Tarball for ${name}@${version} contains no files under templates/. ` + `First 20 files in tarball:\n${list}`);
+}
 
-console.log(`check-packables: ${name}@${version} — pack contains ${files.length} files, including extensions/ ✓`);
+console.log(
+  `check-packables: ${name}@${version} — pack contains ${files.length} files, including extensions/ and templates/ ✓`,
+);

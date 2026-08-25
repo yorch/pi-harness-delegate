@@ -45,6 +45,8 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     let settled = false;
     let firstTokenAt: number | null = null;
     const startAt = Date.now();
+    const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
+    const MAX_ACTIVITIES = 5000;
 
     const finish = (r: StreamedResult) => {
       if (settled) return;
@@ -65,13 +67,23 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       const outcome = opts.harness.parseLine(line, state);
       if (outcome.streamedText) {
         if (firstTokenAt === null) firstTokenAt = Date.now();
-        state.streamedText += outcome.streamedText;
-        opts.onStream?.(outcome.streamedText);
+        // Cap streamedText to prevent OOM on compromised harness
+        if (state.streamedText.length < MAX_STREAMED) {
+          const remaining = MAX_STREAMED - state.streamedText.length;
+          const chunk =
+            outcome.streamedText.length > remaining
+              ? `${outcome.streamedText.slice(0, remaining)} [truncated ${outcome.streamedText.length - remaining} chars]`
+              : outcome.streamedText;
+          state.streamedText += chunk;
+          opts.onStream?.(chunk);
+        }
       }
       if (outcome.activities) {
         for (const a of outcome.activities) {
-          state.activities.push(a);
-          opts.onActivity?.(a);
+          if (state.activities.length < MAX_ACTIVITIES) {
+            state.activities.push(a);
+            opts.onActivity?.(a);
+          }
         }
       }
       if (outcome.result) {

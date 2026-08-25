@@ -136,6 +136,16 @@ export function projectTemplatesDir(cwd: string, harness?: string): string {
   return join(cwd, '.pi', 'delegate', 'templates');
 }
 
+/** Minimal trust gate for project-local templates — untrusted clones must not override builtins. */
+function isTrusted(cwd: string): boolean {
+  if (process.env.PI_TRUSTED === '1' || process.env.PI_DELEGATE_TRUSTED === '1') return true;
+  try {
+    return readFileSync(join(cwd, '.pi', 'trusted'), 'utf8').trim() === '1';
+  } catch {
+    return false;
+  }
+}
+
 /** Legacy dirs for compat */
 function legacyUserTemplatesDir(): string {
   const dir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent');
@@ -159,10 +169,12 @@ export function loadTemplates(cwd: string, harnessName?: string): Map<string, De
   loadDir(legacyUserTemplatesDir(), out);
   loadDir(userTemplatesDir(), out);
   loadDir(userTemplatesDir(harness), out);
-  // project locals: legacy before new so new wins
-  loadDir(legacyProjectTemplatesDir(cwd), out);
-  loadDir(projectTemplatesDir(cwd), out);
-  loadDir(projectTemplatesDir(cwd, harness), out);
+  // project locals: legacy before new so new wins — only if trusted
+  if (isTrusted(cwd)) {
+    loadDir(legacyProjectTemplatesDir(cwd), out);
+    loadDir(projectTemplatesDir(cwd), out);
+    loadDir(projectTemplatesDir(cwd, harness), out);
+  }
   return out;
 }
 

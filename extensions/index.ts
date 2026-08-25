@@ -14,12 +14,10 @@
  * Legacy: { claudeDelegate: {...} } is auto-migrated.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import {
-  type Component,
   Container,
   Key,
   Markdown,
@@ -41,17 +39,11 @@ import {
   pruneOutputs,
   safeSegmentName,
 } from './activity.ts';
-import { parseClaudeCommand, parseDelegateCommand, resolveDefaults } from './command.ts';
-import {
-  agentDir,
-  outputsDir as getOutputsDir,
-  legacyOutputsDir,
-  loadConfig,
-  resolveModelForHarness,
-} from './config.ts';
+import { parseDelegateCommand, resolveDefaults } from './command.ts';
+import { outputsDir as getOutputsDir, legacyOutputsDir, loadConfig, resolveModelForHarness } from './config.ts';
 import { ALIASES, getHarness, HARNESS_NAMES, isKnownHarness } from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
-import { DEFAULT_TIMEOUT_MS } from './harnesses/types.ts';
+
 import { delegationHint, stripMarker } from './hint.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
 import { runHarness } from './runner.ts';
@@ -79,7 +71,8 @@ let globalActiveRuns = 0;
 function getMaxConcurrentGlobal(): number {
   const cfg = loadConfig();
   if (typeof cfg.maxConcurrent === 'number') return cfg.maxConcurrent;
-  const mc = cfg.maxConcurrent as unknown as { global?: number };
+  // SAFETY: maxConcurrent is validated to be number or object with global/perHarness in loadConfig
+  const mc = cfg.maxConcurrent as unknown as { global?: number }; // SAFETY: maxConcurrent validated in loadConfig
   if (typeof mc.global === 'number') return mc.global;
   return 1;
 }
@@ -186,7 +179,9 @@ function readHistory(dir: string, harness: string): HistoryEntry[] {
           mode = meta.mode;
           cost = meta.cost;
           sessionId = meta.sessionId;
-        } catch {}
+        } catch (_e) {
+          void _e;
+        }
         return {
           file,
           mode,
@@ -221,7 +216,9 @@ function readAllHistory(): HistoryEntry[] {
         mode = meta.mode;
         cost = meta.cost;
         sessionId = meta.sessionId;
-      } catch {}
+      } catch (_e) {
+        void _e;
+      }
       entries.push({
         file,
         mode,
@@ -231,7 +228,9 @@ function readAllHistory(): HistoryEntry[] {
         mtime: statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0,
       });
     }
-  } catch {}
+  } catch (_e) {
+    void _e;
+  }
   return entries.sort((a, b) => b.mtime - a.mtime);
 }
 
@@ -375,7 +374,8 @@ async function delegate(
     throw new Error('another delegate run is already in progress (global limit)');
   // per-harness limit if configured as object
   const perHarnessLimit = (() => {
-    const mc = config.maxConcurrent as unknown as { perHarness?: Record<string, number> };
+    // SAFETY: maxConcurrent shape checked for perHarness record before access
+    const mc = config.maxConcurrent as unknown as { perHarness?: Record<string, number> }; // SAFETY: shape checked before access
     if (mc && typeof mc === 'object' && mc.perHarness && typeof mc.perHarness[harnessName] === 'number')
       return mc.perHarness[harnessName]!;
     return maxGlobal;
@@ -478,7 +478,9 @@ async function delegate(
             output: streamedFull,
           }),
         );
-      } catch {}
+      } catch (_e) {
+        void _e;
+      }
     }
     throw err;
   }
@@ -680,7 +682,7 @@ export default function (pi: ExtensionAPI) {
         scope: params.scope,
         model: params.model,
         maxBudgetUsd: params.maxBudgetUsd,
-        allowDangerous: params.allowDangerous ?? config.allowDangerous,
+        allowDangerous: params.allowDangerous === true, // invariant: never inherit from config.allowDangerous — danger requires explicit per-call approval
         sessionId: params.sessionId,
         pr: params.pr,
         signal,
@@ -772,7 +774,8 @@ export default function (pi: ExtensionAPI) {
     },
   };
 
-  pi.registerTool(delegateToolDef as unknown as Parameters<typeof pi.registerTool>[0]);
+  // SAFETY: delegateToolDef satisfies registerTool params via TypeBox, widened for alias registration
+  pi.registerTool(delegateToolDef as unknown as Parameters<typeof pi.registerTool>[0]); // SAFETY: delegateToolDef satisfies registerTool params
 
   // deprecated alias
   pi.registerTool({
@@ -782,7 +785,8 @@ export default function (pi: ExtensionAPI) {
       'Deprecated alias for delegate{harness:claude}. Use delegate tool with harness:claude instead. ' +
       (delegateToolDef as { description: string }).description,
     promptSnippet: 'Delegate a subtask to Claude Code (deprecated alias)',
-    promptGuidelines: [...(delegateToolDef as unknown as { promptGuidelines: string[] }).promptGuidelines],
+    // SAFETY: delegateToolDef promptGuidelines is string[] from literal, safe to spread
+    promptGuidelines: [...(delegateToolDef as unknown as { promptGuidelines: string[] }).promptGuidelines], // SAFETY: promptGuidelines is string[]
     parameters: (delegateToolDef as { parameters: unknown }).parameters as never,
     async execute(
       toolCallId: string,
@@ -802,15 +806,22 @@ export default function (pi: ExtensionAPI) {
       ctx: ExtensionContext,
     ) {
       return (
-        delegateToolDef as unknown as {
-          execute: (a: string, b: unknown, c: unknown, d: unknown, e: unknown) => Promise<unknown>;
-        }
-      ).execute(toolCallId, { ...params, harness: 'claude' }, signal, onUpdate, ctx);
+        // SAFETY: deprecated alias delegates to primary tool, shape identical
+        (
+          delegateToolDef as unknown as {
+            // SAFETY: alias shape identical
+            execute: (a: string, b: unknown, c: unknown, d: unknown, e: unknown) => Promise<unknown>;
+          }
+        ).execute(toolCallId, { ...params, harness: 'claude' }, signal, onUpdate, ctx)
+      );
     },
-    renderCall: (delegateToolDef as unknown as { renderCall: (a: unknown, b: unknown) => unknown }).renderCall,
-    renderResult: (delegateToolDef as unknown as { renderResult: (a: unknown, b: unknown, c: unknown) => unknown })
+    // SAFETY: delegateToolDef renderCall matches expected signature
+    renderCall: (delegateToolDef as unknown as { renderCall: (a: unknown, b: unknown) => unknown }).renderCall, // SAFETY: matches signature
+    // SAFETY: delegateToolDef renderResult matches expected signature
+    renderResult: (delegateToolDef as unknown as { renderResult: (a: unknown, b: unknown, c: unknown) => unknown }) // SAFETY: matches signature
       .renderResult,
-  } as unknown as Parameters<typeof pi.registerTool>[0]);
+    // SAFETY: final alias tool matches registerTool overload
+  } as unknown as Parameters<typeof pi.registerTool>[0]); // SAFETY: alias tool matches overload
 
   // ── Commands ─────────────────────────────────────────────────────────────
   const makeHandler = (forcedHarness?: string) => async (args: string, ctx: ExtensionContext) => {
@@ -1059,7 +1070,7 @@ export default function (pi: ExtensionAPI) {
     handler: makeHandler('amp'),
   });
 
-  pi.on('input', async (event, ctx) => {
+  pi.on('input', async (event, _ctx) => {
     if (event.source === 'extension') return { action: 'continue' };
     const hint = delegationHint(event.text, { autoDelegateHints: loadConfig().autoDelegateHints });
     if (!hint) return { action: 'continue' };

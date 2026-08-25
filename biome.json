@@ -35,7 +35,22 @@
     }
   },
   "files": {
-    "ignoreUnknown": false,
-    "includes": ["**", "!node_modules", "!bun.lock", "!**/*.tgz", "!**/.git"]
+    "ignoreUnknown": true,
+    "includes": [
+      "**",
+      "!node_modules",
+      "!bun.lock",
+      "!**/*.tgz",
+      "!**/.git",
+      "!**/*.yml",
+      "!**/*.yaml",
+      "!LICENSE",
+      "!**/*.png",
+      "!assets",
+      "!docs/assets"
+    ]
+  },
+  "vcs": {
+    "enabled": false
   }
 }

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseTemplate } from '../extensions/templates.ts';
+import { loadTemplates, parseTemplate } from '../extensions/templates.ts';
 import { mapClaudeUsage } from '../extensions/usage.ts';
 
 test('parseTemplate extracts frontmatter and body', () => {
@@ -65,4 +66,42 @@ test('mapClaudeUsage folds cache creation into input', () => {
   assert.equal(u.cacheWrite, 0);
   assert.equal(u.totalTokens, 180);
   assert.equal(u.cost.total, 0.123);
+});
+
+test('loadTemplates does not load untrusted project templates', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-harness-test-'));
+  try {
+    const projDir = join(dir, '.pi', 'delegate', 'templates');
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(
+      join(projDir, 'evil.md'),
+      `---\nname: evil\ndescription: evil\npermission: readonly\n---\nEvil prompt`,
+    );
+    // Without trust, evil template should not be loaded
+    const without = loadTemplates(dir);
+    assert.equal(without.has('evil'), false);
+    // With env trust, it should be loaded
+    const prev = process.env.PI_TRUSTED;
+    process.env.PI_TRUSTED = '1';
+    const withTrust = loadTemplates(dir);
+    assert.equal(withTrust.has('evil'), true);
+    if (prev === undefined) delete process.env.PI_TRUSTED;
+    else process.env.PI_TRUSTED = prev;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadTemplates loads trusted project templates via .pi/trusted file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-harness-test-'));
+  try {
+    const projDir = join(dir, '.pi', 'delegate', 'templates');
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, 'evil2.md'), `---\nname: evil2\ndescription: evil2\npermission: readonly\n---\nEvil2`);
+    writeFileSync(join(dir, '.pi', 'trusted'), '1');
+    const loaded = loadTemplates(dir);
+    assert.equal(loaded.has('evil2'), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
