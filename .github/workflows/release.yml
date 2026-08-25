@@ -39,6 +39,7 @@ jobs:
       # changeset publish invokes bun publish; bun 1.3.14 supports OIDC via `bun publish
       # --provenance` when id-token: write is present. If OIDC fails, fallback is
       # `npm publish --provenance` explicitly (no long-lived token).
+      # Release publishes on Node 26 (latest LTS). CI matrix covers 22/24/26.
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 26
