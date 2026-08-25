@@ -11,7 +11,7 @@ Guidance for AI coding agents working in this repository.
 | Command | What it does |
 | --- | --- |
 | `bun run typecheck` | `tsc --noEmit` over `extensions/` (strict, `allowImportingTsExtensions`) |
-| `bun test` | `node --experimental-strip-types --test tests/**/*.test.ts` (62 tests, node:test) |
+| `bun test` | `bun test` (64 tests, bun:test — node:test compatible) |
 | `bun run lint` | `biome check .` (2 spaces, 120 cols, single quotes) |
 | `bun run lint:fix` | `biome check --write .` |
 | `bun run verify` | `lint + typecheck + test` — CI and release both run this |
@@ -64,7 +64,7 @@ Changesets + OIDC trusted publishing. No manual `version` bump, no `npm publish`
 5. Review version numbers → Merge Version Packages PR → Release workflow runs `bun run release` (`typecheck + check-packables + changeset publish`), creates tag `vX.Y.Z` pinned to `$GITHUB_SHA` + one GitHub Release, verifies `latest` dist-tag.
 6. On machines with the package installed: `pi update --extensions`.
 
-Load-test a local change: `pi -e <repo path> -p "Reply with exactly: OK" --no-tools`. Engine can be exercised without pi: `node --experimental-strip-types --input-type=module -e "import {runHarness} from './extensions/runner.ts'; import {claudeHarness} from './extensions/harnesses/claude.ts'; …"`.
+Load-test a local change: `pi -e <repo path> -p "Reply with exactly: OK" --no-tools`. Engine can be exercised without pi: `bun --input-type=module -e "import {runHarness} from './extensions/runner.ts'; import {claudeHarness} from './extensions/harnesses/claude.ts'; …"`.
 
 Load-test the release guard: `node scripts/check-packables.mjs` — must pass; fails on `0.0.0` or empty `extensions/`.
 

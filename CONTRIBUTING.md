@@ -17,7 +17,7 @@ bun install
 bun run lint        # Biome check (2 spaces, 120 cols, single quotes)
 bun run lint:fix    # auto-fix
 bun run typecheck   # tsc --noEmit
-bun test            # node:test + strip-types, 62 tests
+bun test            # bun:test (node:test compatible), 64 tests
 bun run verify      # lint + typecheck + test (also runs in CI/release)
 ```
 
@@ -33,7 +33,7 @@ extensions/            # the pi extension
   templates.ts         # frontmatter parsing + template discovery (partitioned)
   usage.ts             # harness usage/cost → pi Usage
 templates/             # built-in modes: review, plan, implement, security-audit, docs, general
-tests/                 # node:test unit tests
+tests/                 # bun:test unit tests (node:test compatible)
 scripts/
   check-packables.mjs  # guard: refuses 0.0.0 and empty extensions/ tarball
 ```
