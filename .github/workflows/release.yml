@@ -55,8 +55,8 @@ jobs:
         with:
           version-script: bun run version-packages
           publish-script: bun run release
-          commit-message: 'chore: version packages'
-          pr-title: 'chore: version packages'
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"
           create-github-releases: false
           push-git-tags: false
         env:
@@ -161,4 +161,3 @@ jobs:
           fi
 
           echo 'latest points at the released version.'
-
