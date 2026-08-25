@@ -19,6 +19,16 @@
       "enabled": true
     }
   },
+  "css": {
+    "formatter": {
+      "enabled": true
+    }
+  },
+  "html": {
+    "formatter": {
+      "enabled": true
+    }
+  },
   "overrides": [
     {
       "includes": ["**/*.json", "**/*.jsonc"],
@@ -31,11 +41,11 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "preset": "recommended"
     }
   },
   "files": {
-    "ignoreUnknown": true,
+    "ignoreUnknown": false,
     "includes": [
       "**",
       "!node_modules",
@@ -45,12 +55,16 @@
       "!**/*.yml",
       "!**/*.yaml",
       "!LICENSE",
+      "!**/LICENSE",
       "!**/*.png",
-      "!assets",
-      "!docs/assets"
+      "!**/*.jpg",
+      "!**/*.jpeg",
+      "!**/*.webp"
     ]
   },
   "vcs": {
-    "enabled": false
+    "enabled": false,
+    "clientKind": "git",
+    "useIgnoreFile": true
   }
 }
