@@ -1,6 +1,6 @@
 {
   "name": "pi-harness-delegate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Delegate work to any harness (Claude Code, Muse, OpenCode, Amp) from the pi coding agent \u2014 code reviews, plans, implementation, security audits, docs, or your own custom templates.",
   "type": "module",
   "packageManager": "bun@1.3.14",

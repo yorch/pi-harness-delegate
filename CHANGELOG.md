@@ -1,5 +1,11 @@
 # pi-harness-delegate
 
+## 0.2.2
+
+### Patch Changes
+
+- [#7](https://github.com/yorch/pi-harness-delegate/pull/7) [`b61c55d`](https://github.com/yorch/pi-harness-delegate/commit/b61c55d7e7cabd46360e066e17c662c08fb100bd) Thanks [@yorch](https://github.com/yorch)! - fix: tighten harness parsers with live JSONL fixtures (opencode step_finish, amp message_update, codex error)
+
 ## 0.2.1
 
 ### Patch Changes
