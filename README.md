@@ -1,5 +1,7 @@
 # pi-harness-delegate
 
+[![npm version](https://img.shields.io/npm/v/pi-harness-delegate?logo=npm&color=CB3837)](https://www.npmjs.com/package/pi-harness-delegate) [![CI](https://github.com/yorch/pi-harness-delegate/actions/workflows/ci.yml/badge.svg)](https://github.com/yorch/pi-harness-delegate/actions/workflows/ci.yml) [![Release](https://github.com/yorch/pi-harness-delegate/actions/workflows/release.yml/badge.svg)](https://github.com/yorch/pi-harness-delegate/actions/workflows/release.yml) [![Node](https://img.shields.io/badge/node-26.x-brightgreen?logo=node.js)](https://nodejs.org) [![Bun](https://img.shields.io/badge/bun-1.3.14-black?logo=bun)](https://bun.sh) [![Biome](https://img.shields.io/badge/Biome-2.5.10-60a5fa)](https://biomejs.dev) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Delegate work to **any harness** ([Claude Code](https://github.com/anthropics/claude-code), [Muse](https://github.com/openai/codex), [OpenCode](https://opencode.ai), [Amp](https://ampcode.com)) from the [pi coding agent](https://github.com/badlogic/pi-mono): code reviews, detailed plans, implementation, security audits, docs — or your own custom templates.
 
 Each harness runs headless in your repo with a normalized permission (`readonly` / `edit` / `danger`). Results stream back live, and token/cost usage feeds into pi's footer stats. Templates are portable — prompt bodies live in `templates/shared/`, harness-specific frontmatter selects the native permission.
@@ -44,7 +46,7 @@ The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff
 ## Harnesses
 
 | Harness | Binary | Permission mapping | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `claude` | `claude` | `readonly→plan`, `edit→acceptEdits`, `danger→bypassPermissions` | Full stream-json, cost + context% |
 | `codex` | `codex` | `readonly→read-only`, `edit→workspace-write`, `danger→danger-full-access` | `codex exec --json`, best-effort JSONL |
 | `opencode` | `opencode` | `readonly→read-only`, `edit→allow-edit`, `danger→danger` | `opencode run --format json` |
@@ -55,7 +57,7 @@ Detect availability: `delegate` checks `harness --version` at startup; missing h
 ## Modes (templates)
 
 | Mode | Permission | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `review` | `readonly` | Code review, cites `file:line`, prioritized findings |
 | `plan` | `readonly` | Detailed implementation plan with steps + risks |
 | `implement` | `edit` | Implements a task, runs checks, reports changes |
@@ -167,9 +169,9 @@ Review what the harness is asked to do before granting broad permissions.
 ## Development
 
 ```bash
-npm install
-npm run typecheck
-npm test
+bun install
+bun run typecheck
+bun test
 ```
 
 See `AGENTS.md` for architecture. Release: bump `version` in `package.json`, `npm publish --access public`, `pi update --extensions`.
