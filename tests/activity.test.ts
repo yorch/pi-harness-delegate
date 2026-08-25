@@ -20,7 +20,7 @@ test('formatToolUse prefers description', () => {
 });
 
 test('formatToolUse truncates long commands', () => {
-  const long = 'echo ' + 'x'.repeat(200);
+  const long = `echo ${'x'.repeat(200)}`;
   const out = formatToolUse('Bash', { command: long });
   assert.ok(out.length <= 100, `length ${out.length}`);
   assert.ok(out.endsWith('…'));

@@ -15,8 +15,8 @@ function loadFixture(name: string): string[] {
 test('opencode fixture parses hello with step_finish tokens', () => {
   const lines = loadFixture('opencode-hello.jsonl');
   const state = { streamedText: '', activities: [], result: null, _harness: {} };
-  let last: ReturnType<typeof parseOpencodeLine> | null = null;
-  for (const l of lines) last = parseOpencodeLine(l, state);
+  let _last: ReturnType<typeof parseOpencodeLine> | null = null;
+  for (const l of lines) _last = parseOpencodeLine(l, state);
   // opencode hello should have captured streamedText "Hello there, nice to meet you!"
   // feed lines sequentially updating state
   const st2 = { streamedText: '', activities: [] as never[], result: null, _harness: {} } as never;

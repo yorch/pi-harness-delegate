@@ -27,7 +27,7 @@ test('claude harness parses stream deltas and result', () => {
     { streamedText: 'hi', activities: [], result: null },
   );
   assert.ok(out2.result);
-  assert.equal(out2.result!.sessionId, 'abc');
+  assert.equal(out2.result?.sessionId, 'abc');
 });
 
 test('codex harness parses plain text fallback', () => {
@@ -48,7 +48,7 @@ test('codex harness parses json result', () => {
     state,
   );
   assert.ok(out.result);
-  assert.equal(out.result!.sessionId, 'sess-1');
+  assert.equal(out.result?.sessionId, 'sess-1');
 });
 
 test('opencode harness parses text', () => {

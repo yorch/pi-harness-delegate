@@ -10,65 +10,71 @@ import type {
 } from './types.ts';
 
 const execFileAsync = promisify(execFile);
-
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
-
 const SANDBOX_MAP: Record<NormalizedPermission, string> = {
   readonly: 'read-only',
   edit: 'workspace-write',
   danger: 'danger-full-access',
 };
-
-function extractCodexText(o: Record<string, unknown>, _state: ParseState): string | undefined {
+function extractTextFromCodexEvent(o: Record<string, unknown>, _state: ParseState): string | undefined {
   if (typeof o.text === 'string' && o.type !== 'tool_use') return o.text;
   if (typeof o.output === 'string') return o.output;
   if (typeof o.delta === 'string') return o.delta;
-  if (typeof o.message === 'string') return o.message;
   if (isRecord(o.event) && typeof o.event.text === 'string') return o.event.text;
+  if (isRecord(o.event) && typeof (o.event as Record<string, unknown>).delta === 'string')
+    return (o.event as Record<string, unknown>).delta as string;
   if (isRecord(o.item) && typeof o.item.text === 'string') return o.item.text;
   if (isRecord(o.item) && typeof o.item.output === 'string') return o.item.output;
   if (o.type === 'agent_message' && typeof o.text === 'string') return o.text;
-  // codex error has message field at top level
   if (o.type === 'error' && typeof o.message === 'string') return o.message;
+  if (typeof o.error === 'string') return o.error;
   return undefined;
 }
-
 export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
   let o: unknown;
   try {
     o = JSON.parse(line);
   } catch {
-    if (line.trim().length > 0) return { streamedText: line + '\n', activities: [] };
+    if (line.trim().length > 0) return { streamedText: `${line}\n`, activities: [] };
     return { activities: [] };
   }
   if (!isRecord(o)) return { activities: [] };
-
   const activities: ParseOutcome['activities'] = [];
   let streamedText: string | undefined;
   const typeStr = typeof o.type === 'string' ? o.type : '';
   const item = isRecord(o.item) ? o.item : null;
-
-  // Error handling: codex emits {"type":"error","message":"..."} and turn.failed
+  // latch thread_id from thread.started
+  if (typeStr === 'thread.started' && typeof o.thread_id === 'string') {
+    (state as unknown as Record<string, unknown>)._harness = {
+      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
+      sessionId: o.thread_id,
+    };
+    return { activities, streamedText };
+  }
+  if (typeStr === 'turn.started') return { activities, streamedText };
   if (typeStr === 'error' && typeof o.message === 'string') {
     streamedText = o.message;
-    // treat as thinking or error activity? not needed, but capture as streamed
-    // don't return as final result yet — wait for turn.failed
   }
-  if (typeStr === 'turn.failed' || typeStr === 'turn.failed') {
+  if (typeof o.error === 'string' && !streamedText) streamedText = o.error;
+  if (typeStr === 'turn.failed') {
     const msg =
       isRecord(o.error) && typeof o.error.message === 'string'
         ? o.error.message
-        : typeof o.message === 'string'
-          ? o.message
-          : state.streamedText + (streamedText ?? '');
+        : typeof o.error === 'string'
+          ? o.error
+          : typeof o.message === 'string'
+            ? o.message
+            : state.streamedText + (streamedText ?? '');
+    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+      ?.sessionId as string | undefined;
     const result: StreamedResult = {
       result: msg,
       isError: true,
       numTurns: 1,
       totalCostUsd: 0,
-      sessionId: typeof o.thread_id === 'string' ? o.thread_id : typeof o.session_id === 'string' ? o.session_id : null,
+      sessionId: typeof o.thread_id === 'string' ? o.thread_id : (latched ?? null),
       stopReason: 'error',
       permissionDenials: [],
       durationMs: null,
@@ -81,10 +87,10 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
     };
     return { activities, streamedText, result };
   }
-
-  // Tool activity heuristics
   if (typeStr.includes('tool') || typeStr.includes('item.started') || typeStr.includes('function_call')) {
-    const toolName = item && typeof item.name === 'string' ? item.name : typeof o.name === 'string' ? o.name : null;
+    const toolName = (item && typeof item.name === 'string' ? item.name : typeof o.name === 'string' ? o.name : null) as
+      | string
+      | null;
     if (toolName) {
       if (typeStr.includes('started') || o.type === 'tool_use') {
         activities.push({ kind: 'tool_start', name: toolName });
@@ -92,59 +98,30 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
           activities.push({ kind: 'tool_input', name: toolName, input: item.input as Record<string, unknown> });
         else if (isRecord(o.input))
           activities.push({ kind: 'tool_input', name: toolName, input: o.input as Record<string, unknown> });
-      } else if (typeStr.includes('completed') || typeStr.includes('result')) {
+      } else if (typeStr.includes('completed') || typeStr.includes('result'))
         activities.push({ kind: 'tool_result', isError: o.is_error === true || o.error === true });
-      }
     }
   }
-  if (o.type === 'tool_result' || (typeStr === 'item.completed' && item?.type === 'tool_result')) {
+  if (o.type === 'tool_result' || (typeStr === 'item.completed' && item?.type === 'tool_result'))
     activities.push({ kind: 'tool_result', isError: (o as Record<string, unknown>).is_error === true });
-  }
   if (typeStr.includes('thinking') || o.type === 'reasoning' || item?.type === 'reasoning') {
-    const thinkingText = extractCodexText(o, state);
+    const thinkingText = extractTextFromCodexEvent(o, state);
     if (thinkingText) activities.push({ kind: 'thinking', chars: thinkingText.length });
     else activities.push({ kind: 'thinking', chars: 10 });
   }
-
-  // Thread/turn lifecycle: not text, ignore
-  if (typeStr === 'thread.started' || typeStr === 'turn.started' || typeStr === 'thread.completed') {
-    // thread.started carries thread_id, we could store it, but not needed for streaming
-    if (typeStr === 'thread.completed' && typeof o.thread_id === 'string') {
-      // treat as result if no other result
-      const result: StreamedResult = {
-        result: state.streamedText || '',
-        isError: false,
-        numTurns: 1,
-        totalCostUsd: 0,
-        sessionId: o.thread_id,
-        stopReason: null,
-        permissionDenials: [],
-        durationMs: null,
-        durationApiMs: null,
-        ttftMs: null,
-        model: null,
-        contextWindow: null,
-        maxOutputTokens: null,
-        usage: null,
-      };
-      return { activities, streamedText, result };
-    }
-    return { activities, streamedText };
-  }
-
-  const text = extractCodexText(o, state);
+  const text = extractTextFromCodexEvent(o, state);
   if (
     text &&
     !typeStr.includes('tool') &&
     !typeStr.includes('thinking') &&
     typeStr !== 'error' &&
     typeStr !== 'turn.failed'
-  ) {
+  )
     streamedText = text;
-  }
-
   if (o.type === 'result' || o.type === 'thread.completed' || o.type === 'task.completed') {
     const usage = isRecord(o.usage) ? o.usage : null;
+    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+      ?.sessionId as string | undefined;
     const result: StreamedResult = {
       result:
         typeof o.result === 'string'
@@ -162,7 +139,7 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
             ? o.thread_id
             : typeof o.id === 'string'
               ? o.id
-              : null,
+              : (latched ?? null),
       stopReason: typeof o.stop_reason === 'string' ? o.stop_reason : null,
       permissionDenials: Array.isArray(o.permission_denials) ? o.permission_denials : [],
       durationMs: typeof o.duration_ms === 'number' ? o.duration_ms : null,
@@ -198,10 +175,8 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
     };
     return { activities, streamedText, result };
   }
-
   return { activities, streamedText };
 }
-
 export const codexHarness: Harness = {
   name: 'codex',
   displayName: 'Muse',
@@ -231,12 +206,14 @@ export const codexHarness: Harness = {
   extractResult(state: ParseState): StreamedResult | null {
     if (state.result) return state.result;
     if (state.streamedText.trim().length > 0) {
+      const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
+        ?.sessionId as string | undefined;
       return {
         result: state.streamedText,
         isError: false,
         numTurns: 1,
         totalCostUsd: 0,
-        sessionId: null,
+        sessionId: latched ?? null,
         stopReason: null,
         permissionDenials: [],
         durationMs: null,
@@ -250,9 +227,5 @@ export const codexHarness: Harness = {
     }
     return null;
   },
-  permissionMap: {
-    readonly: ['read-only'],
-    edit: ['workspace-write'],
-    danger: ['danger-full-access'],
-  },
+  permissionMap: { readonly: ['read-only'], edit: ['workspace-write'], danger: ['danger-full-access'] },
 };

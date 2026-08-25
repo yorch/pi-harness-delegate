@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -46,7 +46,7 @@ test('config: legacy claudeDelegate migrates', async () => {
     const { loadConfig } = await import('../extensions/config.ts');
     const cfg = loadConfig();
     assert.equal(cfg.defaultMode, 'review');
-    assert.equal(cfg.harnesses['claude']?.model, 'opus');
+    assert.equal(cfg.harnesses.claude?.model, 'opus');
     assert.equal(cfg.maxConcurrent, 2);
   } finally {
     process.env.PI_CODING_AGENT_DIR = prev;

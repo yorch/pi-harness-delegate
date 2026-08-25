@@ -1034,7 +1034,7 @@ export default function (pi: ExtensionAPI) {
       } else if (ev.kind === 'tool_result') {
         if (chipActivity.startsWith('▶')) chipActivity += ev.isError ? ' ✗' : ' ✓';
         const last = feed.length - 1;
-        if (last >= 0 && feed[last].kind === 'tool') feed[last] = { ...feed[last], ok: ev.isError ? false : true };
+        if (last >= 0 && feed[last].kind === 'tool') feed[last] = { ...feed[last], ok: !ev.isError };
       } else if (ev.kind === 'thinking') {
         chipActivity = '💭 thinking…';
         thinkingChars += ev.chars;

@@ -35,14 +35,14 @@ test('extracts text deltas and the final result', () => {
   const { streamedText, result } = parseStreamLines(lines);
   assert.equal(streamedText, 'Hello');
   assert.ok(result);
-  assert.equal(result!.result, 'Hello');
-  assert.equal(result!.totalCostUsd, 0.01);
-  assert.equal(result!.usage!.inputTokens, 1);
-  assert.equal(result!.durationMs, 2500);
-  assert.equal(result!.ttftMs, 400);
-  assert.equal(result!.model, 'claude-sonnet-5');
-  assert.equal(result!.contextWindow, 1_000_000);
-  assert.equal(result!.maxOutputTokens, 64000);
+  assert.equal(result?.result, 'Hello');
+  assert.equal(result?.totalCostUsd, 0.01);
+  assert.equal(result?.usage?.inputTokens, 1);
+  assert.equal(result?.durationMs, 2500);
+  assert.equal(result?.ttftMs, 400);
+  assert.equal(result?.model, 'claude-sonnet-5');
+  assert.equal(result?.contextWindow, 1_000_000);
+  assert.equal(result?.maxOutputTokens, 64000);
 });
 
 test('handles malformed lines gracefully', () => {

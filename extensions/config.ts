@@ -61,7 +61,7 @@ export function loadConfig(): DelegateConfig {
     // Legacy claudeDelegate -> delegate.harnesses.claude migration
     if (settings.claudeDelegate && !settings.delegate) {
       const c = settings.claudeDelegate as Partial<DelegateConfig>;
-      if (typeof c.model === 'string') cfg.harnesses['claude'] = { ...(cfg.harnesses['claude'] ?? {}), model: c.model };
+      if (typeof c.model === 'string') cfg.harnesses.claude = { ...(cfg.harnesses.claude ?? {}), model: c.model };
       if (typeof c.timeoutMs === 'number' && c.timeoutMs > 0) cfg.timeoutMs = c.timeoutMs;
       if (typeof c.defaultMode === 'string') cfg.defaultMode = c.defaultMode;
       if (typeof c.allowDangerous === 'boolean') cfg.allowDangerous = c.allowDangerous;
@@ -134,8 +134,8 @@ export function loadConfig(): DelegateConfig {
     // also support legacy claudeDelegate merged when delegate also present (delegate wins)
     if (settings.claudeDelegate) {
       const c = settings.claudeDelegate as Partial<DelegateConfig>;
-      if (typeof c.model === 'string' && !cfg.harnesses['claude']?.model) {
-        cfg.harnesses['claude'] = { ...(cfg.harnesses['claude'] ?? {}), model: c.model };
+      if (typeof c.model === 'string' && !cfg.harnesses.claude?.model) {
+        cfg.harnesses.claude = { ...(cfg.harnesses.claude ?? {}), model: c.model };
       }
     }
   } catch {

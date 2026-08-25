@@ -32,7 +32,7 @@ function mapPerm(mode: string): 'readonly' | 'edit' | 'danger' {
 
 export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
   const perm = mapPerm(opts.permissionMode);
-  const nativePerm =
+  const _nativePerm =
     perm === 'readonly' && opts.permissionMode !== 'plan'
       ? opts.permissionMode
       : perm === 'danger' && opts.permissionMode !== 'bypassPermissions'
