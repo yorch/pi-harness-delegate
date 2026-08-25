@@ -1,5 +1,13 @@
 # pi-harness-delegate
 
+## 0.2.1
+
+### Patch Changes
+
+- [#6](https://github.com/yorch/pi-harness-delegate/pull/6) [`9fe2808`](https://github.com/yorch/pi-harness-delegate/commit/9fe2808e0d13beb3e6d318f0d16311070cb1fc26) Thanks [@yorch](https://github.com/yorch)! - chore: support Node 22,24,26
+  
+  Support Node 22, 24 and 26 via engines "22 || 24 || 26" and @types/node 22.15.32. CI now matrix 22/24/26, release stays on 26.
+
 ## 0.2.0
 
 ### Minor Changes
