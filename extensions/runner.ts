@@ -61,7 +61,7 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     };
 
     const rl = createInterface({ input: proc.stdout });
-    rl.on('line', (line) => {
+    rl.on('line', line => {
       const outcome = opts.harness.parseLine(line, state);
       if (outcome.streamedText) {
         if (firstTokenAt === null) firstTokenAt = Date.now();
@@ -82,7 +82,7 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     });
 
     proc.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
-    proc.on('close', (code) => {
+    proc.on('close', code => {
       // Don't synthesize fallback on non-zero exit without explicit result — surface the error
       if (code !== 0 && !state.result) {
         fail(new Error(stderr.trim() || `${opts.harness.binary} exited with code ${code}`));
@@ -98,7 +98,7 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
         fail(new Error(`${opts.harness.binary} finished without emitting a result`));
       }
     });
-    proc.on('error', (err) => {
+    proc.on('error', err => {
       fail(new Error(`failed to start ${opts.harness.binary}: ${err.message}`));
     });
 

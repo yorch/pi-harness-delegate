@@ -99,8 +99,8 @@ export function pruneOutputs(dir: string, maxCount: number): void {
     return;
   }
   const byMtime = files
-    .filter((f) => f.endsWith('.md'))
-    .map((f) => ({ f, mtime: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
+    .filter(f => f.endsWith('.md'))
+    .map(f => ({ f, mtime: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
     .sort((a, b) => b.mtime - a.mtime);
   for (const { f } of byMtime.slice(maxCount)) {
     try {

@@ -90,7 +90,7 @@ async function closeWhenMounted(getClose: () => (() => void) | null, capMs: numb
     close();
     return;
   }
-  await new Promise<void>((resolve) => {
+  await new Promise<void>(resolve => {
     const start = Date.now();
     const timer = setInterval(() => {
       const fn = getClose();
@@ -145,7 +145,7 @@ async function showModes(ctx: ExtensionContext, harnessFilter?: string): Promise
           `delegate — modes${harnessFilter ? ` (${harnessFilter})` : ''} (↑↓ scroll · any key to close)`,
         );
         const visible = rows.slice(offset, offset + height);
-        return [header, ...visible.map((l) => theme.fg('muted', truncateToWidth(l, width)))];
+        return [header, ...visible.map(l => theme.fg('muted', truncateToWidth(l, width)))];
       },
       handleInput(data: string): void {
         if (matchesKey(data, Key.up) && offset > 0) {
@@ -175,8 +175,8 @@ interface HistoryEntry {
 function readHistory(dir: string, harness: string): HistoryEntry[] {
   try {
     return readdirSync(dir)
-      .filter((f) => f.endsWith('.md') && !f.includes('-partial'))
-      .map((f) => {
+      .filter(f => f.endsWith('.md') && !f.includes('-partial'))
+      .map(f => {
         const file = join(dir, f);
         let mode = 'delegate';
         let cost = 0;
@@ -210,7 +210,7 @@ function readAllHistory(): HistoryEntry[] {
   }
   // also legacy dir for migration display
   try {
-    const legacy = readdirSync(legacyOutputsDir()).filter((f) => f.endsWith('.md'));
+    const legacy = readdirSync(legacyOutputsDir()).filter(f => f.endsWith('.md'));
     for (const f of legacy) {
       const file = join(legacyOutputsDir(), f);
       let mode = 'delegate';
@@ -249,7 +249,7 @@ async function viewTranscript(ctx: ExtensionContext, entry: HistoryEntry): Promi
         const resume = entry.sessionId ? ` · r resume` : '';
         const header = theme.fg('accent', `${basename(entry.file)} (↑↓ scroll${resume} · esc close)`);
         const visible = lines.slice(offset, offset + height);
-        return [header, ...visible.map((l) => theme.fg('muted', truncateToWidth(l, width)))];
+        return [header, ...visible.map(l => theme.fg('muted', truncateToWidth(l, width)))];
       },
       handleInput(data: string): void {
         if (matchesKey(data, Key.down) && offset < lines.length - 1) {
@@ -282,7 +282,7 @@ async function showHistory(ctx: ExtensionContext): Promise<void> {
     return;
   }
   const entry = await ctx.ui.custom((tui, theme, _kb, done) => {
-    const items: SelectItem[] = entries.map((e) => ({
+    const items: SelectItem[] = entries.map(e => ({
       value: e.file,
       label: `${e.harness} ${e.mode} · $${e.cost.toFixed(3)} · ${new Date(e.mtime).toISOString().slice(0, 16)}`,
       description: e.sessionId ? `session ${e.sessionId.slice(0, 8)}…` : undefined,
@@ -294,7 +294,7 @@ async function showHistory(ctx: ExtensionContext): Promise<void> {
       scrollInfo: (s: string) => theme.fg('dim', s),
       noMatch: (s: string) => theme.fg('warning', s),
     });
-    list.onSelect = (item) => done(item.value);
+    list.onSelect = item => done(item.value);
     list.onCancel = () => done(undefined);
     return {
       render: (w: number) => list.render(w),
@@ -306,7 +306,7 @@ async function showHistory(ctx: ExtensionContext): Promise<void> {
     };
   });
   if (entry) {
-    const chosen = entries.find((e) => e.file === entry);
+    const chosen = entries.find(e => e.file === entry);
     if (chosen) await viewTranscript(ctx, chosen);
   }
 }
@@ -441,11 +441,11 @@ async function delegate(
       signal: opts.signal,
       timeoutMs: config.harnesses[harnessName]?.timeoutMs ?? config.timeoutMs,
       resumeSessionId: opts.sessionId,
-      onStream: (t) => {
+      onStream: t => {
         streamedFull += t;
         opts.onStream?.(t);
       },
-      onActivity: (ev) => {
+      onActivity: ev => {
         activityEvents.push(ev);
         opts.onActivity?.(ev);
       },
@@ -684,11 +684,11 @@ export default function (pi: ExtensionAPI) {
         sessionId: params.sessionId,
         pr: params.pr,
         signal,
-        onStream: (text) => {
+        onStream: text => {
           liveTail = (liveTail + text).slice(-400);
           pushFeed();
         },
-        onActivity: (ev) => {
+        onActivity: ev => {
           if (ev.kind === 'tool_input') {
             feed.push(`▶ ${formatToolUse(ev.name, ev.input)}`);
             if (feed.length > 40) feed.splice(0, feed.length - 40);
@@ -719,7 +719,7 @@ export default function (pi: ExtensionAPI) {
       const mode = params.mode ?? 'general';
       const task = params.task ?? '';
       const taskStr = task ? ` — ${task.length > 60 ? `${task.slice(0, 59)}…` : task}` : '';
-      return new Text(theme.fg('accent', `${harness} ${mode}`) + theme.fg('dim', taskStr), 1, 1, (s) =>
+      return new Text(theme.fg('accent', `${harness} ${mode}`) + theme.fg('dim', taskStr), 1, 1, s =>
         theme.bg('toolPendingBg', s),
       );
     },
@@ -730,10 +730,10 @@ export default function (pi: ExtensionAPI) {
     ) {
       if (options.isPartial) {
         const text = (result.content ?? [])
-          .filter((c) => c.type === 'text')
-          .map((c) => c.text)
+          .filter(c => c.type === 'text')
+          .map(c => c.text)
           .join('\n');
-        return new Text(text, 1, 1, (s) => theme.bg('toolPendingBg', s));
+        return new Text(text, 1, 1, s => theme.bg('toolPendingBg', s));
       }
       const details = (result.details ?? {}) as Record<string, unknown>;
       const harness = typeof details.harness === 'string' ? details.harness : 'delegate';
@@ -759,8 +759,8 @@ export default function (pi: ExtensionAPI) {
       if (md) container.addChild(new Markdown(md, 1, 1, getMarkdownTheme()));
       else {
         const text = (result.content ?? [])
-          .filter((c) => c.type === 'text')
-          .map((c) => c.text)
+          .filter(c => c.type === 'text')
+          .map(c => c.text)
           .join('\n');
         container.addChild(new Text(text, 1, 1));
       }
@@ -933,7 +933,7 @@ export default function (pi: ExtensionAPI) {
       sessionId: parsed.sessionId,
       pr: parsed.pr,
       signal: ac.signal,
-      onStream: (t) => {
+      onStream: t => {
         liveTail = (liveTail + t).slice(-400);
         requestRender?.();
       },
@@ -972,7 +972,7 @@ export default function (pi: ExtensionAPI) {
           {
             overlay: true,
             overlayOptions: { width: '70%', maxHeight: '60%', anchor: 'top-center' },
-            onHandle: (h) => {
+            onHandle: h => {
               overlayHandle = h;
               activeOverlay = { show: () => h.setHidden(false), focus: () => h.focus(), runId };
               h.focus();

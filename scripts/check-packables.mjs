@@ -40,11 +40,11 @@ try {
     // bun pm pack lists files one per line, not JSON - synthesize JSON shape
     const files = packOutput
       .split('\n')
-      .map((l) => l.trim())
+      .map(l => l.trim())
       .filter(Boolean)
-      .map((f) => ({ path: f }));
+      .map(f => ({ path: f }));
     if (files.length === 0) fail('pack produced no files');
-    const hasExtensions = files.some((f) => f.path.startsWith('extensions/'));
+    const hasExtensions = files.some(f => f.path.startsWith('extensions/'));
     if (!hasExtensions) {
       fail(
         `Tarball for ${name}@${version} contains no files under extensions/. ` +
@@ -73,11 +73,11 @@ if (!Array.isArray(files) || files.length === 0) {
   fail(`pack for ${name}@${version} produced no files`);
 }
 
-const hasExtensions = files.some((f) => (f.path ?? f).startsWith('extensions/'));
+const hasExtensions = files.some(f => (f.path ?? f).startsWith('extensions/'));
 if (!hasExtensions) {
   const list = files
     .slice(0, 20)
-    .map((f) => `  - ${f.path ?? f}`)
+    .map(f => `  - ${f.path ?? f}`)
     .join('\n');
   fail(
     `Tarball for ${name}@${version} contains no files under extensions/. ` +

@@ -52,7 +52,7 @@ test('pruneOutputs keeps the newest N transcripts', () => {
       writeFileSync(join(dir, `00${i}-a.md`), 'x');
     }
     pruneOutputs(dir, 2);
-    assert.equal(readdirSync(dir).filter((f) => f.endsWith('.md')).length, 2);
+    assert.equal(readdirSync(dir).filter(f => f.endsWith('.md')).length, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

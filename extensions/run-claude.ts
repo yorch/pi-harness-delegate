@@ -57,5 +57,5 @@ export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
     resumeSessionId: opts.resumeSessionId,
     onStream: opts.onStream,
     onActivity: opts.onActivity,
-  }).then((r) => ({ ...r, streamedText: r.streamedText }));
+  }).then(r => ({ ...r, streamedText: r.streamedText }));
 }
