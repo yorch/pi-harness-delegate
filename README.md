@@ -46,7 +46,7 @@ The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff
 ## Harnesses
 
 | Harness | Binary | Permission mapping | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `claude` | `claude` | `readonly→plan`, `edit→acceptEdits`, `danger→bypassPermissions` | Full stream-json, cost + context% |
 | `codex` | `codex` | `readonly→read-only`, `edit→workspace-write`, `danger→danger-full-access` | `codex exec --json`, best-effort JSONL |
 | `opencode` | `opencode` | `readonly→read-only`, `edit→allow-edit`, `danger→danger` | `opencode run --format json` |
@@ -57,7 +57,7 @@ Detect availability: `delegate` checks `harness --version` at startup; missing h
 ## Modes (templates)
 
 | Mode | Permission | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `review` | `readonly` | Code review, cites `file:line`, prioritized findings |
 | `plan` | `readonly` | Detailed implementation plan with steps + risks |
 | `implement` | `edit` | Implements a task, runs checks, reports changes |
