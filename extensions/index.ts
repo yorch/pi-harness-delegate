@@ -41,7 +41,7 @@ import {
 } from './activity.ts';
 import { parseDelegateCommand, resolveDefaults } from './command.ts';
 import { outputsDir as getOutputsDir, legacyOutputsDir, loadConfig, resolveModelForHarness } from './config.ts';
-import { ALIASES, getHarness, HARNESS_NAMES, isKnownHarness } from './harnesses/registry.ts';
+import { ALIASES, detectAll, getHarness, HARNESS_NAMES, isKnownHarness } from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 
 import { delegationHint, stripMarker } from './hint.ts';
@@ -268,16 +268,28 @@ async function viewTranscript(ctx: ExtensionContext, entry: HistoryEntry): Promi
   });
 }
 
-async function showHistory(ctx: ExtensionContext): Promise<void> {
-  const entries = readAllHistory();
+function saveOutput(harness: string, mode: string, text: string): string {
+  const dir = outputsDirFor(harness);
+  mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const file = join(dir, `${stamp}-${safeSegmentName(mode)}.md`);
+  writeFileSync(file, text, 'utf8');
+  return file;
+}
+
+async function showHistory(ctx: ExtensionContext, harnessFilter?: string): Promise<void> {
+  const entries = harnessFilter ? readAllHistory().filter(e => e.harness === harnessFilter) : readAllHistory();
   if (entries.length === 0) {
-    ctx.ui.notify?.('No transcripts yet — run /delegate <harness> <mode> <prompt> first', 'info');
+    const msg = harnessFilter
+      ? `No transcripts yet for ${harnessFilter} — run /delegate ${harnessFilter} <mode> <prompt> first`
+      : 'No transcripts yet — run /delegate <harness> <mode> <prompt> first';
+    if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
+    else ctx.ui.notify?.(msg, 'info');
     return;
   }
   if (!ctx.hasUI) {
-    for (const e of entries) {
+    for (const e of entries)
       process.stdout.write(`${e.harness} ${e.mode} · $${e.cost.toFixed(3)} · ${e.sessionId ?? '-'}\n`);
-    }
     return;
   }
   const entry = await ctx.ui.custom((tui, theme, _kb, done) => {
@@ -310,13 +322,78 @@ async function showHistory(ctx: ExtensionContext): Promise<void> {
   }
 }
 
-function saveOutput(harness: string, mode: string, text: string): string {
-  const dir = outputsDirFor(harness);
-  mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = join(dir, `${stamp}-${safeSegmentName(mode)}.md`);
-  writeFileSync(file, text, 'utf8');
-  return file;
+async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promise<void> {
+  const cfg = loadConfig();
+  const detection = await detectAll();
+  const allHarnesses = harnessFilter ? [harnessFilter].filter(h => isKnownHarness(h)) : HARNESS_NAMES;
+  const lines: string[] = [];
+  lines.push(`delegate — status${harnessFilter ? ` (${harnessFilter})` : ''}`);
+  lines.push(`defaultHarness: ${cfg.defaultHarness} · defaultMode: ${cfg.defaultMode} · model: ${cfg.model ?? '—'}`);
+  lines.push(
+    `maxConcurrent: ${typeof cfg.maxConcurrent === 'number' ? cfg.maxConcurrent : JSON.stringify(cfg.maxConcurrent)} · maxTranscripts: ${cfg.maxTranscripts}`,
+  );
+  lines.push('');
+  lines.push('harness              binary   ok  version              outputs  templates  active');
+  lines.push('─'.repeat(78));
+  for (const h of harnessFilter ? allHarnesses : HARNESS_NAMES) {
+    const det = detection[h] ?? { ok: false };
+    const harness = getHarness(h);
+    const bin = harness?.binary ?? h;
+    const ver = det.version ? det.version.slice(0, 18) : det.hint ? '—' : '—';
+    const ok = det.ok ? '✓' : '✗';
+    let outputs = 0;
+    try {
+      outputs = readdirSync(getOutputsDir(h)).filter(f => f.endsWith('.md')).length;
+    } catch {}
+    let templates = 0;
+    try {
+      templates = loadTemplates(ctx.cwd, h).size;
+    } catch {}
+    const active = activeRuns.get(h) ?? 0;
+    const hint = !det.ok && det.hint ? `  ← ${det.hint}` : '';
+    lines.push(
+      `${h.padEnd(20)} ${bin.padEnd(8)} ${ok.padEnd(3)} ${ver.padEnd(20)} ${String(outputs).padEnd(8)} ${String(templates).padEnd(10)} ${active}${hint}`,
+    );
+  }
+  if (!harnessFilter) {
+    lines.push('');
+    lines.push(
+      `global active: ${globalActiveRuns} · aliases: ${
+        Object.entries(ALIASES)
+          .map(([k, v]) => `${k}→${v}`)
+          .join(', ') || '—'
+      }`,
+    );
+    lines.push(`outputs dir: ${getOutputsDir()} (plus ${legacyOutputsDir()} legacy)`);
+  }
+  if (!ctx.hasUI) {
+    process.stdout.write(`${lines.join('\n')}\n`);
+    return;
+  }
+  await ctx.ui.custom((tui, theme, _kb, done) => {
+    let offset = 0;
+    const height = 14;
+    return {
+      render(width: number): string[] {
+        const header = theme.fg(
+          'accent',
+          `delegate status${harnessFilter ? ` — ${harnessFilter}` : ''} (↑↓ scroll · any key to close)`,
+        );
+        const visible = lines.slice(offset, offset + height);
+        return [header, ...visible.map(l => theme.fg('muted', truncateToWidth(l, width)))];
+      },
+      handleInput(data: string): void {
+        if (matchesKey(data, Key.up) && offset > 0) {
+          offset--;
+          tui.requestRender();
+        } else if (matchesKey(data, Key.down) && offset < lines.length - 1) {
+          offset++;
+          tui.requestRender();
+        } else done(undefined);
+      },
+      invalidate() {},
+    };
+  });
 }
 
 function buildPrompt(
@@ -826,6 +903,28 @@ export default function (pi: ExtensionAPI) {
   // ── Commands ─────────────────────────────────────────────────────────────
   const makeHandler = (forcedHarness?: string) => async (args: string, ctx: ExtensionContext) => {
     const sub = args.trim();
+    const subLower = sub.toLowerCase();
+    // status / health / doctor — harness health check
+    if (subLower === 'status' || subLower === 'health' || subLower === 'doctor' || subLower === 'check') {
+      await showStatus(ctx, forcedHarness);
+      return;
+    }
+    if (
+      subLower.startsWith('status ') ||
+      subLower.startsWith('health ') ||
+      subLower.startsWith('doctor ') ||
+      subLower.startsWith('check ')
+    ) {
+      const maybeH = sub.split(/\s+/)[1]?.toLowerCase();
+      const flagMatch = sub.match(/--harness=([^\s]+)/);
+      const h =
+        forcedHarness ??
+        (flagMatch ? flagMatch[1].toLowerCase() : maybeH && isKnownHarness(maybeH) ? maybeH : undefined);
+      await showStatus(ctx, h);
+      return;
+    }
+    // extract --harness flag for list/history subcommands
+    const harnessFlag = sub.match(/--harness=([^\s]+)/)?.[1]?.toLowerCase();
     if (sub === 'watch' || sub === 'show') {
       if (activeOverlay) {
         activeOverlay.show();
@@ -835,19 +934,35 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    if (sub === 'list') {
-      await showModes(ctx, forcedHarness);
-      return;
-    }
-    if (sub.startsWith('list ')) {
-      const h = sub.slice(5).trim();
-      if (isKnownHarness(h)) {
+    if (sub === 'list' || subLower.startsWith('list ')) {
+      const h =
+        forcedHarness ??
+        harnessFlag ??
+        (subLower.startsWith('list ') ? sub.slice(5).trim().split(/\s+/)[0]?.toLowerCase() : undefined);
+      if (h && isKnownHarness(h)) {
         await showModes(ctx, h);
         return;
       }
+      if (sub === 'list' || subLower === `list --harness=${h}`) {
+        await showModes(ctx, forcedHarness ?? h);
+        return;
+      }
+      // fallback: list without filter or with unknown word — show filtered if known, otherwise all
+      await showModes(ctx, forcedHarness);
+      return;
     }
-    if (sub === 'history' || sub === 'logs') {
-      await showHistory(ctx);
+    if (sub === 'history' || sub === 'logs' || subLower.startsWith('history ') || subLower.startsWith('logs ')) {
+      const h =
+        forcedHarness ??
+        harnessFlag ??
+        (subLower.startsWith('history ') || subLower.startsWith('logs ')
+          ? sub.split(/\s+/)[1]?.toLowerCase()
+          : undefined);
+      if (h && isKnownHarness(h)) {
+        await showHistory(ctx, h);
+        return;
+      }
+      await showHistory(ctx, forcedHarness);
       return;
     }
 
