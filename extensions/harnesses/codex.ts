@@ -21,22 +21,17 @@ const SANDBOX_MAP: Record<NormalizedPermission, string> = {
   danger: 'danger-full-access',
 };
 
-function extractTextFromCodexEvent(o: Record<string, unknown>, state: ParseState): string | undefined {
-  // Codex JSON variants: try common shapes
-  // 1. {type:"item.completed", item:{type:"agent_message", text:"..."}}
-  // 2. {type:"thread.item.completed", item:{type:"agent_message", ...}}
-  // 3. {type:"event", event:{type:"response.output_text.delta", delta:"..."}}
-  // 4. Plain {"text":"..."} or {"output":"..."}
+function extractCodexText(o: Record<string, unknown>, _state: ParseState): string | undefined {
   if (typeof o.text === 'string' && o.type !== 'tool_use') return o.text;
   if (typeof o.output === 'string') return o.output;
   if (typeof o.delta === 'string') return o.delta;
+  if (typeof o.message === 'string') return o.message;
   if (isRecord(o.event) && typeof o.event.text === 'string') return o.event.text;
-  if (isRecord(o.event) && typeof (o.event as Record<string, unknown>).delta === 'string')
-    return (o.event as Record<string, unknown>).delta as string;
   if (isRecord(o.item) && typeof o.item.text === 'string') return o.item.text;
   if (isRecord(o.item) && typeof o.item.output === 'string') return o.item.output;
-  // agent_message
   if (o.type === 'agent_message' && typeof o.text === 'string') return o.text;
+  // codex error has message field at top level
+  if (o.type === 'error' && typeof o.message === 'string') return o.message;
   return undefined;
 }
 
@@ -45,7 +40,6 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
   try {
     o = JSON.parse(line);
   } catch {
-    // Non-JSON line: treat as streamed text (codex may emit plain text)
     if (line.trim().length > 0) return { streamedText: line + '\n', activities: [] };
     return { activities: [] };
   }
@@ -53,26 +47,49 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
 
   const activities: ParseOutcome['activities'] = [];
   let streamedText: string | undefined;
+  const typeStr = typeof o.type === 'string' ? o.type : '';
+  const item = isRecord(o.item) ? o.item : null;
+
+  // Error handling: codex emits {"type":"error","message":"..."} and turn.failed
+  if (typeStr === 'error' && typeof o.message === 'string') {
+    streamedText = o.message;
+    // treat as thinking or error activity? not needed, but capture as streamed
+    // don't return as final result yet — wait for turn.failed
+  }
+  if (typeStr === 'turn.failed' || typeStr === 'turn.failed') {
+    const msg =
+      isRecord(o.error) && typeof o.error.message === 'string'
+        ? o.error.message
+        : typeof o.message === 'string'
+          ? o.message
+          : state.streamedText + (streamedText ?? '');
+    const result: StreamedResult = {
+      result: msg,
+      isError: true,
+      numTurns: 1,
+      totalCostUsd: 0,
+      sessionId: typeof o.thread_id === 'string' ? o.thread_id : typeof o.session_id === 'string' ? o.session_id : null,
+      stopReason: 'error',
+      permissionDenials: [],
+      durationMs: null,
+      durationApiMs: null,
+      ttftMs: null,
+      model: null,
+      contextWindow: null,
+      maxOutputTokens: null,
+      usage: null,
+    };
+    return { activities, streamedText, result };
+  }
 
   // Tool activity heuristics
-  // Codex may emit: {type:"item.started", item:{type:"tool_use", name:"...", input:{}}}
-  // or {type:"tool_use", name:"..."}
-  const item = isRecord(o.item) ? o.item : null;
-  const typeStr = typeof o.type === 'string' ? o.type : '';
-
   if (typeStr.includes('tool') || typeStr.includes('item.started') || typeStr.includes('function_call')) {
-    const toolName = (item && typeof item.name === 'string' ? item.name : typeof o.name === 'string' ? o.name : null) as
-      | string
-      | null;
+    const toolName = item && typeof item.name === 'string' ? item.name : typeof o.name === 'string' ? o.name : null;
     if (toolName) {
       if (typeStr.includes('started') || o.type === 'tool_use') {
         activities.push({ kind: 'tool_start', name: toolName });
         if (item && isRecord(item.input))
-          activities.push({
-            kind: 'tool_input',
-            name: toolName,
-            input: item.input as Record<string, unknown>,
-          });
+          activities.push({ kind: 'tool_input', name: toolName, input: item.input as Record<string, unknown> });
         else if (isRecord(o.input))
           activities.push({ kind: 'tool_input', name: toolName, input: o.input as Record<string, unknown> });
       } else if (typeStr.includes('completed') || typeStr.includes('result')) {
@@ -84,20 +101,48 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
     activities.push({ kind: 'tool_result', isError: (o as Record<string, unknown>).is_error === true });
   }
   if (typeStr.includes('thinking') || o.type === 'reasoning' || item?.type === 'reasoning') {
-    const thinkingText = extractTextFromCodexEvent(o, state);
+    const thinkingText = extractCodexText(o, state);
     if (thinkingText) activities.push({ kind: 'thinking', chars: thinkingText.length });
     else activities.push({ kind: 'thinking', chars: 10 });
   }
 
-  // Text extraction
-  const text = extractTextFromCodexEvent(o, state);
-  if (text && !typeStr.includes('tool') && !typeStr.includes('thinking')) {
-    // Avoid double-counting tool inputs as text
+  // Thread/turn lifecycle: not text, ignore
+  if (typeStr === 'thread.started' || typeStr === 'turn.started' || typeStr === 'thread.completed') {
+    // thread.started carries thread_id, we could store it, but not needed for streaming
+    if (typeStr === 'thread.completed' && typeof o.thread_id === 'string') {
+      // treat as result if no other result
+      const result: StreamedResult = {
+        result: state.streamedText || '',
+        isError: false,
+        numTurns: 1,
+        totalCostUsd: 0,
+        sessionId: o.thread_id,
+        stopReason: null,
+        permissionDenials: [],
+        durationMs: null,
+        durationApiMs: null,
+        ttftMs: null,
+        model: null,
+        contextWindow: null,
+        maxOutputTokens: null,
+        usage: null,
+      };
+      return { activities, streamedText, result };
+    }
+    return { activities, streamedText };
+  }
+
+  const text = extractCodexText(o, state);
+  if (
+    text &&
+    !typeStr.includes('tool') &&
+    !typeStr.includes('thinking') &&
+    typeStr !== 'error' &&
+    typeStr !== 'turn.failed'
+  ) {
     streamedText = text;
   }
 
-  // Result detection: final result often {type:"result", result:"...", total_cost_usd, usage, ...}
-  // or {type:"thread.completed", ...}
   if (o.type === 'result' || o.type === 'thread.completed' || o.type === 'task.completed') {
     const usage = isRecord(o.usage) ? o.usage : null;
     const result: StreamedResult = {
@@ -170,7 +215,6 @@ export const codexHarness: Harness = {
     }
   },
   buildArgs(opts: BuildArgsOpts): string[] {
-    // codex exec --json <prompt> --sandbox <level> --ask-for-approval <level>
     const sandbox = opts.nativePermission ?? SANDBOX_MAP[opts.permission] ?? 'workspace-write';
     const args = ['exec', '--json', opts.prompt, '--sandbox', sandbox];
     if (opts.permission === 'danger' || sandbox === 'danger-full-access') args.push('--ask-for-approval', 'never');
@@ -178,7 +222,6 @@ export const codexHarness: Harness = {
     else args.push('--ask-for-approval', 'on-request');
     if (opts.model) args.push('--model', opts.model);
     if (opts.resumeSessionId) args.push('--thread-id', opts.resumeSessionId);
-    // maxBudgetUsd not natively supported; pass as env hint via --config if needed
     for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
     return args;
   },
@@ -187,7 +230,6 @@ export const codexHarness: Harness = {
   },
   extractResult(state: ParseState): StreamedResult | null {
     if (state.result) return state.result;
-    // Fallback: if no explicit result, synthesize from streamed text if any
     if (state.streamedText.trim().length > 0) {
       return {
         result: state.streamedText,

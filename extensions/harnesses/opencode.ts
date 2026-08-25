@@ -26,8 +26,10 @@ function extractOpencodeText(o: Record<string, unknown>): string | undefined {
   if (typeof o.output === 'string') return o.output;
   if (typeof o.delta === 'string') return o.delta;
   if (typeof o.content === 'string') return o.content;
+  if (isRecord(o.part) && typeof o.part.text === 'string') return o.part.text;
   if (isRecord(o.event) && typeof o.event.text === 'string') return o.event.text;
   if (isRecord(o.message) && typeof o.message.text === 'string') return o.message.text;
+  // opencode step_finish with part.tokens etc. not text
   return undefined;
 }
 
@@ -62,11 +64,55 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
     activities.push({ kind: 'thinking', chars: 10 });
   }
 
-  const text = extractOpencodeText(o);
-  if (text && !typeStr.includes('tool') && !typeStr.includes('thinking')) streamedText = text;
+  // Direct text at top level or part.text (opencode fixture: {type:"text", part:{text:"..."}})
+  const directText = extractOpencodeText(o);
+  if (directText && !typeStr.includes('tool') && !typeStr.includes('thinking')) streamedText = directText;
+  if (o.type === 'text' && isRecord(o.part) && typeof o.part.text === 'string') streamedText = o.part.text;
 
-  if (o.type === 'result' || o.type === 'completed' || o.type === 'done') {
-    const usage = isRecord(o.usage) ? o.usage : null;
+  // Terminal: result / completed / done / step_finish (opencode hello uses step_finish with part.tokens/cost)
+  if (o.type === 'result' || o.type === 'completed' || o.type === 'done' || o.type === 'step_finish') {
+    const part = isRecord(o.part) ? (o.part as Record<string, unknown>) : null;
+    const usageRaw = isRecord(o.usage)
+      ? o.usage
+      : part && isRecord((part as Record<string, unknown>).tokens)
+        ? ((part as Record<string, unknown>).tokens as Record<string, unknown>)
+        : null;
+    // opencode step_finish: part.tokens {input,output,total}, part.cost
+    const usage = isRecord(usageRaw) ? usageRaw : null;
+    const tokensInput = isRecord(usage)
+      ? typeof usage.input === 'number'
+        ? usage.input
+        : typeof usage.input_tokens === 'number'
+          ? usage.input_tokens
+          : 0
+      : 0;
+    const tokensOutput = isRecord(usage)
+      ? typeof usage.output === 'number'
+        ? usage.output
+        : typeof usage.output_tokens === 'number'
+          ? usage.output_tokens
+          : 0
+      : 0;
+    const cost =
+      typeof o.total_cost_usd === 'number'
+        ? o.total_cost_usd
+        : typeof part?.cost === 'number'
+          ? part.cost
+          : typeof o.cost === 'number'
+            ? o.cost
+            : 0;
+    const sessionId =
+      typeof o.session_id === 'string'
+        ? o.session_id
+        : typeof o.sessionID === 'string'
+          ? o.sessionID
+          : typeof (o as Record<string, unknown>).sessionID === 'string'
+            ? ((o as Record<string, unknown>).sessionID as string)
+            : isRecord(part) && typeof part.sessionID === 'string'
+              ? part.sessionID
+              : typeof o.id === 'string'
+                ? o.id
+                : null;
     const result: StreamedResult = {
       result:
         typeof o.result === 'string'
@@ -76,9 +122,10 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
             : state.streamedText + (streamedText ?? ''),
       isError: o.is_error === true,
       numTurns: typeof o.num_turns === 'number' ? o.num_turns : 0,
-      totalCostUsd: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : 0,
-      sessionId: typeof o.session_id === 'string' ? o.session_id : typeof o.id === 'string' ? o.id : null,
-      stopReason: typeof o.stop_reason === 'string' ? o.stop_reason : null,
+      totalCostUsd: cost,
+      sessionId,
+      stopReason:
+        typeof o.stop_reason === 'string' ? o.stop_reason : typeof part?.reason === 'string' ? part.reason : null,
       permissionDenials: [],
       durationMs: typeof o.duration_ms === 'number' ? o.duration_ms : null,
       durationApiMs: null,
@@ -88,8 +135,8 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
       maxOutputTokens: null,
       usage: usage
         ? {
-            inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : 0,
-            outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : 0,
+            inputTokens: tokensInput,
+            outputTokens: tokensOutput,
             cacheCreationInputTokens: 0,
             cacheReadInputTokens: 0,
           }
@@ -114,7 +161,6 @@ export const opencodeHarness: Harness = {
   },
   buildArgs(opts: BuildArgsOpts): string[] {
     const args = ['run', '--format', 'json', opts.prompt];
-    // permission not fully standardized; pass as --permission if supported
     const perm = opts.nativePermission ?? PERMISSION_MAP[opts.permission] ?? 'allow-edit';
     args.push('--permission', perm);
     if (opts.model) args.push('--model', opts.model);
