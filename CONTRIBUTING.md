@@ -14,7 +14,7 @@ Development and release notes for `pi-harness-delegate`.
 
 ```bash
 bun install
-bun run lint        # Biome check (tabs, 120 cols, single quotes)
+bun run lint        # Biome check (2 spaces, 120 cols, single quotes)
 bun run lint:fix    # auto-fix
 bun run typecheck   # tsc --noEmit
 bun test            # node:test + strip-types, 62 tests

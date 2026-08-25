@@ -12,7 +12,7 @@ Guidance for AI coding agents working in this repository.
 | --- | --- |
 | `bun run typecheck` | `tsc --noEmit` over `extensions/` (strict, `allowImportingTsExtensions`) |
 | `bun test` | `node --experimental-strip-types --test tests/**/*.test.ts` (62 tests, node:test) |
-| `bun run lint` | `biome check .` (tabs, 120 cols, single quotes) |
+| `bun run lint` | `biome check .` (2 spaces, 120 cols, single quotes) |
 | `bun run lint:fix` | `biome check --write .` |
 | `bun run verify` | `lint + typecheck + test` — CI and release both run this |
 | `bun changeset` | Create a changeset `.md` (commit it); `--empty` for docs/CI-only |
@@ -45,7 +45,7 @@ CI (`.github/workflows/ci.yml`) runs `verify` + `check-packables` + changeset pr
 
 ## Conventions
 
-- **Tabs**, single quotes, 120-col lines — enforced by Biome (`biome.json`: tab, 120, singleQuote, trailing all). Run `bun run lint:fix` if a diff looks unformatted.
+- **2 spaces**, single quotes, 120-col lines — enforced by Biome (`biome.json`: 2 spaces, 120, singleQuote, trailing all). Run `bun run lint:fix` if a diff looks unformatted.
 - TypeScript strict; explicit types on exported functions.
 - Relative imports **must include `.ts`** (`./runner.ts`) — jiti + `allowImportingTsExtensions`.
 - **Templates live as .md files with frontmatter**, never as code strings. Frontmatter: `name, description, permission: readonly|edit|danger, model, maxBudgetUsd, skill, defaultTask, defaultScope`. Legacy `permissionMode`/`sandbox` preserved as native escape hatch.
