@@ -1,5 +1,11 @@
 # pi-harness-delegate
 
+## 0.2.0
+
+### Minor Changes
+
+- [`ae49b9c`](https://github.com/yorch/pi-harness-delegate/commit/ae49b9cba563cbb607e1faee435338bd1e5be976) Thanks [@yorch](https://github.com/yorch)! - feat: Health & UX — /delegate status health check, per-harness detectAll UI, history/list filters by harness
+
 ## 0.1.1
 
 ### Patch Changes
