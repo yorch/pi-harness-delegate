@@ -174,7 +174,7 @@ bun run typecheck
 bun test
 ```
 
-See `AGENTS.md` for architecture. Release: bump `version` in `package.json`, `npm publish --access public`, `pi update --extensions`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the project layout, the release dev-loop, and the npm publish gotchas. Agents working in this repo should read [AGENTS.md](AGENTS.md).
 
 ## License
 
