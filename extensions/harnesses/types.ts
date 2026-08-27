@@ -12,8 +12,10 @@ export interface StreamedUsage {
 export interface StreamedResult {
   result: string;
   isError: boolean;
-  numTurns: number;
-  totalCostUsd: number;
+  /** null when the harness's payload doesn't report a turn count — distinct from a measured 0. */
+  numTurns: number | null;
+  /** null when the harness's payload doesn't report cost — distinct from a measured $0. */
+  totalCostUsd: number | null;
   sessionId: string | null;
   stopReason: string | null;
   permissionDenials: unknown[];
@@ -28,8 +30,8 @@ export interface StreamedResult {
 
 export type ActivityEvent =
   | { kind: 'tool_start'; name: string }
-  | { kind: 'tool_input'; name: string; input: Record<string, unknown> }
-  | { kind: 'tool_result'; isError: boolean }
+  | { kind: 'tool_input'; name: string; input: Record<string, unknown>; id?: string }
+  | { kind: 'tool_result'; isError: boolean; id?: string }
   | { kind: 'thinking'; chars: number };
 
 export interface ParseState {

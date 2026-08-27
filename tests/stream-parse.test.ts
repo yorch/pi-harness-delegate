@@ -79,8 +79,8 @@ test('extracts tool activity from the stream', () => {
   const { activities } = parseStreamLines(lines);
   assert.deepEqual(activities, [
     { kind: 'tool_start', name: 'Bash' },
-    { kind: 'tool_input', name: 'Bash', input: { command: 'ls', description: 'List files' } },
-    { kind: 'tool_result', isError: false },
+    { kind: 'tool_input', name: 'Bash', input: { command: 'ls', description: 'List files' }, id: 't1' },
+    { kind: 'tool_result', isError: false, id: 't1' },
     { kind: 'thinking', chars: 3 },
   ]);
 });
