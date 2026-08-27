@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseDelegateCommand } from '../extensions/command.ts';
+import { isFanoutSpec, parseDelegateCommand, resolveHarnessList } from '../extensions/command.ts';
 
 const MODES = new Set(['review', 'plan', 'implement', 'general']);
 const HARNESSES = new Set(['claude', 'codex', 'opencode', 'amp', 'omp']);
@@ -33,4 +33,83 @@ test('parseDelegateCommand harness and mode explicit flags', () => {
   const r = parseDelegateCommand('--harness=opencode --mode=review audit it', MODES, HARNESSES);
   assert.equal(r.harness, 'opencode');
   assert.equal(r.mode, 'review');
+});
+
+test('parseDelegateCommand recognizes "all" as a harness spec first word', () => {
+  const r = parseDelegateCommand('all review the auth flow', MODES, HARNESSES);
+  assert.equal(r.harness, 'all');
+  assert.equal(r.mode, 'review');
+  assert.equal(r.task, 'the auth flow');
+});
+
+test('parseDelegateCommand recognizes a comma-separated harness list as first word', () => {
+  const r = parseDelegateCommand('claude,codex plan the migration', MODES, HARNESSES);
+  assert.equal(r.harness, 'claude,codex');
+  assert.equal(r.mode, 'plan');
+});
+
+test('parseDelegateCommand --verify flag with a quoted multi-word command', () => {
+  const r = parseDelegateCommand('--mode=implement --verify="bun test" do the thing', MODES, HARNESSES);
+  assert.equal(r.verify, 'bun test');
+  assert.equal(r.task, 'do the thing');
+});
+
+test('parseDelegateCommand --verify flag without quotes (single word)', () => {
+  const r = parseDelegateCommand('--verify=lint implement it', MODES, HARNESSES);
+  assert.equal(r.verify, 'lint');
+});
+
+test('isFanoutSpec recognizes "all" and comma lists, rejects a single harness', () => {
+  assert.equal(isFanoutSpec('all'), true);
+  assert.equal(isFanoutSpec('claude,codex'), true);
+  assert.equal(isFanoutSpec('claude'), false);
+  assert.equal(isFanoutSpec(undefined), false);
+});
+
+test('resolveHarnessList "all" resolves to detected harnesses only, in known order', () => {
+  const r = resolveHarnessList('all', {
+    knownHarnesses: ['claude', 'codex', 'opencode', 'amp'],
+    aliasOf: name => (name === 'omp' ? 'amp' : name),
+    isKnown: name => ['claude', 'codex', 'opencode', 'amp'].includes(name),
+    detection: { claude: { ok: true }, codex: { ok: false }, opencode: { ok: true }, amp: { ok: false } },
+  });
+  assert.deepEqual(r.resolved, ['claude', 'opencode']);
+  assert.deepEqual(r.skipped, ['codex', 'amp']);
+  assert.deepEqual(r.unknown, []);
+});
+
+test('resolveHarnessList comma list resolves aliases and dedupes', () => {
+  const r = resolveHarnessList('omp,claude,amp', {
+    knownHarnesses: ['claude', 'codex', 'opencode', 'amp'],
+    aliasOf: name => (name === 'omp' ? 'amp' : name),
+    isKnown: name => ['claude', 'codex', 'opencode', 'amp', 'omp'].includes(name),
+    detection: { claude: { ok: true }, amp: { ok: true } },
+  });
+  assert.deepEqual(r.resolved, ['amp', 'claude']);
+  assert.deepEqual(r.unknown, []);
+  assert.deepEqual(r.skipped, []);
+});
+
+test('resolveHarnessList reports unknown harness names without failing the rest', () => {
+  const r = resolveHarnessList('claude,bogus', {
+    knownHarnesses: ['claude', 'codex', 'opencode', 'amp'],
+    aliasOf: name => name,
+    isKnown: name => ['claude', 'codex', 'opencode', 'amp'].includes(name),
+    detection: { claude: { ok: true } },
+  });
+  assert.deepEqual(r.resolved, ['claude']);
+  assert.deepEqual(r.unknown, ['bogus']);
+  assert.deepEqual(r.skipped, []);
+});
+
+test('resolveHarnessList reports uninstalled harnesses as skipped, not failed', () => {
+  const r = resolveHarnessList('claude,codex', {
+    knownHarnesses: ['claude', 'codex', 'opencode', 'amp'],
+    aliasOf: name => name,
+    isKnown: name => ['claude', 'codex', 'opencode', 'amp'].includes(name),
+    detection: { claude: { ok: true }, codex: { ok: false } },
+  });
+  assert.deepEqual(r.resolved, ['claude']);
+  assert.deepEqual(r.skipped, ['codex']);
+  assert.deepEqual(r.unknown, []);
 });
