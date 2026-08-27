@@ -22,6 +22,17 @@ test('formatMetrics omits unknown fields', () => {
   );
 });
 
+test('formatMetrics renders unknown numTurns/cost as — rather than a fake 0', () => {
+  assert.equal(
+    formatMetrics({ numTurns: null, totalCostUsd: null, promptTokens: 0, contextPercent: null, durationMs: null }),
+    '— turn(s) · $—',
+  );
+  assert.equal(
+    formatMetrics({ numTurns: 2, totalCostUsd: null, promptTokens: 0, contextPercent: null, durationMs: null }),
+    '2 turn(s) · $—',
+  );
+});
+
 test('parseTranscriptMeta extracts mode, cost, session', () => {
   const head = [
     '# Delegated Claude run — review',
@@ -40,9 +51,14 @@ test('parseTranscriptMeta extracts mode, cost, session', () => {
   });
 });
 
-test('parseTranscriptMeta defaults on unparseable head', () => {
-  assert.deepEqual(parseTranscriptMeta('garbage'), { mode: 'delegate', cost: 0, sessionId: null, harness: null });
-  assert.deepEqual(parseTranscriptMeta(''), { mode: 'delegate', cost: 0, sessionId: null, harness: null });
+test('parseTranscriptMeta defaults on unparseable head (unknown cost is null, not 0)', () => {
+  assert.deepEqual(parseTranscriptMeta('garbage'), { mode: 'delegate', cost: null, sessionId: null, harness: null });
+  assert.deepEqual(parseTranscriptMeta(''), { mode: 'delegate', cost: null, sessionId: null, harness: null });
+});
+
+test('parseTranscriptMeta tolerates a header with unknown cost ("n/a")', () => {
+  const head = ['# Delegated Codex run — general', '', '- turns: n/a · cost: n/a · isError: false', ''].join('\n');
+  assert.equal(parseTranscriptMeta(head).cost, null);
 });
 
 test('buildReportContent assembles header, body and footers', () => {
