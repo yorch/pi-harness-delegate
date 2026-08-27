@@ -60,12 +60,24 @@ test('mapClaudeUsage folds cache creation into input', () => {
     cacheReadInputTokens: 50,
     totalCostUsd: 0.123,
   });
+  assert.ok(u);
   assert.equal(u.input, 110);
   assert.equal(u.output, 20);
   assert.equal(u.cacheRead, 50);
   assert.equal(u.cacheWrite, 0);
   assert.equal(u.totalTokens, 180);
   assert.equal(u.cost.total, 0.123);
+});
+
+test('mapClaudeUsage returns undefined when cost is unknown (not a fake $0)', () => {
+  const u = mapClaudeUsage({
+    inputTokens: 10,
+    outputTokens: 20,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    totalCostUsd: null,
+  });
+  assert.equal(u, undefined);
 });
 
 test('loadTemplates does not load untrusted project templates', () => {

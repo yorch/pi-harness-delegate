@@ -72,8 +72,8 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
     const result: StreamedResult = {
       result: msg,
       isError: true,
-      numTurns: 1,
-      totalCostUsd: 0,
+      numTurns: null,
+      totalCostUsd: null,
       sessionId: typeof o.thread_id === 'string' ? o.thread_id : (latched ?? null),
       stopReason: 'error',
       permissionDenials: [],
@@ -130,8 +130,9 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
             ? o.output
             : state.streamedText + (streamedText ?? ''),
       isError: o.is_error === true || o.error === true,
-      numTurns: typeof o.num_turns === 'number' ? o.num_turns : typeof o.turns === 'number' ? o.turns : 0,
-      totalCostUsd: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : typeof o.cost === 'number' ? o.cost : 0,
+      numTurns: typeof o.num_turns === 'number' ? o.num_turns : typeof o.turns === 'number' ? o.turns : null,
+      totalCostUsd:
+        typeof o.total_cost_usd === 'number' ? o.total_cost_usd : typeof o.cost === 'number' ? o.cost : null,
       sessionId:
         typeof o.session_id === 'string'
           ? o.session_id
@@ -211,8 +212,8 @@ export const codexHarness: Harness = {
       return {
         result: state.streamedText,
         isError: false,
-        numTurns: 1,
-        totalCostUsd: 0,
+        numTurns: null,
+        totalCostUsd: null,
         sessionId: latched ?? null,
         stopReason: null,
         permissionDenials: [],

@@ -118,7 +118,7 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
         ? ((actualUsage as Record<string, unknown>).total as number)
         : typeof o.total_cost_usd === 'number'
           ? o.total_cost_usd
-          : 0;
+          : null;
     const inputTokens = isRecord(actualUsage)
       ? typeof (actualUsage as Record<string, unknown>).input === 'number'
         ? ((actualUsage as Record<string, unknown>).input as number)
@@ -141,8 +141,8 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
             ? state.streamedText + streamedText
             : state.streamedText || (text ?? ''),
       isError: o.is_error === true,
-      numTurns: 1,
-      totalCostUsd: typeof cost === 'number' ? cost : 0,
+      numTurns: null,
+      totalCostUsd: cost,
       sessionId: typeof o.session_id === 'string' ? o.session_id : typeof o.id === 'string' ? o.id : (latched ?? null),
       stopReason:
         typeof o.stop_reason === 'string'
@@ -219,8 +219,8 @@ export const ampHarness: Harness = {
       return {
         result: state.streamedText,
         isError: false,
-        numTurns: 1,
-        totalCostUsd: 0,
+        numTurns: null,
+        totalCostUsd: null,
         sessionId: latched ?? null,
         stopReason: null,
         permissionDenials: [],

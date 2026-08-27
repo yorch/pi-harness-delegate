@@ -105,7 +105,7 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
           ? ((part as Record<string, unknown>).cost as number)
           : typeof o.cost === 'number'
             ? (o.cost as number)
-            : 0;
+            : null;
     const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
       ?.sessionId as string | undefined;
     const sessionId =
@@ -128,7 +128,7 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
             ? o.output
             : state.streamedText + (streamedText ?? ''),
       isError: o.is_error === true,
-      numTurns: typeof o.num_turns === 'number' ? o.num_turns : 0,
+      numTurns: typeof o.num_turns === 'number' ? o.num_turns : null,
       totalCostUsd: cost,
       sessionId,
       stopReason:
@@ -183,8 +183,8 @@ export const opencodeHarness: Harness = {
       return {
         result: state.streamedText,
         isError: false,
-        numTurns: 1,
-        totalCostUsd: 0,
+        numTurns: null,
+        totalCostUsd: null,
         sessionId: latched ?? null,
         stopReason: null,
         permissionDenials: [],
