@@ -101,6 +101,44 @@ export function formatSpend(s: HarnessSpend): string {
   return `$${s.totalCostUsd.toFixed(3)} over ${s.runs} run(s)${unknown}`;
 }
 
+/** Host-run verification (e.g. `bun test`) result — evidence only, never flips a run's `isError`. */
+export interface VerifyResult {
+  command: string;
+  exitCode: number;
+  ok: boolean;
+  /** Combined stdout+stderr, capped to the last `maxTail` chars. */
+  outputTail: string;
+}
+
+const VERIFY_TAIL_MAX = 2000;
+
+/** Which verify command applies for a run: an explicit per-call override wins over the template's. */
+export function resolveVerifyCommand(
+  callOverride: string | undefined,
+  templateVerify: string | undefined,
+): string | undefined {
+  return callOverride || templateVerify || undefined;
+}
+
+/** Build a `VerifyResult` from a raw exit code + combined output, capping the tail. Pure. */
+export function buildVerifyResult(
+  command: string,
+  exitCode: number,
+  output: string,
+  maxTail = VERIFY_TAIL_MAX,
+): VerifyResult {
+  const outputTail = output.length > maxTail ? output.slice(-maxTail) : output;
+  return { command, exitCode, ok: exitCode === 0, outputTail };
+}
+
+/** Markdown section for a verify result — report-only evidence, distinct from the harness's own isError. */
+export function formatVerifySection(v: VerifyResult): string {
+  const lines = [`### Verify: \`${v.command}\``, v.ok ? `✓ exit ${v.exitCode}` : `✗ exit ${v.exitCode}`];
+  const tail = v.outputTail.trim();
+  if (tail) lines.push(...tail.split('\n').map(l => `  ${l}`));
+  return lines.join('\n');
+}
+
 /** Build the markdown report content injected into the session on the next turn. */
 export function buildReportContent(opts: {
   harness?: string;
@@ -109,6 +147,7 @@ export function buildReportContent(opts: {
   body: string;
   file?: string;
   sessionId?: string;
+  verify?: VerifyResult;
 }): string {
   const harness = opts.harness ?? 'claude';
   const header = `## ${harness} ${opts.mode} (${opts.metrics})`;
@@ -118,7 +157,50 @@ export function buildReportContent(opts: {
     foot.push(
       `resume: \`/delegate --harness=${opts.harness} --resume=${opts.sessionId} <prompt>\` (or /${opts.harness} --resume=${opts.sessionId})`,
     );
-  return [header, '', opts.body, foot.length > 0 ? `\n_${foot.join(' · ')}_` : ''].join('\n');
+  const verifySection = opts.verify ? `\n${formatVerifySection(opts.verify)}\n` : '';
+  return [header, '', opts.body, verifySection, foot.length > 0 ? `\n_${foot.join(' · ')}_` : ''].join('\n');
+}
+
+/** One harness's outcome within a fan-out, for the synthesized comparison report. */
+export interface FanoutRunSummary {
+  harness: string;
+  ok: boolean;
+  /** `formatMetrics` output — omitted (and `error` used instead) when the run failed to complete. */
+  metrics?: string;
+  cost: number | null;
+  body?: string;
+  file?: string;
+  sessionId?: string;
+  error?: string;
+  verify?: VerifyResult;
+}
+
+/**
+ * Mechanically assemble one comparison report across all fan-out runs — no second model call.
+ * Groups per-harness metrics/output and rolls up total spend via `aggregateSpend`/`formatSpend`.
+ * Header-free — callers wrap this body with their own `## <label> (...)` header.
+ */
+export function buildFanoutReport(opts: { runs: FanoutRunSummary[]; skipped: string[]; unknown: string[] }): string {
+  const lines: string[] = [];
+  if (opts.unknown.length > 0) lines.push(`_unknown harness(es), skipped: ${opts.unknown.join(', ')}_`);
+  if (opts.skipped.length > 0) lines.push(`_not installed, skipped: ${opts.skipped.join(', ')}_`);
+  if (opts.unknown.length > 0 || opts.skipped.length > 0) lines.push('');
+
+  const spend = aggregateSpend(opts.runs.map(r => ({ harness: r.harness, cost: r.cost })));
+  lines.push(`**Total spend:** ${formatSpend(spend.total)}`, '');
+
+  for (const r of opts.runs) {
+    lines.push(`### ${r.harness}${r.ok ? '' : ' — failed'}`);
+    if (r.ok) {
+      lines.push(r.metrics ?? '', '', r.body ?? '(empty)');
+    } else {
+      lines.push(`error: ${r.error ?? 'unknown error'}`);
+    }
+    if (r.verify) lines.push('', formatVerifySection(r.verify));
+    if (r.file) lines.push('', `_transcript: ${r.file}_`);
+    lines.push('');
+  }
+  return lines.join('\n').trimEnd();
 }
 
 /** Legacy wrapper for compat */
@@ -248,6 +330,8 @@ export function buildTranscript(
     contextWindow: number | null;
     activityLog: string[];
     output: string;
+    /** Host-run verification result, when a `verify` command was configured for this run. */
+    verify?: VerifyResult;
   } & Record<string, unknown>,
 ): string {
   const harness = (opts.harness as string | undefined) ?? 'claude';
@@ -308,6 +392,7 @@ export function buildTranscript(
     '## Output',
     opts.output || '(empty)',
     '',
+    ...(opts.verify ? [formatVerifySection(opts.verify), ''] : []),
   ].join('\n');
 }
 
