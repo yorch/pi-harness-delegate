@@ -17,7 +17,7 @@ bun install
 bun run lint        # Biome check (2 spaces, 120 cols, single quotes)
 bun run lint:fix    # auto-fix
 bun run typecheck   # tsc --noEmit
-bun test            # bun:test (node:test compatible), 64 tests
+bun test            # bun:test (node:test compatible), 115 tests
 bun run verify      # lint + typecheck + test (also runs in CI/release)
 ```
 
