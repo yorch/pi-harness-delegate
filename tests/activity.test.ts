@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  aggregateSpend,
   buildTranscript,
   collectActivityLog,
+  formatSpend,
   formatToolUse,
   pruneOutputs,
   safeSegmentName,
@@ -26,7 +28,7 @@ test('formatToolUse truncates long commands', () => {
   assert.ok(out.endsWith('…'));
 });
 
-test('collectActivityLog pairs tool calls with results', () => {
+test('collectActivityLog pairs tool calls with results (no-id fallback: attach to last entry)', () => {
   const log = collectActivityLog([
     { kind: 'tool_start', name: 'Bash' },
     { kind: 'tool_input', name: 'Bash', input: { command: 'ls' } },
@@ -35,6 +37,32 @@ test('collectActivityLog pairs tool calls with results', () => {
     { kind: 'tool_result', isError: true },
   ]);
   assert.deepEqual(log, ['▶ Bash: ls  ✓', '▶ Grep: x  ✗ error']);
+});
+
+test('collectActivityLog attributes each result to its own row in a parallel batch (by id)', () => {
+  // Claude-style: N tool_use blocks in one assistant message, then N tool_result blocks in the next.
+  const log = collectActivityLog([
+    { kind: 'tool_input', name: 'Read', input: { file_path: 'a.ts' }, id: 't1' },
+    { kind: 'tool_input', name: 'Read', input: { file_path: 'b.ts' }, id: 't2' },
+    { kind: 'tool_input', name: 'Read', input: { file_path: 'c.ts' }, id: 't3' },
+    { kind: 'tool_result', isError: false, id: 't1' },
+    { kind: 'tool_result', isError: false, id: 't2' },
+    { kind: 'tool_result', isError: false, id: 't3' },
+  ]);
+  assert.deepEqual(log, ['▶ Read: a.ts  ✓', '▶ Read: b.ts  ✓', '▶ Read: c.ts  ✓']);
+});
+
+test('collectActivityLog marks a failing tool in the middle of a parallel batch on the right row', () => {
+  const log = collectActivityLog([
+    { kind: 'tool_input', name: 'Read', input: { file_path: 'a.ts' }, id: 't1' },
+    { kind: 'tool_input', name: 'Bash', input: { command: 'bogus' }, id: 't2' },
+    { kind: 'tool_input', name: 'Read', input: { file_path: 'c.ts' }, id: 't3' },
+    // results arrive out of order and the middle one fails
+    { kind: 'tool_result', isError: false, id: 't3' },
+    { kind: 'tool_result', isError: true, id: 't2' },
+    { kind: 'tool_result', isError: false, id: 't1' },
+  ]);
+  assert.deepEqual(log, ['▶ Read: a.ts  ✓', '▶ Bash: bogus  ✗ error', '▶ Read: c.ts  ✓']);
 });
 
 test('safeSegmentName neutralizes path separators', () => {
@@ -101,4 +129,44 @@ test('buildTranscript includes metadata, activity and output', () => {
   assert.ok(t.includes('model: claude-sonnet-5'));
   assert.ok(t.includes('▶ Read: a.ts  ✓'));
   assert.ok(t.includes('findings…'));
+});
+
+test('buildTranscript renders unknown numTurns/cost as n/a rather than a fake 0', () => {
+  const t = buildTranscript({
+    harness: 'codex',
+    mode: 'general',
+    permission: 'edit',
+    model: null,
+    cwd: '/repo',
+    sessionId: null,
+    resumed: false,
+    numTurns: null,
+    totalCostUsd: null,
+    isError: false,
+    stopReason: null,
+    durationMs: null,
+    usage: null,
+    contextPercent: null,
+    contextWindow: null,
+    activityLog: [],
+    output: 'ok',
+  });
+  assert.ok(t.includes('turns: n/a · cost: n/a · isError: false'));
+});
+
+test('aggregateSpend rolls up cost and run counts per harness, counting unknowns separately', () => {
+  const spend = aggregateSpend([
+    { harness: 'claude', cost: 0.5 },
+    { harness: 'claude', cost: 0.25 },
+    { harness: 'claude', cost: null },
+    { harness: 'codex', cost: null },
+  ]);
+  assert.deepEqual(spend.byHarness.claude, { totalCostUsd: 0.75, runs: 3, unknownRuns: 1 });
+  assert.deepEqual(spend.byHarness.codex, { totalCostUsd: 0, runs: 1, unknownRuns: 1 });
+  assert.deepEqual(spend.total, { totalCostUsd: 0.75, runs: 4, unknownRuns: 2 });
+});
+
+test('formatSpend reports unknown-cost runs honestly instead of folding them into $0', () => {
+  assert.equal(formatSpend({ totalCostUsd: 1.234, runs: 12, unknownRuns: 3 }), '$1.234 over 12 run(s) (3 unknown)');
+  assert.equal(formatSpend({ totalCostUsd: 0, runs: 2, unknownRuns: 0 }), '$0.000 over 2 run(s)');
 });

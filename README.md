@@ -141,7 +141,7 @@ In `~/.pi/agent/settings.json`:
 Legacy `claudeDelegate` is auto-migrated into `delegate.harnesses.claude` (deprecated).
 
 - `modelAliases` — templates may use `economy|balanced|max` or any alias; resolution: call → template → harness → global.
-- `maxConcurrent` — cap overlapping runs (default 1 global; may be `{global:1, perHarness:{claude:1}}`).
+- `maxConcurrent` — cap overlapping runs (default 1 global; may be `{global:1, perHarness:{claude:1}}`). Enforced across pi processes, not just the current one — a file-based registry under `~/.pi/agent/delegate/runs/` tracks active runs.
 - `maxTranscripts` — oldest transcripts pruned beyond this count per harness (`0` disables).
 
 `autoDelegateHints` is off by default — no system-prompt bias. When `true`, explicit markers (`@harness`, `with codex`, `delegate … to claude`) and imperative review/plan phrasing append a hint.
@@ -149,6 +149,8 @@ Legacy `claudeDelegate` is auto-migrated into `delegate.harnesses.claude` (depre
 ## Metrics recorded
 
 Every run records in details + transcript: harness, mode, permission (normalized + native), cost, tokens (input/output/cache), context% (prompt ÷ window), model, turns, duration, TTFT, stop reason, session id. Token + cost feed pi's `Usage`.
+
+Claude reports turns and cost on every run; Codex/OpenCode/Amp don't always. An unmeasured turn count or cost renders as `—`/`n/a` (never `0`/`$0.000`) everywhere it's shown — the transcript header, `formatMetrics`, tool results, and `/delegate history` — so an unmeasured run is never mistaken for a free one. `/delegate status` shows a per-harness spend rollup (e.g. `$1.234 over 12 run(s) (3 unknown)`); runs with unknown cost are counted separately rather than folded into the total as `$0`.
 
 ## Security model
 

@@ -13,18 +13,18 @@ export function safeSegmentName(name: string): string {
 }
 
 export interface MetricsInput {
-  numTurns: number;
-  totalCostUsd: number;
+  numTurns: number | null;
+  totalCostUsd: number | null;
   promptTokens: number;
   contextPercent: number | null;
   durationMs: number | null;
 }
 
-/** Compact run summary: `3 turn(s) · $0.54 · 62k tok · 6.2% ctx · 12s`. */
+/** Compact run summary: `3 turn(s) · $0.54 · 62k tok · 6.2% ctx · 12s`. Unknown numTurns/cost render as `—`. */
 export function formatMetrics(m: MetricsInput): string {
   const parts: Array<string | null> = [
-    `${m.numTurns} turn(s)`,
-    `$${m.totalCostUsd.toFixed(3)}`,
+    m.numTurns !== null ? `${m.numTurns} turn(s)` : '— turn(s)',
+    m.totalCostUsd !== null ? `$${m.totalCostUsd.toFixed(3)}` : '$—',
     m.promptTokens > 0 ? `${Math.round(m.promptTokens / 1000)}k tok` : null,
     typeof m.contextPercent === 'number' ? `${m.contextPercent.toFixed(1)}% ctx` : null,
     typeof m.durationMs === 'number' && m.durationMs !== null ? `${(m.durationMs / 1000).toFixed(0)}s` : null,
@@ -32,15 +32,15 @@ export function formatMetrics(m: MetricsInput): string {
   return parts.filter((p): p is string => Boolean(p)).join(' · ');
 }
 
-/** Parse the metadata header of a transcript file (without loading the whole body). */
+/** Parse the metadata header of a transcript file (without loading the whole body). `cost` is null when unknown. */
 export function parseTranscriptMeta(head: string): {
   mode: string;
-  cost: number;
+  cost: number | null;
   sessionId: string | null;
   harness: string | null;
 } {
   let mode = 'delegate';
-  let cost = 0;
+  let cost: number | null = null;
   let sessionId: string | null = null;
   let harness: string | null = null;
   const mm = /^# Delegated (?:Claude|Harness) run — (.+)$/m.exec(head);
@@ -56,6 +56,49 @@ export function parseTranscriptMeta(head: string): {
   const hfm = /^-\s*harness:\s*(\w+)/m.exec(head);
   if (hfm) harness = hfm[1];
   return { mode, cost, sessionId, harness };
+}
+
+/** One history entry's harness + cost, for spend aggregation. */
+export interface SpendEntry {
+  harness: string;
+  cost: number | null;
+}
+
+/** Total cost, run count and unknown-cost run count — either per harness or overall. */
+export interface HarnessSpend {
+  totalCostUsd: number;
+  runs: number;
+  unknownRuns: number;
+}
+
+/** Roll up cost across history entries, per harness and overall. Runs with unknown cost are counted
+ *  separately rather than silently treated as $0. Pure — testable without the TUI. */
+export function aggregateSpend(entries: SpendEntry[]): {
+  byHarness: Record<string, HarnessSpend>;
+  total: HarnessSpend;
+} {
+  const byHarness: Record<string, HarnessSpend> = {};
+  const total: HarnessSpend = { totalCostUsd: 0, runs: 0, unknownRuns: 0 };
+  for (const e of entries) {
+    if (!byHarness[e.harness]) byHarness[e.harness] = { totalCostUsd: 0, runs: 0, unknownRuns: 0 };
+    const h = byHarness[e.harness];
+    h.runs++;
+    total.runs++;
+    if (e.cost === null) {
+      h.unknownRuns++;
+      total.unknownRuns++;
+    } else {
+      h.totalCostUsd += e.cost;
+      total.totalCostUsd += e.cost;
+    }
+  }
+  return { byHarness, total };
+}
+
+/** Format a `HarnessSpend` as `$1.234 over 12 run(s) (3 unknown)`. */
+export function formatSpend(s: HarnessSpend): string {
+  const unknown = s.unknownRuns > 0 ? ` (${s.unknownRuns} unknown)` : '';
+  return `$${s.totalCostUsd.toFixed(3)} over ${s.runs} run(s)${unknown}`;
 }
 
 /** Build the markdown report content injected into the session on the next turn. */
@@ -124,16 +167,54 @@ export function formatToolUse(name: string, input: Record<string, unknown>): str
   return first ? `${name}: ${truncate(first, 90)}` : name;
 }
 
+/**
+ * Tracks pending `tool_input` array indices by id, so a later `tool_result` can be matched to
+ * the row it actually belongs to instead of always landing on the last row.
+ *
+ * A harness emits N `tool_input` events followed by N `tool_result` events for a parallel
+ * tool-call batch, so "attach the result to the last entry" stamps every mark on the last row.
+ * Harnesses that don't carry an id fall back to that last-entry behavior via `resolve`.
+ * Shared by the transcript log builder and the live-feed builders (which also splice old
+ * entries off the front — `shift` keeps pending indices correct after that).
+ */
+export class ToolCallIndex {
+  private pending = new Map<string, number>();
+
+  set(id: string | undefined, index: number): void {
+    if (id) this.pending.set(id, index);
+  }
+
+  /** Index to mark, or -1 when an id was given but has no matching pending entry (don't mis-attribute). */
+  resolve(id: string | undefined, fallbackIndex: number): number {
+    if (id === undefined) return fallbackIndex;
+    const idx = this.pending.get(id);
+    if (idx === undefined) return -1;
+    this.pending.delete(id);
+    return idx;
+  }
+
+  /** Adjust pending indices after removing `count` entries from the front of the backing array. */
+  shift(count: number): void {
+    for (const [id, idx] of this.pending) {
+      const next = idx - count;
+      if (next < 0) this.pending.delete(id);
+      else this.pending.set(id, next);
+    }
+  }
+}
+
 /** Compact per-line activity log for the transcript (tool_input + results only). */
 export function collectActivityLog(events: ActivityEvent[]): string[] {
   const log: string[] = [];
+  const index = new ToolCallIndex();
   for (const ev of events) {
     if (ev.kind === 'tool_input') {
       log.push(`▶ ${formatToolUse(ev.name, ev.input)}`);
+      index.set(ev.id, log.length - 1);
     } else if (ev.kind === 'tool_result') {
-      const last = log.length - 1;
-      if (last >= 0 && log[last].startsWith('▶')) {
-        log[last] += ev.isError ? '  ✗ error' : '  ✓';
+      const idx = index.resolve(ev.id, log.length - 1);
+      if (idx >= 0 && log[idx].startsWith('▶')) {
+        log[idx] += ev.isError ? '  ✗ error' : '  ✓';
       }
     }
   }
@@ -152,8 +233,8 @@ export function buildTranscript(
     cwd: string;
     sessionId: string | null;
     resumed: boolean;
-    numTurns: number;
-    totalCostUsd: number;
+    numTurns: number | null;
+    totalCostUsd: number | null;
     isError: boolean;
     stopReason: string | null;
     durationMs: number | null;
@@ -215,7 +296,7 @@ export function buildTranscript(
     `- model: ${opts.model ?? 'default'}`,
     `- cwd: ${opts.cwd}`,
     `- session: ${opts.sessionId ?? 'n/a'}${opts.resumed ? ' (resumed)' : ''}`,
-    `- turns: ${opts.numTurns} · cost: $${opts.totalCostUsd.toFixed(4)} · isError: ${opts.isError}`,
+    `- turns: ${opts.numTurns ?? 'n/a'} · cost: ${opts.totalCostUsd !== null ? `$${opts.totalCostUsd.toFixed(4)}` : 'n/a'} · isError: ${opts.isError}`,
     `- tokens: ${tokens ?? 'n/a'}`,
     `- context: ${context ?? 'n/a'}`,
     `- duration: ${duration ?? 'n/a'}`,

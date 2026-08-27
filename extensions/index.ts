@@ -30,14 +30,17 @@ import {
 } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import {
+  aggregateSpend,
   buildReportContent,
   buildTranscript,
   collectActivityLog,
   formatMetrics,
+  formatSpend,
   formatToolUse,
   parseTranscriptMeta,
   pruneOutputs,
   safeSegmentName,
+  ToolCallIndex,
 } from './activity.ts';
 import { parseDelegateCommand, resolveDefaults } from './command.ts';
 import { outputsDir as getOutputsDir, legacyOutputsDir, loadConfig, resolveModelForHarness } from './config.ts';
@@ -46,9 +49,15 @@ import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 
 import { delegationHint, stripMarker } from './hint.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
+import { acquireRun, countActiveRuns, releaseRun } from './run-registry.ts';
 import { runHarness } from './runner.ts';
 import { type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
+
+/** Render a possibly-unknown cost — `null` means the harness didn't report one, not a measured $0. */
+function formatCost(cost: number | null): string {
+  return cost !== null ? `$${cost.toFixed(3)}` : '$—';
+}
 
 interface DelegateOptions {
   harness?: string;
@@ -160,7 +169,7 @@ interface HistoryEntry {
   file: string;
   mode: string;
   harness: string;
-  cost: number;
+  cost: number | null;
   sessionId: string | null;
   mtime: number;
 }
@@ -172,7 +181,7 @@ function readHistory(dir: string, harness: string): HistoryEntry[] {
       .map(f => {
         const file = join(dir, f);
         let mode = 'delegate';
-        let cost = 0;
+        let cost: number | null = null;
         let sessionId: string | null = null;
         try {
           const meta = parseTranscriptMeta(readFileSync(file, 'utf8').slice(0, 2000));
@@ -205,11 +214,11 @@ function readAllHistory(): HistoryEntry[] {
   }
   // also legacy dir for migration display
   try {
-    const legacy = readdirSync(legacyOutputsDir()).filter(f => f.endsWith('.md'));
+    const legacy = readdirSync(legacyOutputsDir()).filter(f => f.endsWith('.md') && !f.includes('-partial'));
     for (const f of legacy) {
       const file = join(legacyOutputsDir(), f);
       let mode = 'delegate';
-      let cost = 0;
+      let cost: number | null = null;
       let sessionId: string | null = null;
       try {
         const meta = parseTranscriptMeta(readFileSync(file, 'utf8').slice(0, 2000));
@@ -289,13 +298,13 @@ async function showHistory(ctx: ExtensionContext, harnessFilter?: string): Promi
   }
   if (!ctx.hasUI) {
     for (const e of entries)
-      process.stdout.write(`${e.harness} ${e.mode} · $${e.cost.toFixed(3)} · ${e.sessionId ?? '-'}\n`);
+      process.stdout.write(`${e.harness} ${e.mode} · ${formatCost(e.cost)} · ${e.sessionId ?? '-'}\n`);
     return;
   }
   const entry = await ctx.ui.custom((tui, theme, _kb, done) => {
     const items: SelectItem[] = entries.map(e => ({
       value: e.file,
-      label: `${e.harness} ${e.mode} · $${e.cost.toFixed(3)} · ${new Date(e.mtime).toISOString().slice(0, 16)}`,
+      label: `${e.harness} ${e.mode} · ${formatCost(e.cost)} · ${new Date(e.mtime).toISOString().slice(0, 16)}`,
       description: e.sessionId ? `session ${e.sessionId.slice(0, 8)}…` : undefined,
     }));
     const list = new SelectList(items, Math.min(items.length, 10), {
@@ -349,16 +358,26 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
     try {
       templates = loadTemplates(ctx.cwd, h).size;
     } catch {}
-    const active = activeRuns.get(h) ?? 0;
+    // cross-process count via the file registry, combined with the in-process counter as a fallback
+    const active = Math.max(activeRuns.get(h) ?? 0, countActiveRuns(h));
     const hint = !det.ok && det.hint ? `  ← ${det.hint}` : '';
     lines.push(
       `${h.padEnd(20)} ${bin.padEnd(8)} ${ok.padEnd(3)} ${ver.padEnd(20)} ${String(outputs).padEnd(8)} ${String(templates).padEnd(10)} ${active}${hint}`,
     );
   }
+  const historyEntries = harnessFilter ? readAllHistory().filter(e => e.harness === harnessFilter) : readAllHistory();
+  const spend = aggregateSpend(historyEntries.map(e => ({ harness: e.harness, cost: e.cost })));
+  lines.push('');
+  lines.push('spend:');
+  for (const h of harnessFilter ? allHarnesses : HARNESS_NAMES) {
+    const s = spend.byHarness[h];
+    lines.push(`  ${h}: ${s ? formatSpend(s) : '$0.000 over 0 run(s)'}`);
+  }
+  if (!harnessFilter) lines.push(`  total: ${formatSpend(spend.total)}`);
   if (!harnessFilter) {
     lines.push('');
     lines.push(
-      `global active: ${globalActiveRuns} · aliases: ${
+      `global active: ${Math.max(globalActiveRuns, countActiveRuns())} · aliases: ${
         Object.entries(ALIASES)
           .map(([k, v]) => `${k}→${v}`)
           .join(', ') || '—'
@@ -444,10 +463,12 @@ async function delegate(
   const task = opts.task || template.defaultTask;
   if (!task) throw new Error(`delegate mode "${mode}" requires a task`);
 
-  // concurrency guard
+  // concurrency guard — combines the file-based cross-process registry with the in-process
+  // counters as a fallback, so registry I/O failures never block a delegation.
   const maxGlobal = getMaxConcurrentGlobal();
-  const perHarnessCount = activeRuns.get(harnessName) ?? 0;
-  if (maxGlobal > 0 && globalActiveRuns >= maxGlobal)
+  const perHarnessCount = Math.max(activeRuns.get(harnessName) ?? 0, countActiveRuns(harnessName));
+  const globalCount = Math.max(globalActiveRuns, countActiveRuns());
+  if (maxGlobal > 0 && globalCount >= maxGlobal)
     throw new Error('another delegate run is already in progress (global limit)');
   // per-harness limit if configured as object
   const perHarnessLimit = (() => {
@@ -462,9 +483,11 @@ async function delegate(
     throw new Error(`another ${harnessName} run is already in progress`);
   activeRuns.set(harnessName, perHarnessCount + 1);
   globalActiveRuns++;
+  const runHandle = acquireRun(harnessName, mode);
   const release = () => {
-    activeRuns.set(harnessName, (activeRuns.get(harnessName) ?? 1) - 1);
+    activeRuns.set(harnessName, Math.max(0, (activeRuns.get(harnessName) ?? 1) - 1));
     globalActiveRuns = Math.max(0, globalActiveRuns - 1);
+    releaseRun(runHandle);
   };
 
   let scopeText: string | null = opts.scope ?? null;
@@ -544,8 +567,8 @@ async function delegate(
             cwd: ctx.cwd,
             sessionId: null,
             resumed: Boolean(opts.sessionId),
-            numTurns: 0,
-            totalCostUsd: 0,
+            numTurns: null,
+            totalCostUsd: null,
             isError: true,
             stopReason: null,
             durationMs: null,
@@ -738,6 +761,7 @@ export default function (pi: ExtensionAPI) {
     ) {
       const config = loadConfig();
       const feed: string[] = [];
+      const feedIndex = new ToolCallIndex();
       let liveTail = '';
       let thinkingChars = 0;
       let lastPushAt = 0;
@@ -771,10 +795,15 @@ export default function (pi: ExtensionAPI) {
         onActivity: ev => {
           if (ev.kind === 'tool_input') {
             feed.push(`▶ ${formatToolUse(ev.name, ev.input)}`);
-            if (feed.length > 40) feed.splice(0, feed.length - 40);
+            feedIndex.set(ev.id, feed.length - 1);
+            if (feed.length > 40) {
+              const removed = feed.length - 40;
+              feed.splice(0, removed);
+              feedIndex.shift(removed);
+            }
           } else if (ev.kind === 'tool_result') {
-            const last = feed.length - 1;
-            if (last >= 0 && feed[last].startsWith('▶')) feed[last] += ev.isError ? ' ✗' : ' ✓';
+            const idx = feedIndex.resolve(ev.id, feed.length - 1);
+            if (idx >= 0 && feed[idx]?.startsWith('▶')) feed[idx] += ev.isError ? ' ✗' : ' ✓';
           } else if (ev.kind === 'thinking') thinkingChars += ev.chars;
           pushFeed();
         },
@@ -783,7 +812,7 @@ export default function (pi: ExtensionAPI) {
       const resumed = details.resumed ? ' · resumed' : '';
       const head = result.isError
         ? `⚠ ${details.harness} reported an error`
-        : `${details.harness} ${details.mode} (${result.numTurns} turn(s), $${result.totalCostUsd.toFixed(3)})${resumed}`;
+        : `${details.harness} ${details.mode} (${result.numTurns ?? '—'} turn(s), ${formatCost(result.totalCostUsd)})${resumed}`;
       const body = result.isError ? `\n${summary.text}` : `\n\n${summary.text}`;
       const footer = summary.truncated ? `\nFull output: ${details.file}` : `\nTranscript: ${details.file}`;
       (details as Record<string, unknown>).markdown = summary.text;
@@ -818,8 +847,8 @@ export default function (pi: ExtensionAPI) {
       const details = (result.details ?? {}) as Record<string, unknown>;
       const harness = typeof details.harness === 'string' ? details.harness : 'delegate';
       const mode = typeof details.mode === 'string' ? details.mode : 'delegate';
-      const cost = typeof details.totalCostUsd === 'number' ? details.totalCostUsd : 0;
-      const turns = typeof details.numTurns === 'number' ? details.numTurns : 0;
+      const cost = typeof details.totalCostUsd === 'number' ? details.totalCostUsd : null;
+      const turns = typeof details.numTurns === 'number' ? details.numTurns : null;
       const isError = details.isError === true;
       const resumed = details.resumed === true;
       const file = typeof details.file === 'string' ? details.file : null;
@@ -828,8 +857,8 @@ export default function (pi: ExtensionAPI) {
       container.addChild(
         new Text(
           theme.fg(isError ? 'error' : 'accent', `${harness} ${mode}`) +
-            theme.fg('dim', ` · ${turns} turn(s) · `) +
-            theme.fg('warning', `$${cost.toFixed(3)}`) +
+            theme.fg('dim', ` · ${turns ?? '—'} turn(s) · `) +
+            theme.fg('warning', formatCost(cost)) +
             (resumed ? theme.fg('dim', ' · resumed') : ''),
           1,
           1,
@@ -1004,6 +1033,7 @@ export default function (pi: ExtensionAPI) {
     const harnessForDisplay = harnessName;
 
     const feed: FeedEntry[] = [];
+    const feedIndex = new ToolCallIndex();
     let thinkingChars = 0;
     let liveTail = '';
     let requestRender: (() => void) | null = null;
@@ -1014,6 +1044,7 @@ export default function (pi: ExtensionAPI) {
       return entries;
     };
     let chipActivity = '';
+    let chipActivityId: string | undefined;
     let chipLastPush = 0;
     const pushChip = () => {
       if (!ctx.hasUI) return;
@@ -1030,14 +1061,23 @@ export default function (pi: ExtensionAPI) {
     const onActivity = (ev: ActivityEvent) => {
       if (ev.kind === 'tool_input') {
         chipActivity = `▶ ${formatToolUse(ev.name, ev.input)}`;
-        feed.push({ kind: 'tool', text: formatToolUse(ev.name, ev.input) });
-        if (feed.length > 40) feed.splice(0, feed.length - 40);
+        chipActivityId = ev.id;
+        feed.push({ kind: 'tool', text: formatToolUse(ev.name, ev.input), id: ev.id });
+        feedIndex.set(ev.id, feed.length - 1);
+        if (feed.length > 40) {
+          const removed = feed.length - 40;
+          feed.splice(0, removed);
+          feedIndex.shift(removed);
+        }
       } else if (ev.kind === 'tool_result') {
-        if (chipActivity.startsWith('▶')) chipActivity += ev.isError ? ' ✗' : ' ✓';
-        const last = feed.length - 1;
-        if (last >= 0 && feed[last].kind === 'tool') feed[last] = { ...feed[last], ok: !ev.isError };
+        // only stamp the chip when the result belongs to the tool it's currently showing
+        if (chipActivity.startsWith('▶') && (ev.id === undefined || ev.id === chipActivityId))
+          chipActivity += ev.isError ? ' ✗' : ' ✓';
+        const idx = feedIndex.resolve(ev.id, feed.length - 1);
+        if (idx >= 0 && feed[idx]?.kind === 'tool') feed[idx] = { ...feed[idx], ok: !ev.isError };
       } else if (ev.kind === 'thinking') {
         chipActivity = '💭 thinking…';
+        chipActivityId = undefined;
         thinkingChars += ev.chars;
       }
       pushChip();
@@ -1139,8 +1179,8 @@ export default function (pi: ExtensionAPI) {
       ? (usage.inputTokens ?? 0) + (usage.cacheCreationInputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0)
       : 0;
     const metrics = formatMetrics({
-      numTurns: (details.numTurns as number) ?? 0,
-      totalCostUsd: (details.totalCostUsd as number) ?? 0,
+      numTurns: typeof details.numTurns === 'number' ? details.numTurns : null,
+      totalCostUsd: typeof details.totalCostUsd === 'number' ? details.totalCostUsd : null,
       promptTokens,
       contextPercent: typeof details.contextPercent === 'number' ? (details.contextPercent as number) : null,
       durationMs:

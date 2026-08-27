@@ -56,13 +56,18 @@ export function parseClaudeLine(line: string, state: ParseState): ParseOutcome {
           kind: 'tool_input',
           name: block.name,
           input: isRecord(block.input) ? block.input : {},
+          id: typeof block.id === 'string' ? block.id : undefined,
         });
       }
     }
   } else if (o.type === 'user' && isRecord(o.message)) {
     for (const block of Array.isArray(o.message.content) ? o.message.content : []) {
       if (isRecord(block) && block.type === 'tool_result') {
-        activities.push({ kind: 'tool_result', isError: block.is_error === true });
+        activities.push({
+          kind: 'tool_result',
+          isError: block.is_error === true,
+          id: typeof block.tool_use_id === 'string' ? block.tool_use_id : undefined,
+        });
       }
     }
   } else if (o.type === 'result') {
@@ -82,8 +87,8 @@ export function parseClaudeLine(line: string, state: ParseState): ParseOutcome {
     const result: StreamedResult = {
       result: typeof o.result === 'string' ? o.result : state.streamedText,
       isError: o.is_error === true,
-      numTurns: typeof o.num_turns === 'number' ? o.num_turns : 0,
-      totalCostUsd: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : 0,
+      numTurns: typeof o.num_turns === 'number' ? o.num_turns : null,
+      totalCostUsd: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : null,
       sessionId: typeof o.session_id === 'string' ? o.session_id : null,
       stopReason: typeof o.stop_reason === 'string' ? o.stop_reason : null,
       permissionDenials: Array.isArray(o.permission_denials) ? o.permission_denials : [],

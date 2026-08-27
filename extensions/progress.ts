@@ -16,7 +16,7 @@ const SPIN_INTERVAL_MS = 100;
 const MAX_VISIBLE_ENTRIES = 12;
 
 export type FeedEntry =
-  | { kind: 'tool'; text: string; ok?: boolean }
+  | { kind: 'tool'; text: string; ok?: boolean; id?: string }
   | { kind: 'thinking'; text: string }
   | { kind: 'text'; text: string };
 
