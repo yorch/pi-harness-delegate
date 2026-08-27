@@ -72,6 +72,7 @@ Updated `tests/activity.test.ts`, `tests/metrics.test.ts` for harness-aware tran
 - `/delegate list --harness=...` and `history` harness filter polish, `detectAll` health command
 - Keep `pi-claude-delegate` as deprecated wrapper (re-export) — publish once with deprecation notice
 - Consider `pi install npm:pi-harness-delegate` name availability check and `--access public` (unscoped default private? verify)
+- See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for a researched comparison against `pi-subagents` (in-process Pi child delegation) and prioritized candidate improvements — top pick: multi-harness comparison fanout
 
 ---
 
