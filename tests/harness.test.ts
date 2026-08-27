@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseAmpLine } from '../extensions/harnesses/amp.ts';
+import { parseAmpLine, resolveAmpBinary } from '../extensions/harnesses/amp.ts';
 import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
 import { parseCodexLine } from '../extensions/harnesses/codex.ts';
 import { parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
@@ -61,6 +61,15 @@ test('amp harness parses text', () => {
   const state = { streamedText: '', activities: [], result: null };
   const out = parseAmpLine(JSON.stringify({ type: 'text', text: 'amp hi' }), state);
   assert.equal(out.streamedText, 'amp hi');
+});
+
+test('resolveAmpBinary prefers amp, falls back to omp, then defaults to amp', () => {
+  const exists = (available: string[]) => (p: string) => available.some(name => p.endsWith(`/${name}`));
+  assert.equal(resolveAmpBinary('/bin:/usr/bin', exists(['amp', 'omp'])), 'amp');
+  // the exact situation this fixes: only the omp alias binary is on PATH
+  assert.equal(resolveAmpBinary('/bin:/usr/bin', exists(['omp'])), 'omp');
+  assert.equal(resolveAmpBinary('/bin:/usr/bin', exists([])), 'amp');
+  assert.equal(resolveAmpBinary(undefined, exists([])), 'amp');
 });
 
 test('registry returns harnesses and normalizes aliases', () => {
