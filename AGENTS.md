@@ -11,7 +11,7 @@ Guidance for AI coding agents working in this repository.
 | Command | What it does |
 | --- | --- |
 | `bun run typecheck` | `tsc --noEmit` over `extensions/` (strict, `allowImportingTsExtensions`) |
-| `bun test` | `bun test` (64 tests, bun:test — node:test compatible) |
+| `bun test` | `bun test` (80 tests, bun:test — node:test compatible) |
 | `bun run lint` | `biome check .` (2 spaces, 120 cols, single quotes) |
 | `bun run lint:fix` | `biome check --write .` |
 | `bun run verify` | `lint + typecheck + test` — CI and release both run this |
@@ -25,8 +25,8 @@ CI (`.github/workflows/ci.yml`) runs `verify` + `check-packables` + changeset pr
 ## Architecture
 
 - `extensions/index.ts` — entry. Registers `delegate` tool (primary) + `claude_delegate` alias, and `/delegate` command (primary) + `/claude`, `/codex`, `/opencode`, `/amp`, `/omp` aliases. Reads `delegate` config (with legacy `claudeDelegate` migration), builds prompts, writes partitioned transcripts, renders live feed. `delegate()` is the shared engine.
-- `extensions/harnesses/types.ts` — normalized `NormalizedPermission = readonly|edit|danger`, `StreamedResult`, `ActivityEvent`, `ParseState`, `BuildArgsOpts`, `Harness` interface (`name`, `binary`, `detect()`, `buildArgs()`, `parseLine()`, `extractResult()`, `permissionMap`), `DEFAULT_TIMEOUT_MS`.
-- `extensions/harnesses/claude.ts` — Claude Code runner: `claude -p --output-format stream-json --verbose` (+ `--no-session-persistence`/`--resume`), maps `readonly→plan`, `edit→acceptEdits`, `danger→bypassPermissions`.
+- `extensions/harnesses/types.ts` — normalized `NormalizedPermission = readonly|edit|danger`, `StreamedResult` (`numTurns`/`totalCostUsd` are `number | null` — `null` means the harness's payload didn't report the field, not a measured 0), `ActivityEvent` (`tool_input`/`tool_result` carry an optional `id` used to attribute a result to its originating call in a parallel batch), `ParseState`, `BuildArgsOpts`, `Harness` interface (`name`, `binary`, `detect()`, `buildArgs()`, `parseLine()`, `extractResult()`, `permissionMap`), `DEFAULT_TIMEOUT_MS`.
+- `extensions/harnesses/claude.ts` — Claude Code runner: `claude -p --output-format stream-json --verbose` (+ `--no-session-persistence`/`--resume`), maps `readonly→plan`, `edit→acceptEdits`, `danger→bypassPermissions`. Wires `tool_use.id`/`tool_result.tool_use_id` into `ActivityEvent.id` — the only harness whose JSONL schema is documented enough to trust an id from (Codex/OpenCode/Amp parsers stay on the id-less last-entry fallback until a real transcript confirms their id field names).
 - `extensions/harnesses/codex.ts` — Muse: `codex exec --json` + `--sandbox read-only|workspace-write|danger-full-access`, tolerant JSONL parser.
 - `extensions/harnesses/opencode.ts` — OpenCode: `opencode run --format json`, similar.
 - `extensions/harnesses/amp.ts` — Amp/Omp: `amp --output jsonl`, alias `omp→amp`.
@@ -36,12 +36,13 @@ CI (`.github/workflows/ci.yml`) runs `verify` + `check-packables` + changeset pr
 - `extensions/stream-parse.ts` — deprecated wrapper around `parseClaudeLine`.
 - `extensions/templates.ts` — template discovery + frontmatter (`permission: readonly|edit|danger` preferred, legacy `permissionMode`/`sandbox` as native escape hatch). Load order: `shared < builtin < user-global < project-local`, later wins on name collision. Partitioned per harness plus legacy dirs.
 - `extensions/command.ts` — parser for `/delegate` + aliases: `--harness`, `--mode`, `--model`, `--scope`, `--budget`, `--resume`, `--pr`, plus harness/mode as first words.
-- `extensions/config.ts` — `loadConfig()` reads `delegate` (and migrates legacy `claudeDelegate`), `outputsDir(harness)` partitioned (`~/.pi/agent/delegate/outputs/<harness>`), `resolveModelForHarness()`.
-- `extensions/activity.ts` — formatters (`formatToolUse`), `buildTranscript(harness, permission, nativePermission)`, `parseTranscriptMeta` (now returns harness), `buildReportContent(harness,mode)`, `pruneOutputs`.
-- `extensions/progress.ts` — progress-window overlay (spinner, double-ESC cancel, `m` minimize, `danger` banner).
-- Subcommand UIs in `index.ts`: `/delegate list [harness]` and `/delegate history` (partitioned, with scrollable viewer + resume).
+- `extensions/config.ts` — `loadConfig()` reads `delegate` (and migrates legacy `claudeDelegate`), `agentDir()`, `outputsDir(harness)` partitioned (`~/.pi/agent/delegate/outputs/<harness>`), `resolveModelForHarness()`.
+- `extensions/run-registry.ts` — file-based active-run registry (`acquireRun`/`releaseRun`/`countActiveRuns`) under `<agentDir>/delegate/runs/`, one JSON file per active run, so the concurrency guard and `/delegate status` active count are accurate across pi processes, not just the current one. Best-effort (never throws); stale entries from dead pids are cleaned up on read (`process.kill(pid, 0)`, treating `EPERM` as alive). `delegate()` combines it with the pre-existing in-process counters via `Math.max` as a fallback.
+- `extensions/activity.ts` — formatters (`formatToolUse`), `ToolCallIndex` (matches a `tool_result` to its originating `tool_input` by id, falling back to "last entry" when no id — shared by the transcript log and the live-feed builders), `collectActivityLog`, `buildTranscript(harness, permission, nativePermission)`, `parseTranscriptMeta` (now returns harness; `cost` is `number | null`), `buildReportContent(harness,mode)`, `aggregateSpend`/`formatSpend` (pure cost/run-count rollup used by `/delegate status`), `pruneOutputs`.
+- `extensions/progress.ts` — progress-window overlay (spinner, double-ESC cancel, `m` minimize, `danger` banner). `FeedEntry`'s `tool` variant carries an optional `id` for the same result-attribution matching.
+- Subcommand UIs in `index.ts`: `/delegate list [harness]`, `/delegate history` (partitioned, with scrollable viewer + resume, legacy dir filtered for `-partial` transcripts same as the partitioned dirs), and `/delegate status` (per-harness spend rollup via `aggregateSpend`, e.g. `$1.234 over 12 run(s) (3 unknown)` — unknown-cost runs are never folded into the total silently).
 - Config surface: `modelAliases` (`economy/balanced/max`), `maxConcurrent` (global + per-harness), `maxTranscripts` (`pruneOutputs` per harness).
-- `extensions/usage.ts` — maps harness usage/cost to pi `Usage` (cacheCreation folds into input).
+- `extensions/usage.ts` — maps harness usage/cost to pi `Usage` (cacheCreation folds into input). `mapHarnessUsage`/`mapClaudeUsage` return `undefined` when cost is unknown rather than reporting a fake $0 into pi's session totals — callers must handle the `Usage | undefined` result.
 
 ## Conventions
 
@@ -52,6 +53,7 @@ CI (`.github/workflows/ci.yml`) runs `verify` + `check-packables` + changeset pr
 - **Never default to `danger`.** Only path is explicit `allowDangerous:true` on a call. `review`/`plan`/`security-audit` stay `readonly`.
 - Guard UI calls (`ctx.ui.*`) with `ctx.hasUI` — tools run in all modes.
 - Scope `diff`/`pr` resolved in-process via `git diff HEAD` / `gh pr diff`; don't rely on harness running git.
+- **Unmeasured metrics are `null`, never a fake `0`.** `numTurns`/`totalCostUsd` on `StreamedResult` and `cost` on `parseTranscriptMeta` are `number | null` — `null` means the harness's payload didn't report the field. Render `null` as `—`/`n/a` (`formatMetrics`, `buildTranscript`, `/delegate status`, `/delegate history`), never `0`/`$0.000` — a real `$0` run and an unmeasured run must stay visually distinct.
 
 ## Release process (changesets + OIDC)
 
