@@ -28,18 +28,6 @@ distinct external GitHub contributors by issue number, and 0.58.0 shipped hours 
 fast-moving, externally-contributed, production-grade extension, an order of magnitude larger in scope than
 `pi-harness-delegate`.
 
-**Notable ecosystem finding, not directly about `pi-subagents`:** `pi-subagents`' peer/dev deps target
-`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`,
-`@earendil-works/pi-agent-core` (repo `github.com/earendil-works/pi`, maintainers `mitsuhiko`, `badlogic`,
-`rwachtler`; current version `0.84.3`). The **unscoped** `pi-ai`, `pi-coding-agent`, `pi-tui`,
-`pi-agent-core` names that `pi-harness-delegate`'s `package.json` declares as peer dependencies (see
-`AGENTS.md` gotcha "Peer deps `"*"`") all resolve on npm to `0.0.1` stub packages maintained solely by
-`mitsuhiko`, not to the real "pi" runtime. This is very likely benign at runtime — `AGENTS.md` already notes
-"pi bundles them; never add to `dependencies`," so the extension loader presumably resolves these modules
-from the host's own bundle rather than from `node_modules` — but for local `bun install`/typecheck against
-real types, `@earendil-works/pi-*` looks like the currently-correct scope. I flag this as worth a five-minute
-verification, not as a confirmed bug (see §6).
-
 ## 2. How it works
 
 **Delegation model.** The parent Pi session calls the `subagent` tool. Most execution goes through a single
@@ -340,12 +328,6 @@ current scope suggests other extensions need to drive harness delegation; premat
 
 ## 6. Open questions / what I could not verify
 
-- **Peer-dependency scope mismatch** (`pi-ai`/`pi-coding-agent`/`pi-tui`/`pi-agent-core` unscoped vs.
-  `@earendil-works/pi-*`, §1). I verified this via `npm view` (versions, maintainers, repository URLs) but
-  did not verify how pi's actual extension loader resolves these module specifiers at runtime, so I can't
-  say whether this is a real problem or a harmless documentation/typecheck-only mismatch. Worth a direct
-  question to whoever maintains the local `pi` install, or a `bun install` + `bun run typecheck` sanity check
-  against `@earendil-works/pi-*` types.
 - **`pi-subagents`' actual TypeScript implementation.** I read `index.ts` (10 lines, a thin re-export guard)
   and the `extension-api.md` "Runtime files" table's file list/purposes, but did not read `src/**/*.ts`
   itself. All behavioral claims above are the package's own documentation, which I have no reason to doubt
