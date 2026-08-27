@@ -1,6 +1,6 @@
 import { readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ActivityEvent } from './harnesses/types.ts';
+import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
@@ -101,13 +101,21 @@ export function formatSpend(s: HarnessSpend): string {
   return `$${s.totalCostUsd.toFixed(3)} over ${s.runs} run(s)${unknown}`;
 }
 
-/** Host-run verification (e.g. `bun test`) result — evidence only, never flips a run's `isError`. */
+/**
+ * Host-run verification (e.g. `bun test`) result — evidence only, never flips a run's `isError`.
+ * `skipped` is set (with a human-readable reason) when a verify command was configured but
+ * deliberately not executed — e.g. a `readonly` permission tier — instead of `exitCode`/`ok`
+ * describing a real run. Never silently dropped: a skip is still recorded and reported.
+ */
 export interface VerifyResult {
   command: string;
-  exitCode: number;
+  /** `null` when the command was never run (see `skipped`). */
+  exitCode: number | null;
   ok: boolean;
-  /** Combined stdout+stderr, capped to the last `maxTail` chars. */
+  /** Combined stdout+stderr, capped to the last `maxTail` chars. Empty when skipped. */
   outputTail: string;
+  /** Reason the command was not run, e.g. `"readonly run"`. Absent when it actually ran. */
+  skipped?: string;
 }
 
 const VERIFY_TAIL_MAX = 2000;
@@ -118,6 +126,22 @@ export function resolveVerifyCommand(
   templateVerify: string | undefined,
 ): string | undefined {
   return callOverride || templateVerify || undefined;
+}
+
+/**
+ * Resolve the verify command AND decide whether it may actually run, given the run's effective
+ * permission. `readonly` templates guarantee no execution/modification — a verify command must
+ * never ride along on one (see AGENTS.md's Conventions), so `skip` is true whenever `permission`
+ * is `readonly`, regardless of who configured the command. Pure — testable without `pi.exec`.
+ */
+export function resolveVerifyPlan(
+  callOverride: string | undefined,
+  templateVerify: string | undefined,
+  permission: NormalizedPermission,
+): { command: string; skip: boolean } | undefined {
+  const command = resolveVerifyCommand(callOverride, templateVerify);
+  if (!command) return undefined;
+  return { command, skip: permission === 'readonly' };
 }
 
 /** Build a `VerifyResult` from a raw exit code + combined output, capping the tail. Pure. */
@@ -131,8 +155,14 @@ export function buildVerifyResult(
   return { command, exitCode, ok: exitCode === 0, outputTail };
 }
 
+/** A `VerifyResult` recording that a configured verify command was deliberately not run. */
+export function skipVerifyResult(command: string, reason: string): VerifyResult {
+  return { command, exitCode: null, ok: false, outputTail: '', skipped: reason };
+}
+
 /** Markdown section for a verify result — report-only evidence, distinct from the harness's own isError. */
 export function formatVerifySection(v: VerifyResult): string {
+  if (v.skipped) return `### Verify: \`${v.command}\`\n⊘ skipped (${v.skipped})`;
   const lines = [`### Verify: \`${v.command}\``, v.ok ? `✓ exit ${v.exitCode}` : `✗ exit ${v.exitCode}`];
   const tail = v.outputTail.trim();
   if (tail) lines.push(...tail.split('\n').map(l => `  ${l}`));

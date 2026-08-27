@@ -7,6 +7,8 @@ import {
   buildVerifyResult,
   formatVerifySection,
   resolveVerifyCommand,
+  resolveVerifyPlan,
+  skipVerifyResult,
 } from '../extensions/activity.ts';
 
 test('resolveVerifyCommand: per-call override wins over the template', () => {
@@ -20,6 +22,70 @@ test('resolveVerifyCommand: falls back to the template when no override is given
 test('resolveVerifyCommand: undefined when neither is configured (no invented default)', () => {
   assert.equal(resolveVerifyCommand(undefined, undefined), undefined);
   assert.equal(resolveVerifyCommand('', undefined), undefined);
+});
+
+test('resolveVerifyPlan: skips on a readonly template even though a command is configured', () => {
+  const plan = resolveVerifyPlan(undefined, 'bun test', 'readonly');
+  assert.deepEqual(plan, { command: 'bun test', skip: true });
+});
+
+test('resolveVerifyPlan: runs on an edit template', () => {
+  const plan = resolveVerifyPlan(undefined, 'bun test', 'edit');
+  assert.deepEqual(plan, { command: 'bun test', skip: false });
+});
+
+test('resolveVerifyPlan: skips on readonly regardless of the command source (call override or template)', () => {
+  assert.deepEqual(resolveVerifyPlan('npm test', undefined, 'readonly'), { command: 'npm test', skip: true });
+});
+
+test('resolveVerifyPlan: undefined when no command is configured, on any permission', () => {
+  assert.equal(resolveVerifyPlan(undefined, undefined, 'readonly'), undefined);
+  assert.equal(resolveVerifyPlan(undefined, undefined, 'edit'), undefined);
+  assert.equal(resolveVerifyPlan(undefined, undefined, 'danger'), undefined);
+});
+
+test('resolveVerifyPlan: danger permission runs verify too (only readonly is special)', () => {
+  const plan = resolveVerifyPlan(undefined, 'bun test', 'danger');
+  assert.deepEqual(plan, { command: 'bun test', skip: false });
+});
+
+test('skipVerifyResult: records the reason, no exit code, not ok', () => {
+  const v = skipVerifyResult('bun test', 'readonly run');
+  assert.equal(v.command, 'bun test');
+  assert.equal(v.exitCode, null);
+  assert.equal(v.ok, false);
+  assert.equal(v.skipped, 'readonly run');
+});
+
+test('formatVerifySection: a skipped verify renders a skip line, not a pass/fail one', () => {
+  const section = formatVerifySection(skipVerifyResult('bun test', 'readonly run'));
+  assert.equal(section, '### Verify: `bun test`\n⊘ skipped (readonly run)');
+});
+
+test('buildTranscript: records a skipped verify (never silently dropped)', () => {
+  const t = buildTranscript({
+    harness: 'claude',
+    mode: 'review',
+    permission: 'readonly',
+    model: 'sonnet',
+    cwd: '/repo',
+    sessionId: 's1',
+    resumed: false,
+    numTurns: 1,
+    totalCostUsd: 0.05,
+    isError: false,
+    stopReason: null,
+    durationMs: 500,
+    usage: null,
+    contextPercent: null,
+    contextWindow: null,
+    activityLog: [],
+    output: 'looks fine',
+    verify: skipVerifyResult('bun test', 'readonly run'),
+  });
+  assert.ok(t.includes('- turns: 1 · cost: $0.0500 · isError: false'), 'the harness result is unaffected');
+  assert.ok(t.includes('### Verify: `bun test`'));
+  assert.ok(t.includes('⊘ skipped (readonly run)'));
 });
 
 test('buildVerifyResult: ok is exit-code-derived, tail capped to the last N chars', () => {

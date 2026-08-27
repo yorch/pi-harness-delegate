@@ -42,8 +42,9 @@ import {
   formatToolUse,
   parseTranscriptMeta,
   pruneOutputs,
-  resolveVerifyCommand,
+  resolveVerifyPlan,
   safeSegmentName,
+  skipVerifyResult,
   ToolCallIndex,
   type VerifyResult,
 } from './activity.ts';
@@ -88,7 +89,11 @@ interface DelegateOptions {
   allowDangerous?: boolean;
   sessionId?: string;
   pr?: string;
-  /** Host-run verification command override — takes precedence over the template's `verify` frontmatter. */
+  /**
+   * Host-run verification command override — takes precedence over the template's `verify`
+   * frontmatter. Internal engine option only, not exposed on the `delegate` tool's schema — see
+   * the trust-model note on `runVerify` below for why.
+   */
   verify?: string;
   onStream?: (text: string) => void;
   onActivity?: (ev: ActivityEvent) => void;
@@ -98,8 +103,28 @@ interface DelegateOptions {
 /** Verify commands run on the host after the harness exits — bounded independent of harness timeoutMs. */
 const VERIFY_TIMEOUT_MS = 5 * 60_000;
 
-/** Run a verify command in-process on the host (never delegated to the harness). Report-only —
- *  callers must not let this flip a run's `isError`. */
+/**
+ * Run a verify command in-process on the host (never delegated to the harness). Report-only —
+ * callers must not let this flip a run's `isError`.
+ *
+ * Trust model: a verify command can only come from two places — on-disk template frontmatter
+ * (project-local templates are already behind `isTrusted()`) or a human typing `/delegate
+ * --verify=<cmd>` at the CLI. It is deliberately **not** a `delegate` tool parameter: a tool
+ * param is set by the model, whose context includes repo content and delegated-harness output —
+ * both attacker-influenceable, so a model-settable `verify` would be a prompt-injection ->
+ * arbitrary-host-command path (e.g. injected text in a reviewed file steering the parent agent
+ * into `delegate({verify: "curl ... | sh"})`). A model that wants verification selects a
+ * template that declares one instead.
+ *
+ * `resolveVerifyPlan` additionally never lets a verify command run on a `readonly` permission —
+ * `readonly` guarantees no execution/modification, and a verify command riding along on one
+ * would silently break that guarantee (a permission-tier bypass), independent of how trusted its
+ * source is. See the matching Conventions entry in AGENTS.md.
+ *
+ * Runs via `sh -c` (not a fixed binary+argv) so compound commands like `bun test && bun run
+ * lint` work — safe only because of the source/permission restrictions above, not because the
+ * command itself is sanitized.
+ */
 async function runVerify(pi: ExtensionAPI, cwd: string, command: string): Promise<VerifyResult> {
   try {
     const res = await pi.exec('sh', ['-c', command], { cwd, timeout: VERIFY_TIMEOUT_MS });
@@ -634,9 +659,15 @@ async function delegate(
   const contextPercent =
     promptTokens !== null && result.contextWindow ? (promptTokens / result.contextWindow) * 100 : null;
 
-  // Host-run post-hoc verification — report-only evidence, never flips `result.isError`.
-  const verifyCommand = resolveVerifyCommand(opts.verify, template.verify);
-  const verify = verifyCommand ? await runVerify(pi, ctx.cwd, verifyCommand) : undefined;
+  // Host-run post-hoc verification — report-only evidence, never flips `result.isError`. Never
+  // actually executes on a readonly permission (permission-tier bypass) — recorded as skipped
+  // instead of silently dropped. See the trust-model note on runVerify().
+  const verifyPlan = resolveVerifyPlan(opts.verify, template.verify, permission);
+  const verify = verifyPlan
+    ? verifyPlan.skip
+      ? skipVerifyResult(verifyPlan.command, 'readonly run')
+      : await runVerify(pi, ctx.cwd, verifyPlan.command)
+    : undefined;
 
   const file = saveOutput(
     harnessName,
@@ -745,6 +776,12 @@ interface ToolProgressUpdate {
   details: { progress: number };
 }
 
+/**
+ * `delegate` tool params. Deliberately has no `verify` field — a tool param is model-controlled,
+ * and the model's context (repo content, delegated-harness output) is attacker-influenceable, so
+ * a model-settable verify command would be a prompt-injection -> arbitrary-host-command path.
+ * Verify only comes from on-disk template frontmatter or a human-typed `/delegate --verify=`.
+ */
 interface DelegateToolParams {
   harness?: string;
   task: string;
@@ -755,7 +792,6 @@ interface DelegateToolParams {
   allowDangerous?: boolean;
   sessionId?: string;
   pr?: string;
-  verify?: string;
 }
 
 /** One `delegate()` call with the tool's live-feed progress reporting (`onUpdate`). Shared by the
@@ -864,7 +900,7 @@ async function runFanoutTool(
           allowDangerous: params.allowDangerous === true,
           sessionId: params.sessionId,
           pr: params.pr,
-          verify: params.verify,
+          // no verify: intentionally not model-settable — see DelegateToolParams
         },
         signal,
         onUpdate,
@@ -928,14 +964,13 @@ export default function (pi: ExtensionAPI) {
     name: 'delegate',
     label: 'Delegate',
     description:
-      'Delegate a task to any harness (claude, codex, opencode, amp) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude) — pass "all" or a comma list (e.g. "claude,codex") to fan out the same task to several harnesses and get back one comparison report. mode selects a template: review, plan, implement, security-audit, docs, general, or custom. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session. verify runs a host-side check (e.g. "bun test") after the harness exits and reports pass/fail as separate evidence — it never changes whether the run itself is reported as an error.',
+      'Delegate a task to any harness (claude, codex, opencode, amp) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude) — pass "all" or a comma list (e.g. "claude,codex") to fan out the same task to several harnesses and get back one comparison report. mode selects a template: review, plan, implement, security-audit, docs, general, or custom — some templates run a host-side check (e.g. "bun test") after the harness exits and report pass/fail as separate evidence; that is configured on the template, not a parameter here. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session.',
     promptSnippet: 'Delegate a subtask to a harness and return its report',
     promptGuidelines: [
       'delegate runs a harness headless in the working directory and returns a streamed report with cost, token usage, and a session id for follow-ups.',
       'Pass harness (claude|codex|opencode|amp) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
-      'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work.',
+      'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
       'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
-      'verify runs a host command (e.g. "bun test") after the harness finishes to check its claims; it is reported alongside the result but never flips isError.',
       'sessionId resumes a previous delegated session instead of starting fresh.',
       'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission).',
     ],
@@ -974,12 +1009,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
       pr: Type.Optional(Type.String({ description: 'GitHub PR number/URL (alternative to scope pr).' })),
-      verify: Type.Optional(
-        Type.String({
-          description:
-            'Host-run shell command (e.g. "bun test") to check the harness\'s work after it exits. Overrides the template\'s `verify` frontmatter. Report-only — never changes isError.',
-        }),
-      ),
+      // Deliberately no `verify` param — see the trust-model comment on DelegateToolParams/runVerify.
     }),
     async execute(
       _toolCallId: string,
@@ -1006,7 +1036,7 @@ export default function (pi: ExtensionAPI) {
           allowDangerous: params.allowDangerous === true, // invariant: never inherit from config.allowDangerous — danger requires explicit per-call approval
           sessionId: params.sessionId,
           pr: params.pr,
-          verify: params.verify,
+          // no verify: intentionally not model-settable — see DelegateToolParams
         },
         signal,
         onUpdate,
