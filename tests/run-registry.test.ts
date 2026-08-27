@@ -63,6 +63,22 @@ test('run-registry: cleans up stale entries from dead pids', async () => {
   });
 });
 
+test('run-registry: cleans up entries with a non-numeric pid instead of counting them forever', async () => {
+  await withAgentDir(async dir => {
+    const { countActiveRuns } = await import('../extensions/run-registry.ts');
+    const runsDir = join(dir, 'delegate', 'runs');
+    mkdirSync(runsDir, { recursive: true });
+    // a corrupt-but-valid-JSON entry: pid parses as a string, not a number
+    writeFileSync(
+      join(runsDir, 'corrupt-pid.json'),
+      JSON.stringify({ pid: 'not-a-number', harness: 'claude', mode: 'review', startedAt: Date.now() }),
+    );
+    assert.equal(countActiveRuns(), 0);
+    // removed as a side effect, not silently counted as active forever
+    assert.equal(countActiveRuns(), 0);
+  });
+});
+
 test('run-registry: never throws when the registry dir is missing', async () => {
   await withAgentDir(async () => {
     const { countActiveRuns, releaseRun } = await import('../extensions/run-registry.ts');
