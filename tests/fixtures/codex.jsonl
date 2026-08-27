@@ -1,0 +1,10 @@
+{"type": "thread.started", "thread_id": "01a04438-fb3a-7d91-9941-96d421741745"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "I\u2019ll inventory the current directory, read every regular file in it, and give you a two-sentence summary."}}
+{"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": "cat a.txt b.txt c.txt", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "cat a.txt b.txt c.txt", "aggregated_output": "Alpha file: contains the word banana.\nBeta file: contains the word cherry.\nGamma file: contains the word date.\n", "exit_code": 0, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": "The directory also contains live capture logs, so the first recursive read included `.git` internals and grew the active transcript; I\u2019m narrowing \u201cfiles here\u201d to top-level regular files and taking a stable inventory/content snapshot."}}
+{"type": "item.started", "item": {"id": "item_3", "type": "command_execution", "command": "wc -l a.txt b.txt c.txt", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_3", "type": "command_execution", "command": "wc -l a.txt b.txt c.txt", "aggregated_output": "1 a.txt\n1 b.txt\n1 c.txt\n", "exit_code": 0, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "Top-level files: `a.txt`, `b.txt`, `c.txt`, `claude.raw.jsonl`, `claude.stderr.log`, `codex.raw.jsonl`, and `codex.stderr.log`. The three text fixtures contain Alpha/banana, Beta/cherry, and Gamma/date, while the JSONL and log files capture Claude/Codex harness activity and stderr output."}}
+{"type": "turn.completed", "usage": {"input_tokens": 95987, "cached_input_tokens": 68864, "cache_write_input_tokens": 0, "output_tokens": 785, "reasoning_output_tokens": 165}}

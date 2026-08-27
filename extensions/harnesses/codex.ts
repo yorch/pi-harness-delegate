@@ -9,6 +9,12 @@ import type {
   StreamedResult,
 } from './types.ts';
 
+// Schema verified against codex-cli 0.149.1 — see tests/fixtures/codex.jsonl.
+// `codex exec` in this version dropped `--ask-for-approval` entirely (exec is inherently
+// non-interactive; sandbox alone governs what's allowed) and resume is a subcommand
+// (`exec resume <id> <prompt>`), not a `--thread-id` flag — both confirmed via `codex exec
+// --help` / `codex exec resume --help`, not just the JSONL capture.
+
 const execFileAsync = promisify(execFile);
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -32,6 +38,18 @@ function extractTextFromCodexEvent(o: Record<string, unknown>, _state: ParseStat
   if (typeof o.error === 'string') return o.error;
   return undefined;
 }
+
+interface CodexHarnessState {
+  sessionId?: string;
+  turnCount?: number;
+}
+
+function harnessState(state: ParseState): CodexHarnessState {
+  const s = (state._harness ?? {}) as CodexHarnessState;
+  state._harness = s as unknown as Record<string, unknown>;
+  return s;
+}
+
 export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
   let o: unknown;
   try {
@@ -45,15 +63,16 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
   let streamedText: string | undefined;
   const typeStr = typeof o.type === 'string' ? o.type : '';
   const item = isRecord(o.item) ? o.item : null;
+  const hs = harnessState(state);
   // latch thread_id from thread.started
   if (typeStr === 'thread.started' && typeof o.thread_id === 'string') {
-    (state as unknown as Record<string, unknown>)._harness = {
-      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
-      sessionId: o.thread_id,
-    };
+    hs.sessionId = o.thread_id;
     return { activities, streamedText };
   }
-  if (typeStr === 'turn.started') return { activities, streamedText };
+  if (typeStr === 'turn.started') {
+    hs.turnCount = (hs.turnCount ?? 0) + 1;
+    return { activities, streamedText };
+  }
   if (typeStr === 'error' && typeof o.message === 'string') {
     streamedText = o.message;
   }
@@ -67,14 +86,12 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
           : typeof o.message === 'string'
             ? o.message
             : state.streamedText + (streamedText ?? '');
-    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
-      ?.sessionId as string | undefined;
     const result: StreamedResult = {
       result: msg,
       isError: true,
       numTurns: null,
       totalCostUsd: null,
-      sessionId: typeof o.thread_id === 'string' ? o.thread_id : (latched ?? null),
+      sessionId: typeof o.thread_id === 'string' ? o.thread_id : (hs.sessionId ?? null),
       stopReason: 'error',
       permissionDenials: [],
       durationMs: null,
@@ -87,7 +104,31 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
     };
     return { activities, streamedText, result };
   }
-  if (typeStr.includes('tool') || typeStr.includes('item.started') || typeStr.includes('function_call')) {
+  // real tool schema: item.started/item.completed carry item.id (correlating id) and item.type
+  // (no separate "name" field — command_execution is the only item type observed emitting a
+  // shell command; other item types like file_change/mcp_tool_call may exist but weren't
+  // captured, so the generic name/input guesses below stay as a fallback for those).
+  if (
+    item &&
+    (typeStr === 'item.started' || typeStr === 'item.completed') &&
+    item.type !== 'agent_message' &&
+    item.type !== 'reasoning'
+  ) {
+    const id = typeof item.id === 'string' ? item.id : undefined;
+    const name = typeof item.name === 'string' ? item.name : typeof item.type === 'string' ? item.type : 'tool';
+    if (typeStr === 'item.started') {
+      const input =
+        typeof item.command === 'string' ? { command: item.command } : isRecord(item.input) ? item.input : {};
+      activities.push({ kind: 'tool_start', name });
+      activities.push({ kind: 'tool_input', name, input: input as Record<string, unknown>, id });
+    } else {
+      const isError =
+        (typeof item.exit_code === 'number' && item.exit_code !== 0) ||
+        item.status === 'failed' ||
+        item.is_error === true;
+      activities.push({ kind: 'tool_result', isError, id });
+    }
+  } else if (typeStr.includes('tool') || typeStr.includes('function_call')) {
     const toolName = (item && typeof item.name === 'string' ? item.name : typeof o.name === 'string' ? o.name : null) as
       | string
       | null;
@@ -102,7 +143,7 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
         activities.push({ kind: 'tool_result', isError: o.is_error === true || o.error === true });
     }
   }
-  if (o.type === 'tool_result' || (typeStr === 'item.completed' && item?.type === 'tool_result'))
+  if (o.type === 'tool_result')
     activities.push({ kind: 'tool_result', isError: (o as Record<string, unknown>).is_error === true });
   if (typeStr.includes('thinking') || o.type === 'reasoning' || item?.type === 'reasoning') {
     const thinkingText = extractTextFromCodexEvent(o, state);
@@ -118,10 +159,15 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
     typeStr !== 'turn.failed'
   )
     streamedText = text;
-  if (o.type === 'result' || o.type === 'thread.completed' || o.type === 'task.completed') {
+  // real final-usage event is turn.completed (thread.completed/task.completed/result kept as
+  // fallback in case another codex-cli version emits them instead).
+  if (
+    o.type === 'result' ||
+    o.type === 'thread.completed' ||
+    o.type === 'task.completed' ||
+    typeStr === 'turn.completed'
+  ) {
     const usage = isRecord(o.usage) ? o.usage : null;
-    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
-      ?.sessionId as string | undefined;
     const result: StreamedResult = {
       result:
         typeof o.result === 'string'
@@ -130,7 +176,14 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
             ? o.output
             : state.streamedText + (streamedText ?? ''),
       isError: o.is_error === true || o.error === true,
-      numTurns: typeof o.num_turns === 'number' ? o.num_turns : typeof o.turns === 'number' ? o.turns : null,
+      numTurns:
+        typeof o.num_turns === 'number'
+          ? o.num_turns
+          : typeof o.turns === 'number'
+            ? o.turns
+            : hs.turnCount
+              ? hs.turnCount
+              : null,
       totalCostUsd:
         typeof o.total_cost_usd === 'number' ? o.total_cost_usd : typeof o.cost === 'number' ? o.cost : null,
       sessionId:
@@ -140,7 +193,7 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
             ? o.thread_id
             : typeof o.id === 'string'
               ? o.id
-              : (latched ?? null),
+              : (hs.sessionId ?? null),
       stopReason: typeof o.stop_reason === 'string' ? o.stop_reason : null,
       permissionDenials: Array.isArray(o.permission_denials) ? o.permission_denials : [],
       durationMs: typeof o.duration_ms === 'number' ? o.duration_ms : null,
@@ -151,26 +204,22 @@ export function parseCodexLine(line: string, state: ParseState): ParseOutcome {
       maxOutputTokens: null,
       usage: usage
         ? {
-            inputTokens:
-              typeof usage.input_tokens === 'number'
-                ? usage.input_tokens
-                : typeof (usage as Record<string, unknown>).inputTokens === 'number'
-                  ? ((usage as Record<string, unknown>).inputTokens as number)
-                  : 0,
-            outputTokens:
-              typeof usage.output_tokens === 'number'
-                ? usage.output_tokens
-                : typeof (usage as Record<string, unknown>).outputTokens === 'number'
-                  ? ((usage as Record<string, unknown>).outputTokens as number)
-                  : 0,
+            // real fields: input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens
+            // (no total_cost_usd anywhere in this schema — ChatGPT-plan auth doesn't report $ cost).
+            inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : 0,
+            outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : 0,
             cacheCreationInputTokens:
-              typeof (usage as Record<string, unknown>).cache_creation_input_tokens === 'number'
-                ? ((usage as Record<string, unknown>).cache_creation_input_tokens as number)
-                : 0,
+              typeof usage.cache_write_input_tokens === 'number'
+                ? usage.cache_write_input_tokens
+                : typeof (usage as Record<string, unknown>).cache_creation_input_tokens === 'number'
+                  ? ((usage as Record<string, unknown>).cache_creation_input_tokens as number)
+                  : 0,
             cacheReadInputTokens:
-              typeof (usage as Record<string, unknown>).cache_read_input_tokens === 'number'
-                ? ((usage as Record<string, unknown>).cache_read_input_tokens as number)
-                : 0,
+              typeof usage.cached_input_tokens === 'number'
+                ? usage.cached_input_tokens
+                : typeof (usage as Record<string, unknown>).cache_read_input_tokens === 'number'
+                  ? ((usage as Record<string, unknown>).cache_read_input_tokens as number)
+                  : 0,
           }
         : null,
     };
@@ -192,12 +241,10 @@ export const codexHarness: Harness = {
   },
   buildArgs(opts: BuildArgsOpts): string[] {
     const sandbox = opts.nativePermission ?? SANDBOX_MAP[opts.permission] ?? 'workspace-write';
-    const args = ['exec', '--json', opts.prompt, '--sandbox', sandbox];
-    if (opts.permission === 'danger' || sandbox === 'danger-full-access') args.push('--ask-for-approval', 'never');
-    else if (opts.permission === 'readonly') args.push('--ask-for-approval', 'never');
-    else args.push('--ask-for-approval', 'on-request');
+    const args = opts.resumeSessionId
+      ? ['exec', 'resume', opts.resumeSessionId, opts.prompt, '--json']
+      : ['exec', '--json', opts.prompt, '--sandbox', sandbox];
     if (opts.model) args.push('--model', opts.model);
-    if (opts.resumeSessionId) args.push('--thread-id', opts.resumeSessionId);
     for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
     return args;
   },
@@ -207,8 +254,7 @@ export const codexHarness: Harness = {
   extractResult(state: ParseState): StreamedResult | null {
     if (state.result) return state.result;
     if (state.streamedText.trim().length > 0) {
-      const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
-        ?.sessionId as string | undefined;
+      const latched = (state._harness as CodexHarnessState | undefined)?.sessionId;
       return {
         result: state.streamedText,
         isError: false,

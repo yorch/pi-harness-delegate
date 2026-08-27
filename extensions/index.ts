@@ -31,23 +31,43 @@ import {
 import { Type } from 'typebox';
 import {
   aggregateSpend,
+  buildFanoutReport,
   buildReportContent,
   buildTranscript,
+  buildVerifyResult,
   collectActivityLog,
+  type FanoutRunSummary,
   formatMetrics,
   formatSpend,
   formatToolUse,
   parseTranscriptMeta,
   pruneOutputs,
+  resolveVerifyPlan,
   safeSegmentName,
+  skipVerifyResult,
   ToolCallIndex,
+  type VerifyResult,
 } from './activity.ts';
-import { parseDelegateCommand, resolveDefaults } from './command.ts';
-import { outputsDir as getOutputsDir, legacyOutputsDir, loadConfig, resolveModelForHarness } from './config.ts';
-import { ALIASES, detectAll, getHarness, HARNESS_NAMES, isKnownHarness } from './harnesses/registry.ts';
+import { isFanoutSpec, parseDelegateCommand, resolveDefaults, resolveHarnessList } from './command.ts';
+import {
+  type DelegateConfig,
+  outputsDir as getOutputsDir,
+  legacyOutputsDir,
+  loadConfig,
+  resolveModelForHarness,
+} from './config.ts';
+import {
+  ALIASES,
+  detectAll,
+  getHarness,
+  HARNESS_NAMES,
+  isKnownHarness,
+  resolveHarnessName,
+} from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 
 import { delegationHint, stripMarker } from './hint.ts';
+import { NotifyBatcher } from './notify.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
 import { acquireRun, countActiveRuns, releaseRun } from './run-registry.ts';
 import { runHarness } from './runner.ts';
@@ -69,9 +89,49 @@ interface DelegateOptions {
   allowDangerous?: boolean;
   sessionId?: string;
   pr?: string;
+  /**
+   * Host-run verification command override — takes precedence over the template's `verify`
+   * frontmatter. Internal engine option only, not exposed on the `delegate` tool's schema — see
+   * the trust-model note on `runVerify` below for why.
+   */
+  verify?: string;
   onStream?: (text: string) => void;
   onActivity?: (ev: ActivityEvent) => void;
   signal?: AbortSignal;
+}
+
+/** Verify commands run on the host after the harness exits — bounded independent of harness timeoutMs. */
+const VERIFY_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Run a verify command in-process on the host (never delegated to the harness). Report-only —
+ * callers must not let this flip a run's `isError`.
+ *
+ * Trust model: a verify command can only come from two places — on-disk template frontmatter
+ * (project-local templates are already behind `isTrusted()`) or a human typing `/delegate
+ * --verify=<cmd>` at the CLI. It is deliberately **not** a `delegate` tool parameter: a tool
+ * param is set by the model, whose context includes repo content and delegated-harness output —
+ * both attacker-influenceable, so a model-settable `verify` would be a prompt-injection ->
+ * arbitrary-host-command path (e.g. injected text in a reviewed file steering the parent agent
+ * into `delegate({verify: "curl ... | sh"})`). A model that wants verification selects a
+ * template that declares one instead.
+ *
+ * `resolveVerifyPlan` additionally never lets a verify command run on a `readonly` permission —
+ * `readonly` guarantees no execution/modification, and a verify command riding along on one
+ * would silently break that guarantee (a permission-tier bypass), independent of how trusted its
+ * source is. See the matching Conventions entry in AGENTS.md.
+ *
+ * Runs via `sh -c` (not a fixed binary+argv) so compound commands like `bun test && bun run
+ * lint` work — safe only because of the source/permission restrictions above, not because the
+ * command itself is sanitized.
+ */
+async function runVerify(pi: ExtensionAPI, cwd: string, command: string): Promise<VerifyResult> {
+  try {
+    const res = await pi.exec('sh', ['-c', command], { cwd, timeout: VERIFY_TIMEOUT_MS });
+    return buildVerifyResult(command, res.code, `${res.stdout}${res.stderr}`);
+  } catch (err) {
+    return buildVerifyResult(command, 1, err instanceof Error ? err.message : String(err));
+  }
 }
 
 const activeRuns = new Map<string, number>();
@@ -445,6 +505,7 @@ async function delegate(
   details: Record<string, unknown>;
   result: import('./harnesses/types.ts').StreamedResult & { streamedText: string; harness: string };
   activityLog: string[];
+  verify?: VerifyResult;
 }> {
   const config = loadConfig();
   const harnessName = opts.harness ?? config.defaultHarness ?? 'claude';
@@ -598,6 +659,16 @@ async function delegate(
   const contextPercent =
     promptTokens !== null && result.contextWindow ? (promptTokens / result.contextWindow) * 100 : null;
 
+  // Host-run post-hoc verification — report-only evidence, never flips `result.isError`. Never
+  // actually executes on a readonly permission (permission-tier bypass) — recorded as skipped
+  // instead of silently dropped. See the trust-model note on runVerify().
+  const verifyPlan = resolveVerifyPlan(opts.verify, template.verify, permission);
+  const verify = verifyPlan
+    ? verifyPlan.skip
+      ? skipVerifyResult(verifyPlan.command, 'readonly run')
+      : await runVerify(pi, ctx.cwd, verifyPlan.command)
+    : undefined;
+
   const file = saveOutput(
     harnessName,
     mode,
@@ -620,6 +691,7 @@ async function delegate(
       contextWindow: result.contextWindow,
       activityLog: collectActivityLog(activityEvents),
       output: result.result || result.streamedText,
+      verify,
     }),
   );
   pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts);
@@ -649,9 +721,11 @@ async function delegate(
       contextPercent,
       promptTokens,
       usage: result.usage,
+      verify,
     },
     result,
     activityLog: collectActivityLog(activityEvents),
+    verify,
   };
 }
 
@@ -667,7 +741,15 @@ interface PendingReport {
 let pendingReport: PendingReport | null = null;
 function injectReport(
   _ctx: ExtensionContext,
-  opts: { harness: string; mode: string; metrics: string; body: string; file?: string; sessionId?: string },
+  opts: {
+    harness: string;
+    mode: string;
+    metrics: string;
+    body: string;
+    file?: string;
+    sessionId?: string;
+    verify?: VerifyResult;
+  },
 ): void {
   pendingReport = {
     content: buildReportContent({
@@ -677,6 +759,7 @@ function injectReport(
       body: opts.body,
       file: opts.file,
       sessionId: opts.sessionId,
+      verify: opts.verify,
     }),
     details: {
       harness: opts.harness,
@@ -685,6 +768,190 @@ function injectReport(
       sessionId: opts.sessionId,
       metrics: opts.metrics,
     },
+  };
+}
+
+interface ToolProgressUpdate {
+  content: { type: string; text: string }[];
+  details: { progress: number };
+}
+
+/**
+ * `delegate` tool params. Deliberately has no `verify` field — a tool param is model-controlled,
+ * and the model's context (repo content, delegated-harness output) is attacker-influenceable, so
+ * a model-settable verify command would be a prompt-injection -> arbitrary-host-command path.
+ * Verify only comes from on-disk template frontmatter or a human-typed `/delegate --verify=`.
+ */
+interface DelegateToolParams {
+  harness?: string;
+  task: string;
+  mode?: string;
+  scope?: string;
+  model?: string;
+  maxBudgetUsd?: number;
+  allowDangerous?: boolean;
+  sessionId?: string;
+  pr?: string;
+}
+
+/** One `delegate()` call with the tool's live-feed progress reporting (`onUpdate`). Shared by the
+ *  single-harness tool path and the fan-out loop — `labelPrefix` tags fan-out feed lines by harness. */
+async function runDelegateForTool(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  config: DelegateConfig,
+  callOpts: DelegateOptions,
+  signal: AbortSignal | undefined,
+  onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
+  labelPrefix: string,
+): Promise<Awaited<ReturnType<typeof delegate>>> {
+  const feed: string[] = [];
+  const feedIndex = new ToolCallIndex();
+  let liveTail = '';
+  let thinkingChars = 0;
+  let lastPushAt = 0;
+  const THROTTLE_MS = 250;
+  const pushFeed = () => {
+    const now = Date.now();
+    if (now - lastPushAt < THROTTLE_MS) return;
+    lastPushAt = now;
+    const lines: string[] = [...feed.slice(-6)];
+    if (thinkingChars > 0)
+      lines.push(config.inspectThinking ? `💭 thinking… (${thinkingChars} chars)` : '💭 thinking…');
+    if (liveTail) lines.push(`✍ ${liveTail}`);
+    if (lines.length === 0) return;
+    onUpdate?.({
+      content: [{ type: 'text', text: lines.map(l => `${labelPrefix}${l}`).join('\n') }],
+      details: { progress: 0.5 },
+    });
+  };
+  return delegate(pi, ctx, {
+    ...callOpts,
+    signal,
+    onStream: t => {
+      liveTail = (liveTail + t).slice(-400);
+      pushFeed();
+    },
+    onActivity: ev => {
+      if (ev.kind === 'tool_input') {
+        feed.push(`▶ ${formatToolUse(ev.name, ev.input)}`);
+        feedIndex.set(ev.id, feed.length - 1);
+        if (feed.length > 40) {
+          const removed = feed.length - 40;
+          feed.splice(0, removed);
+          feedIndex.shift(removed);
+        }
+      } else if (ev.kind === 'tool_result') {
+        const idx = feedIndex.resolve(ev.id, feed.length - 1);
+        if (idx >= 0 && feed[idx]?.startsWith('▶')) feed[idx] += ev.isError ? ' ✗' : ' ✓';
+      } else if (ev.kind === 'thinking') thinkingChars += ev.chars;
+      pushFeed();
+    },
+  });
+}
+
+/** `delegate({harness:"all"|"a,b"})` — resolve the requested harnesses to detected installs, run the
+ *  existing `delegate()` engine once per harness sequentially (respects `maxConcurrent`), and
+ *  mechanically synthesize one comparison report. No second model call. */
+async function runFanoutTool(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  config: DelegateConfig,
+  params: DelegateToolParams,
+  signal: AbortSignal | undefined,
+  onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
+): Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown>; usage?: unknown }> {
+  const detection = await detectAll();
+  const { resolved, unknown, skipped } = resolveHarnessList(params.harness ?? 'all', {
+    knownHarnesses: HARNESS_NAMES,
+    aliasOf: resolveHarnessName,
+    isKnown: isKnownHarness,
+    detection,
+  });
+  if (resolved.length === 0) {
+    throw new Error(
+      `no harness available to fan out to (unknown: ${unknown.join(', ') || '—'}; not installed: ${skipped.join(', ') || '—'})`,
+    );
+  }
+
+  const mode = params.mode ?? config.defaultMode;
+  const runs: FanoutRunSummary[] = [];
+  let sumInput = 0;
+  let sumOutput = 0;
+  let sumCacheCreate = 0;
+  let sumCacheRead = 0;
+  let sumCost = 0;
+  let anyCostKnown = false;
+
+  for (const h of resolved) {
+    onUpdate?.({ content: [{ type: 'text', text: `[${h}] running…` }], details: { progress: 0.5 } });
+    try {
+      const run = await runDelegateForTool(
+        pi,
+        ctx,
+        config,
+        {
+          harness: h,
+          task: params.task,
+          mode: params.mode,
+          scope: params.scope,
+          model: params.model,
+          maxBudgetUsd: params.maxBudgetUsd,
+          allowDangerous: params.allowDangerous === true,
+          sessionId: params.sessionId,
+          pr: params.pr,
+          // no verify: intentionally not model-settable — see DelegateToolParams
+        },
+        signal,
+        onUpdate,
+        `[${h}] `,
+      );
+      const summary = summarize(run.content);
+      runs.push({
+        harness: h,
+        ok: !run.result.isError,
+        metrics: formatMetrics({
+          numTurns: run.result.numTurns,
+          totalCostUsd: run.result.totalCostUsd,
+          promptTokens: 0,
+          contextPercent: typeof run.details.contextPercent === 'number' ? run.details.contextPercent : null,
+          durationMs: run.result.durationMs,
+        }),
+        cost: run.result.totalCostUsd,
+        body: summary.text,
+        file: (run.details.file as string) ?? undefined,
+        sessionId: (run.details.sessionId as string) ?? undefined,
+        verify: run.verify,
+      });
+      if (run.result.usage) {
+        sumInput += run.result.usage.inputTokens;
+        sumOutput += run.result.usage.outputTokens;
+        sumCacheCreate += run.result.usage.cacheCreationInputTokens;
+        sumCacheRead += run.result.usage.cacheReadInputTokens;
+      }
+      if (run.result.totalCostUsd !== null) {
+        sumCost += run.result.totalCostUsd;
+        anyCostKnown = true;
+      }
+    } catch (err) {
+      runs.push({ harness: h, ok: false, cost: null, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  const report = buildFanoutReport({ runs, skipped, unknown });
+  const okCount = runs.filter(r => r.ok).length;
+  const head = `## delegate all — ${mode} (${okCount}/${runs.length} ok)`;
+  const usage = mapClaudeUsage({
+    inputTokens: sumInput,
+    outputTokens: sumOutput,
+    cacheCreationInputTokens: sumCacheCreate,
+    cacheReadInputTokens: sumCacheRead,
+    totalCostUsd: anyCostKnown ? sumCost : null,
+  });
+  return {
+    content: [{ type: 'text', text: `${head}\n\n${report}` }],
+    details: { fanout: true, harness: 'all', mode, harnesses: resolved, skipped, unknown, runs },
+    usage,
   };
 }
 
@@ -697,12 +964,13 @@ export default function (pi: ExtensionAPI) {
     name: 'delegate',
     label: 'Delegate',
     description:
-      'Delegate a task to any harness (claude, codex, opencode, amp) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude). mode selects a template: review, plan, implement, security-audit, docs, general, or custom. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session.',
+      'Delegate a task to any harness (claude, codex, opencode, amp) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude) — pass "all" or a comma list (e.g. "claude,codex") to fan out the same task to several harnesses and get back one comparison report. mode selects a template: review, plan, implement, security-audit, docs, general, or custom — some templates run a host-side check (e.g. "bun test") after the harness exits and report pass/fail as separate evidence; that is configured on the template, not a parameter here. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session.',
     promptSnippet: 'Delegate a subtask to a harness and return its report',
     promptGuidelines: [
       'delegate runs a harness headless in the working directory and returns a streamed report with cost, token usage, and a session id for follow-ups.',
       'Pass harness (claude|codex|opencode|amp) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
-      'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work.',
+      'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
+      'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
       'sessionId resumes a previous delegated session instead of starting fresh.',
       'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission).',
     ],
@@ -710,7 +978,7 @@ export default function (pi: ExtensionAPI) {
       harness: Type.Optional(
         Type.String({
           description:
-            'Harness to use: claude, codex, opencode, amp (aliases: omp). Defaults to config defaultHarness.',
+            'Harness to use: claude, codex, opencode, amp (aliases: omp). "all" or a comma list (e.g. "claude,codex") fans out to each detected harness. Defaults to config defaultHarness.',
         }),
       ),
       task: Type.String({ description: 'The task/intent to delegate. Be specific.' }),
@@ -741,73 +1009,39 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
       pr: Type.Optional(Type.String({ description: 'GitHub PR number/URL (alternative to scope pr).' })),
+      // Deliberately no `verify` param — see the trust-model comment on DelegateToolParams/runVerify.
     }),
     async execute(
       _toolCallId: string,
-      params: {
-        harness?: string;
-        task: string;
-        mode?: string;
-        scope?: string;
-        model?: string;
-        maxBudgetUsd?: number;
-        allowDangerous?: boolean;
-        sessionId?: string;
-        pr?: string;
-      },
+      params: DelegateToolParams,
       signal: AbortSignal | undefined,
-      onUpdate: ((u: { content: { type: string; text: string }[]; details: { progress: number } }) => void) | undefined,
+      onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
       ctx: ExtensionContext,
     ) {
       const config = loadConfig();
-      const feed: string[] = [];
-      const feedIndex = new ToolCallIndex();
-      let liveTail = '';
-      let thinkingChars = 0;
-      let lastPushAt = 0;
-      const THROTTLE_MS = 250;
-      const pushFeed = () => {
-        const now = Date.now();
-        if (now - lastPushAt < THROTTLE_MS) return;
-        lastPushAt = now;
-        const lines: string[] = [...feed.slice(-6)];
-        if (thinkingChars > 0)
-          lines.push(config.inspectThinking ? `💭 thinking… (${thinkingChars} chars)` : '💭 thinking…');
-        if (liveTail) lines.push(`✍ ${liveTail}`);
-        if (lines.length === 0) return;
-        onUpdate?.({ content: [{ type: 'text', text: lines.join('\n') }], details: { progress: 0.5 } });
-      };
-      const { content, details, result } = await delegate(pi, ctx, {
-        harness: params.harness,
-        task: params.task,
-        mode: params.mode,
-        scope: params.scope,
-        model: params.model,
-        maxBudgetUsd: params.maxBudgetUsd,
-        allowDangerous: params.allowDangerous === true, // invariant: never inherit from config.allowDangerous — danger requires explicit per-call approval
-        sessionId: params.sessionId,
-        pr: params.pr,
+      if (params.harness && isFanoutSpec(params.harness)) {
+        return runFanoutTool(pi, ctx, config, params, signal, onUpdate);
+      }
+      const { content, details, result } = await runDelegateForTool(
+        pi,
+        ctx,
+        config,
+        {
+          harness: params.harness,
+          task: params.task,
+          mode: params.mode,
+          scope: params.scope,
+          model: params.model,
+          maxBudgetUsd: params.maxBudgetUsd,
+          allowDangerous: params.allowDangerous === true, // invariant: never inherit from config.allowDangerous — danger requires explicit per-call approval
+          sessionId: params.sessionId,
+          pr: params.pr,
+          // no verify: intentionally not model-settable — see DelegateToolParams
+        },
         signal,
-        onStream: text => {
-          liveTail = (liveTail + text).slice(-400);
-          pushFeed();
-        },
-        onActivity: ev => {
-          if (ev.kind === 'tool_input') {
-            feed.push(`▶ ${formatToolUse(ev.name, ev.input)}`);
-            feedIndex.set(ev.id, feed.length - 1);
-            if (feed.length > 40) {
-              const removed = feed.length - 40;
-              feed.splice(0, removed);
-              feedIndex.shift(removed);
-            }
-          } else if (ev.kind === 'tool_result') {
-            const idx = feedIndex.resolve(ev.id, feed.length - 1);
-            if (idx >= 0 && feed[idx]?.startsWith('▶')) feed[idx] += ev.isError ? ' ✗' : ' ✓';
-          } else if (ev.kind === 'thinking') thinkingChars += ev.chars;
-          pushFeed();
-        },
-      });
+        onUpdate,
+        '',
+      );
       const summary = summarize(content);
       const resumed = details.resumed ? ' · resumed' : '';
       const head = result.isError
@@ -897,17 +1131,7 @@ export default function (pi: ExtensionAPI) {
     parameters: (delegateToolDef as { parameters: unknown }).parameters as never,
     async execute(
       toolCallId: string,
-      params: {
-        harness?: string;
-        task: string;
-        mode?: string;
-        scope?: string;
-        model?: string;
-        maxBudgetUsd?: number;
-        allowDangerous?: boolean;
-        sessionId?: string;
-        pr?: string;
-      },
+      params: DelegateToolParams,
       signal: AbortSignal | undefined,
       onUpdate: never,
       ctx: ExtensionContext,
@@ -931,6 +1155,253 @@ export default function (pi: ExtensionAPI) {
   } as unknown as Parameters<typeof pi.registerTool>[0]); // SAFETY: alias tool matches overload
 
   // ── Commands ─────────────────────────────────────────────────────────────
+
+  /** One `delegate()` call with the command's progress-window UI (spinner, cancel, minimize).
+   *  Shared by the single-harness `/delegate` path and the fan-out loop, one call per harness. */
+  const runOneDelegation = async (
+    ctx: ExtensionContext,
+    opts: {
+      harnessName: string;
+      mode?: string;
+      task: string;
+      scope?: string;
+      model?: string;
+      budget?: number;
+      sessionId?: string;
+      pr?: string;
+      verify?: string;
+      template?: DelegateTemplate;
+      isDanger: boolean;
+    },
+  ): Promise<{
+    result: Awaited<ReturnType<typeof delegate>> | null;
+    error: Error | null;
+    cancelled: boolean;
+  }> => {
+    const { harnessName, mode, task, scope, model, budget, sessionId, pr, verify, template, isDanger } = opts;
+    const modeForDisplay = mode ?? 'general';
+
+    const feed: FeedEntry[] = [];
+    const feedIndex = new ToolCallIndex();
+    let thinkingChars = 0;
+    let liveTail = '';
+    let requestRender: (() => void) | null = null;
+    const getEntries = (): FeedEntry[] => {
+      const entries = [...feed.slice(-12)];
+      if (thinkingChars > 0) entries.push({ kind: 'thinking', text: '💭 thinking…' });
+      if (liveTail) entries.push({ kind: 'text', text: liveTail.slice(-200) });
+      return entries;
+    };
+    let chipActivity = '';
+    let chipActivityId: string | undefined;
+    let chipLastPush = 0;
+    const pushChip = () => {
+      if (!ctx.hasUI) return;
+      const now = Date.now();
+      if (now - chipLastPush < 500) return;
+      chipLastPush = now;
+      const theme = ctx.ui.theme;
+      const activity = chipActivity ? ` ${chipActivity}` : theme.fg('dim', ' running…');
+      ctx.ui.setStatus(
+        'delegate',
+        theme.fg('accent', '●') + theme.fg('dim', ` ${harnessName} ${modeForDisplay}`) + activity,
+      );
+    };
+    const onActivity = (ev: ActivityEvent) => {
+      if (ev.kind === 'tool_input') {
+        chipActivity = `▶ ${formatToolUse(ev.name, ev.input)}`;
+        chipActivityId = ev.id;
+        feed.push({ kind: 'tool', text: formatToolUse(ev.name, ev.input), id: ev.id });
+        feedIndex.set(ev.id, feed.length - 1);
+        if (feed.length > 40) {
+          const removed = feed.length - 40;
+          feed.splice(0, removed);
+          feedIndex.shift(removed);
+        }
+      } else if (ev.kind === 'tool_result') {
+        // only stamp the chip when the result belongs to the tool it's currently showing
+        if (chipActivity.startsWith('▶') && (ev.id === undefined || ev.id === chipActivityId))
+          chipActivity += ev.isError ? ' ✗' : ' ✓';
+        const idx = feedIndex.resolve(ev.id, feed.length - 1);
+        if (idx >= 0 && feed[idx]?.kind === 'tool') feed[idx] = { ...feed[idx], ok: !ev.isError };
+      } else if (ev.kind === 'thinking') {
+        chipActivity = '💭 thinking…';
+        chipActivityId = undefined;
+        thinkingChars += ev.chars;
+      }
+      pushChip();
+      requestRender?.();
+    };
+    const ac = new AbortController();
+    let cancelled = false;
+    const runState: { error: Error | null } = { error: null };
+    const runId = ++activeRunId;
+    const clearActive = () => {
+      if (activeOverlay?.runId === runId) activeOverlay = null;
+    };
+    const run = delegate(pi, ctx, {
+      harness: harnessName,
+      task,
+      mode,
+      scope,
+      model,
+      maxBudgetUsd: budget,
+      sessionId,
+      pr,
+      verify,
+      signal: ac.signal,
+      onStream: t => {
+        liveTail = (liveTail + t).slice(-400);
+        requestRender?.();
+      },
+      onActivity,
+    }).catch((err: unknown) => {
+      runState.error = err instanceof Error ? err : new Error(String(err));
+      return null;
+    });
+
+    let closeWindow: (() => void) | null = null;
+    let result: Awaited<ReturnType<typeof delegate>> | null = null;
+    if (ctx.hasUI) {
+      let overlayHandle: OverlayHandle | null = null;
+      const uiPromise = ctx.ui
+        .custom(
+          (tui, theme, _kb, done) => {
+            requestRender = () => tui.requestRender();
+            closeWindow = () => done(undefined);
+            return progressWindow(tui, theme, {
+              mode: `${harnessName} ${modeForDisplay}`,
+              model: model ?? template?.model ?? loadConfig().harnesses[harnessName]?.model ?? loadConfig().model,
+              startedAt: Date.now(),
+              getEntries,
+              dangerous: isDanger,
+              onCancel: () => {
+                cancelled = true;
+                ac.abort();
+              },
+              onMinimize: () => {
+                overlayHandle?.setHidden(true);
+                overlayHandle?.unfocus();
+              },
+            });
+          },
+          {
+            overlay: true,
+            overlayOptions: { width: '70%', maxHeight: '60%', anchor: 'top-center' },
+            onHandle: h => {
+              overlayHandle = h;
+              activeOverlay = { show: () => h.setHidden(false), focus: () => h.focus(), runId };
+              h.focus();
+            },
+          },
+        )
+        .catch(() => {});
+      result = await run;
+      await closeWhenMounted(() => closeWindow, 2000);
+      await uiPromise;
+    } else {
+      result = await run;
+    }
+    clearActive();
+    if (ctx.hasUI) ctx.ui.setStatus('delegate', undefined);
+    const failed = cancelled || !result;
+    return { result: failed ? null : result, error: runState.error, cancelled };
+  };
+
+  /** `/delegate all …` / `/delegate a,b …` — resolve to detected harnesses, run each sequentially
+   *  through `runOneDelegation` (respects `maxConcurrent`), batch success notifications, and inject
+   *  one synthesized comparison report instead of one report per harness. */
+  const runFanoutCommand = async (ctx: ExtensionContext, parsed: ReturnType<typeof parseDelegateCommand>) => {
+    const harnessSpec = parsed.harness as string;
+    const detection = await detectAll();
+    const { resolved, unknown, skipped } = resolveHarnessList(harnessSpec, {
+      knownHarnesses: HARNESS_NAMES,
+      aliasOf: resolveHarnessName,
+      isKnown: isKnownHarness,
+      detection,
+    });
+    if (resolved.length === 0) {
+      const msg = `no harness available to fan out to (unknown: ${unknown.join(', ') || '—'}; not installed: ${skipped.join(', ') || '—'})`;
+      if (ctx.hasUI) ctx.ui.notify(msg, 'error');
+      else process.stderr.write(`${msg}\n`);
+      return;
+    }
+
+    const modeForReport = parsed.mode ?? loadConfig().defaultMode;
+    const runs: FanoutRunSummary[] = [];
+    const batcher = new NotifyBatcher((text, level) => {
+      if (ctx.hasUI) ctx.ui.notify(text, level);
+      else process.stdout.write(`${text}\n`);
+    });
+
+    for (const h of resolved) {
+      const templates = loadTemplates(ctx.cwd, h);
+      const resolvedTaskScope = resolveDefaults(parsed, templates);
+      const template = parsed.mode ? templates.get(parsed.mode) : undefined;
+      if (!resolvedTaskScope) {
+        const message = `mode "${parsed.mode ?? 'general'}" needs a prompt`;
+        runs.push({ harness: h, ok: false, cost: null, error: message });
+        batcher.failure(`${h}: ${message}`);
+        continue;
+      }
+      const isDanger =
+        template?.permission === 'danger' ||
+        (template?.nativePermission
+          ? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission)
+          : false);
+      const outcome = await runOneDelegation(ctx, {
+        harnessName: h,
+        mode: parsed.mode,
+        task: resolvedTaskScope.task,
+        scope: resolvedTaskScope.scope,
+        model: parsed.model,
+        budget: parsed.budget,
+        sessionId: parsed.sessionId,
+        pr: parsed.pr,
+        verify: parsed.verify,
+        template,
+        isDanger,
+      });
+      if (outcome.cancelled || !outcome.result) {
+        const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
+        runs.push({ harness: h, ok: false, cost: null, error: message });
+        batcher.failure(`${h}: ${outcome.cancelled ? 'cancelled' : 'failed'} — ${message}`);
+        if (outcome.cancelled) break; // user cancelled — stop the rest of the fan-out
+        continue;
+      }
+      const { content, details, result, verify } = outcome.result;
+      const summary = summarize(content);
+      const metrics = formatMetrics({
+        numTurns: result.numTurns,
+        totalCostUsd: result.totalCostUsd,
+        promptTokens: 0,
+        contextPercent: typeof details.contextPercent === 'number' ? details.contextPercent : null,
+        durationMs: typeof details.durationMs === 'number' ? details.durationMs : null,
+      });
+      runs.push({
+        harness: h,
+        ok: !result.isError,
+        metrics,
+        cost: result.totalCostUsd,
+        body: summary.text,
+        file: (details.file as string) ?? undefined,
+        sessionId: (details.sessionId as string) ?? undefined,
+        verify,
+      });
+      batcher.success(`${h} ${parsed.mode ?? 'general'} — ${metrics}`);
+    }
+
+    const okCount = runs.filter(r => r.ok).length;
+    const report = buildFanoutReport({ runs, skipped, unknown });
+    injectReport(ctx, {
+      harness: 'all',
+      mode: modeForReport,
+      metrics: `${okCount}/${runs.length} ok`,
+      body: report,
+    });
+    batcher.flush();
+  };
+
   const makeHandler = (forcedHarness?: string) => async (args: string, ctx: ExtensionContext) => {
     const sub = args.trim();
     const subLower = sub.toLowerCase();
@@ -1006,6 +1477,14 @@ export default function (pi: ExtensionAPI) {
     const parsed = parseDelegateCommand(rawForParse, allModes, knownHarnessesSet);
     // if forcedHarness provided, it wins
     if (forcedHarness) parsed.harness = forcedHarness;
+
+    // fan-out: harness field is `all` or a comma list — resolve to detected harnesses and run
+    // the engine once per harness instead of the single-harness flow below.
+    if (parsed.harness && isFanoutSpec(parsed.harness)) {
+      await runFanoutCommand(ctx, parsed);
+      return;
+    }
+
     const harnessName = parsed.harness ?? loadConfig().defaultHarness ?? 'claude';
     const templates = loadTemplates(ctx.cwd, harnessName);
     const resolved = resolveDefaults(parsed, templates);
@@ -1024,145 +1503,36 @@ export default function (pi: ExtensionAPI) {
         );
       else
         ctx.ui.notify?.(
-          'Usage: /delegate [--harness=claude|codex|opencode|amp] [--mode=…] [--model=…] [--scope=…] <prompt>',
+          'Usage: /delegate [--harness=claude|codex|opencode|amp|all] [--mode=…] [--model=…] [--scope=…] [--verify=…] <prompt>',
           'warning',
         );
       return;
     }
-    const modeForDisplay = parsed.mode ?? 'general';
-    const harnessForDisplay = harnessName;
 
-    const feed: FeedEntry[] = [];
-    const feedIndex = new ToolCallIndex();
-    let thinkingChars = 0;
-    let liveTail = '';
-    let requestRender: (() => void) | null = null;
-    const getEntries = (): FeedEntry[] => {
-      const entries = [...feed.slice(-12)];
-      if (thinkingChars > 0) entries.push({ kind: 'thinking', text: '💭 thinking…' });
-      if (liveTail) entries.push({ kind: 'text', text: liveTail.slice(-200) });
-      return entries;
-    };
-    let chipActivity = '';
-    let chipActivityId: string | undefined;
-    let chipLastPush = 0;
-    const pushChip = () => {
-      if (!ctx.hasUI) return;
-      const now = Date.now();
-      if (now - chipLastPush < 500) return;
-      chipLastPush = now;
-      const theme = ctx.ui.theme;
-      const activity = chipActivity ? ` ${chipActivity}` : theme.fg('dim', ' running…');
-      ctx.ui.setStatus(
-        'delegate',
-        theme.fg('accent', '●') + theme.fg('dim', ` ${harnessForDisplay} ${modeForDisplay}`) + activity,
-      );
-    };
-    const onActivity = (ev: ActivityEvent) => {
-      if (ev.kind === 'tool_input') {
-        chipActivity = `▶ ${formatToolUse(ev.name, ev.input)}`;
-        chipActivityId = ev.id;
-        feed.push({ kind: 'tool', text: formatToolUse(ev.name, ev.input), id: ev.id });
-        feedIndex.set(ev.id, feed.length - 1);
-        if (feed.length > 40) {
-          const removed = feed.length - 40;
-          feed.splice(0, removed);
-          feedIndex.shift(removed);
-        }
-      } else if (ev.kind === 'tool_result') {
-        // only stamp the chip when the result belongs to the tool it's currently showing
-        if (chipActivity.startsWith('▶') && (ev.id === undefined || ev.id === chipActivityId))
-          chipActivity += ev.isError ? ' ✗' : ' ✓';
-        const idx = feedIndex.resolve(ev.id, feed.length - 1);
-        if (idx >= 0 && feed[idx]?.kind === 'tool') feed[idx] = { ...feed[idx], ok: !ev.isError };
-      } else if (ev.kind === 'thinking') {
-        chipActivity = '💭 thinking…';
-        chipActivityId = undefined;
-        thinkingChars += ev.chars;
-      }
-      pushChip();
-      requestRender?.();
-    };
-    const ac = new AbortController();
-    let cancelled = false;
-    const runState: { error: Error | null } = { error: null };
-    const runId = ++activeRunId;
-    const clearActive = () => {
-      if (activeOverlay?.runId === runId) activeOverlay = null;
-    };
-    const run = delegate(pi, ctx, {
-      harness: harnessName,
-      task: resolved.task,
+    const outcome = await runOneDelegation(ctx, {
+      harnessName,
       mode: parsed.mode,
+      task: resolved.task,
       scope: resolved.scope,
       model: parsed.model,
-      maxBudgetUsd: parsed.budget,
+      budget: parsed.budget,
       sessionId: parsed.sessionId,
       pr: parsed.pr,
-      signal: ac.signal,
-      onStream: t => {
-        liveTail = (liveTail + t).slice(-400);
-        requestRender?.();
-      },
-      onActivity,
-    }).catch((err: unknown) => {
-      runState.error = err instanceof Error ? err : new Error(String(err));
-      return null;
+      verify: parsed.verify,
+      template,
+      isDanger,
     });
-
-    let closeWindow: (() => void) | null = null;
-    let result: Awaited<ReturnType<typeof delegate>> | null = null;
-    if (ctx.hasUI) {
-      let overlayHandle: OverlayHandle | null = null;
-      const uiPromise = ctx.ui
-        .custom(
-          (tui, theme, _kb, done) => {
-            requestRender = () => tui.requestRender();
-            closeWindow = () => done(undefined);
-            return progressWindow(tui, theme, {
-              mode: `${harnessForDisplay} ${modeForDisplay}`,
-              model:
-                parsed.model ?? template?.model ?? loadConfig().harnesses[harnessName]?.model ?? loadConfig().model,
-              startedAt: Date.now(),
-              getEntries,
-              dangerous: isDanger,
-              onCancel: () => {
-                cancelled = true;
-                ac.abort();
-              },
-              onMinimize: () => {
-                overlayHandle?.setHidden(true);
-                overlayHandle?.unfocus();
-              },
-            });
-          },
-          {
-            overlay: true,
-            overlayOptions: { width: '70%', maxHeight: '60%', anchor: 'top-center' },
-            onHandle: h => {
-              overlayHandle = h;
-              activeOverlay = { show: () => h.setHidden(false), focus: () => h.focus(), runId };
-              h.focus();
-            },
-          },
-        )
-        .catch(() => {});
-      result = await run;
-      await closeWhenMounted(() => closeWindow, 2000);
-      await uiPromise;
-    } else {
-      result = await run;
-    }
-    clearActive();
-    if (cancelled || !result) {
-      if (ctx.hasUI) ctx.ui.setStatus('delegate', undefined);
-      const message = runState.error ? runState.error.message : cancelled ? 'cancelled' : 'delegation failed';
+    if (outcome.cancelled || !outcome.result) {
+      const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
       if (ctx.hasUI)
-        ctx.ui.notify(`delegate ${cancelled ? 'cancelled' : 'failed'}: ${message}`, cancelled ? 'warning' : 'error');
+        ctx.ui.notify(
+          `delegate ${outcome.cancelled ? 'cancelled' : 'failed'}: ${message}`,
+          outcome.cancelled ? 'warning' : 'error',
+        );
       else process.stderr.write(`${message}\n`);
       return;
     }
-    const { content, details } = result;
+    const { content, details, verify } = outcome.result;
     const summary = summarize(content);
     const file = (details.file as string) ?? null;
     const sessionId = (details.sessionId as string) ?? null;
@@ -1193,6 +1563,7 @@ export default function (pi: ExtensionAPI) {
       body: summary.text,
       file: file ?? undefined,
       sessionId: sessionId ?? undefined,
+      verify,
     });
     if (ctx.hasUI) {
       ctx.ui.setStatus('delegate', undefined);
@@ -1202,7 +1573,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand('delegate', {
     description:
-      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>',
+      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--verify=<cmd>] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report.',
     handler: makeHandler(),
   });
   pi.registerCommand('claude', {

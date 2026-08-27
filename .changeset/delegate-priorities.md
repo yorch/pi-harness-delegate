@@ -1,0 +1,10 @@
+---
+'pi-harness-delegate': minor
+---
+
+Fix codex/opencode delegation (entirely broken) and add post-run verify, multi-harness fan-out, and batched notifications:
+
+- **codex and opencode delegations were completely broken** on current CLI versions — `codex exec` rejected `--ask-for-approval`/`--thread-id` and `opencode run` rejected `--permission`/`--add-dir` outright, so every delegation to those harnesses failed before emitting a single line of output. Both harnesses' `buildArgs` are fixed and schema-verified against real captured JSONL (codex-cli 0.149.1, opencode 1.18.16). `amp`'s binary resolution (`amp`/`omp`) and final-result reading were also fixed; tool-call ids are now wired for all four harnesses so parallel tool-result attribution works everywhere, not just Claude.
+- **Post-run verify**: templates (or a human-typed `/delegate --verify=` override) can name a host-run shell command (e.g. `bun test`) that runs after the harness exits to check its work. Report-only — appended as its own section in the transcript and injected report, surfaced in `details.verify`, and never flips `isError`. Deliberate security boundary: `verify` is **not** a `delegate` tool parameter (a model-settable command would be a prompt-injection → arbitrary-host-command path), and it never actually runs on a `readonly` template (recorded as skipped instead, to avoid a permission-tier bypass).
+- **Multi-harness fan-out**: `harness: "all"` or a comma list (e.g. `"claude,codex"`) — on the `delegate` tool and `/delegate` command — runs the same task on every *detected* harness sequentially through the existing engine and returns one mechanically-synthesized comparison report with a total spend rollup. Uninstalled/unknown harnesses are skipped and reported rather than failing the run. A single-harness call is unaffected.
+- **Batched notifications**: `/delegate all …` batches successful per-harness completions into one notification instead of spamming one per harness; failures are never delayed or batched.

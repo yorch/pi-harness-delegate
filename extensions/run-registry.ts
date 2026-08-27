@@ -5,6 +5,12 @@
  * One small JSON file per active run in `<agentDir>/delegate/runs/`. Best-effort throughout:
  * registry I/O failures never break a delegation — callers should combine this with their own
  * in-process counters as a fallback.
+ *
+ * Concurrency cap is best-effort, not a hard mutex: `countActiveRuns()` (read) and
+ * `acquireRun()` (write) are two separate steps with no lock between them, so two pi
+ * processes starting at the same instant can both observe a count under the limit and both
+ * proceed — `maxConcurrent` can be exceeded by a small margin under a tight race. This is a
+ * deliberate simplicity tradeoff (see AGENTS.md); do not rely on it for a hard cap.
  */
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -67,10 +73,10 @@ export function countActiveRuns(harness?: string): number {
     const full = join(runsDir(), f);
     try {
       const data = JSON.parse(readFileSync(full, 'utf8')) as { pid: number; harness: string };
-      if (typeof data.pid !== 'number' || isAlive(data.pid)) {
+      if (typeof data.pid === 'number' && isAlive(data.pid)) {
         if (!harness || data.harness === harness) count++;
       } else {
-        rmSync(full, { force: true }); // stale — owning process is gone
+        rmSync(full, { force: true }); // stale (dead pid) or corrupt (non-numeric pid)
       }
     } catch {
       try {

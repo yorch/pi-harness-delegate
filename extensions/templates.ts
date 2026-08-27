@@ -28,6 +28,8 @@ export interface DelegateTemplate {
   skill?: string;
   defaultTask?: string;
   defaultScope?: string;
+  /** Host-run shell command executed after the harness exits to check its claims (e.g. `bun test`). */
+  verify?: string;
   prompt: string;
   harness?: string;
 }
@@ -95,6 +97,7 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     skill: meta.skill || undefined,
     defaultTask: meta.defaultTask || undefined,
     defaultScope: meta.defaultScope || undefined,
+    verify: meta.verify || undefined,
     prompt: m[2].trim(),
     harness: meta.harness || undefined,
   };
