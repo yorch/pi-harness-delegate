@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   BuildArgsOpts,
@@ -9,14 +11,47 @@ import type {
   StreamedResult,
 } from './types.ts';
 
+// Schema verified against omp/17.2.9 (the only binary of this harness installed on the capture
+// machine — see tests/fixtures/amp.jsonl and AGENTS.md for what "amp" vs "omp" means here).
+
 const execFileAsync = promisify(execFile);
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
+
+/**
+ * `amp` isn't on PATH on machines that only have the `omp` alias binary installed — resolve
+ * which one actually exists once at module load, so the spawned binary matches what `detect()`
+ * already tolerates. Falls back to 'amp' (the documented default) when neither is found, so
+ * error messages still name the expected tool.
+ */
+export function resolveAmpBinary(pathEnv: string | undefined, exists: (p: string) => boolean = pathExists): string {
+  const dirs = (pathEnv ?? '').split(delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    if (exists(join(dir, 'amp'))) return 'amp';
+  }
+  for (const dir of dirs) {
+    if (exists(join(dir, 'omp'))) return 'omp';
+  }
+  return 'amp';
+}
+
+function pathExists(p: string): boolean {
+  try {
+    accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const RESOLVED_BINARY = resolveAmpBinary(process.env.PATH);
+
+// approval-mode maps cleanly onto the normalized 3-tier permission model.
 const PERMISSION_MAP: Record<NormalizedPermission, string> = {
-  readonly: 'read-only',
-  edit: 'workspace',
-  danger: 'danger',
+  readonly: 'always-ask',
+  edit: 'write',
+  danger: 'yolo',
 };
 function extractAmpText(o: Record<string, unknown>): string | undefined {
   if (typeof o.text === 'string') return o.text;
@@ -26,6 +61,23 @@ function extractAmpText(o: Record<string, unknown>): string | undefined {
   if (isRecord(o.part) && typeof o.part.text === 'string') return o.part.text;
   return undefined;
 }
+
+interface AmpHarnessState {
+  sessionId?: string;
+  costAccum?: number;
+  inputAccum?: number;
+  outputAccum?: number;
+  cacheReadAccum?: number;
+  cacheWriteAccum?: number;
+  turnCount?: number;
+}
+
+function harnessState(state: ParseState): AmpHarnessState {
+  const s = (state._harness ?? {}) as AmpHarnessState;
+  state._harness = s as unknown as Record<string, unknown>;
+  return s;
+}
+
 export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
   let o: unknown;
   try {
@@ -38,33 +90,30 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
   const activities: ParseOutcome['activities'] = [];
   let streamedText: string | undefined;
   const typeStr = typeof o.type === 'string' ? o.type : '';
+  const hs = harnessState(state);
   // latch session id
-  if (typeStr === 'session' && typeof o.id === 'string') {
-    (state as unknown as Record<string, unknown>)._harness = {
-      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
-      sessionId: o.id,
-    };
-  }
-  if (isRecord(o.part) && typeof (o.part as Record<string, unknown>).sessionID === 'string') {
-    (state as unknown as Record<string, unknown>)._harness = {
-      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
-      sessionId: (o.part as Record<string, unknown>).sessionID as string,
-    };
-  }
-  if (typeStr === 'session' && typeof (o as Record<string, unknown>).sessionID === 'string') {
-    (state as unknown as Record<string, unknown>)._harness = {
-      ...(((state as unknown as Record<string, unknown>)._harness as Record<string, unknown>) ?? {}),
-      sessionId: (o as Record<string, unknown>).sessionID as string,
-    };
-  }
-  if (typeStr.includes('tool') || o.type === 'tool_use') {
-    const name = typeof o.name === 'string' ? o.name : 'tool';
-    if (typeStr.includes('start') || o.type === 'tool_use') {
+  if (typeStr === 'session' && typeof o.id === 'string') hs.sessionId = o.id;
+  if (isRecord(o.part) && typeof (o.part as Record<string, unknown>).sessionID === 'string')
+    hs.sessionId = (o.part as Record<string, unknown>).sessionID as string;
+  if (typeStr === 'session' && typeof (o as Record<string, unknown>).sessionID === 'string')
+    hs.sessionId = (o as Record<string, unknown>).sessionID as string;
+
+  // real tool schema: top-level tool_execution_start/tool_execution_end, correlated by toolCallId
+  if (typeStr === 'tool_execution_start' || typeStr === 'tool_execution_end') {
+    const name = typeof o.toolName === 'string' ? o.toolName : 'tool';
+    const id = typeof o.toolCallId === 'string' ? o.toolCallId : undefined;
+    if (typeStr === 'tool_execution_start') {
       activities.push({ kind: 'tool_start', name });
-      if (isRecord(o.input)) activities.push({ kind: 'tool_input', name, input: o.input as Record<string, unknown> });
-    } else activities.push({ kind: 'tool_result', isError: o.is_error === true });
+      activities.push({
+        kind: 'tool_input',
+        name,
+        input: isRecord(o.args) ? (o.args as Record<string, unknown>) : {},
+        id,
+      });
+    } else {
+      activities.push({ kind: 'tool_result', isError: o.isError === true, id });
+    }
   }
-  if (typeStr.includes('thinking')) activities.push({ kind: 'thinking', chars: 10 });
   if (typeStr === 'message_update' && isRecord(o.assistantMessageEvent)) {
     const ev = o.assistantMessageEvent as Record<string, unknown>;
     if (ev.type === 'thinking_delta' && typeof ev.delta === 'string')
@@ -73,7 +122,11 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
     else if (ev.type === 'thinking_start') activities.push({ kind: 'thinking', chars: 5 });
   }
   if (typeStr === 'turn_end' || typeStr === 'agent_end') {
-    const msg = isRecord(o.message) ? o.message : null;
+    const msg = isRecord(o.message)
+      ? (o.message as Record<string, unknown>)
+      : Array.isArray(o.messages) && isRecord(o.messages[o.messages.length - 1])
+        ? (o.messages[o.messages.length - 1] as Record<string, unknown>)
+        : null;
     if (msg && Array.isArray(msg.content)) {
       for (const block of msg.content as unknown[]) {
         if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') streamedText = block.text;
@@ -81,58 +134,31 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
           activities.push({ kind: 'thinking', chars: (block.thinking as string).length });
       }
     }
-    if (Array.isArray(o.messages)) {
-      const last = o.messages[o.messages.length - 1] as unknown;
-      if (isRecord(last) && Array.isArray(last.content)) {
-        for (const block of last.content as unknown[]) {
-          if (isRecord(block) && block.type === 'text' && typeof block.text === 'string' && !streamedText)
-            streamedText = block.text as string;
-        }
-      }
+    // real usage lives at message.usage on turn_end (per-turn, not cumulative — see accumulation below)
+    if (typeStr === 'turn_end' && isRecord(msg?.usage)) {
+      const u = msg.usage as Record<string, unknown>;
+      const cost =
+        isRecord(u.cost) && typeof (u.cost as Record<string, unknown>).total === 'number'
+          ? ((u.cost as Record<string, unknown>).total as number)
+          : 0;
+      hs.costAccum = (hs.costAccum ?? 0) + cost;
+      hs.inputAccum = (hs.inputAccum ?? 0) + (typeof u.input === 'number' ? u.input : 0);
+      hs.outputAccum = (hs.outputAccum ?? 0) + (typeof u.output === 'number' ? u.output : 0);
+      hs.cacheReadAccum = (hs.cacheReadAccum ?? 0) + (typeof u.cacheRead === 'number' ? u.cacheRead : 0);
+      hs.cacheWriteAccum = (hs.cacheWriteAccum ?? 0) + (typeof u.cacheWrite === 'number' ? u.cacheWrite : 0);
+      hs.turnCount = (hs.turnCount ?? 0) + 1;
     }
   }
   const text = extractAmpText(o);
-  if (text && !typeStr.includes('tool') && !streamedText) streamedText = text;
-  if (
-    o.type === 'result' ||
-    o.type === 'done' ||
-    o.type === 'completed' ||
-    typeStr === 'turn_end' ||
-    typeStr === 'agent_end'
-  ) {
-    const usage = isRecord(o.usage)
-      ? o.usage
-      : isRecord(o.message) && isRecord((o.message as Record<string, unknown>).usage)
-        ? ((o.message as Record<string, unknown>).usage as Record<string, unknown>)
+  if (text && typeStr !== 'tool_execution_start' && typeStr !== 'tool_execution_end' && !streamedText)
+    streamedText = text;
+  if (typeStr === 'turn_end' || typeStr === 'agent_end') {
+    const msg = isRecord(o.message)
+      ? (o.message as Record<string, unknown>)
+      : Array.isArray(o.messages) && isRecord(o.messages[o.messages.length - 1])
+        ? (o.messages[o.messages.length - 1] as Record<string, unknown>)
         : null;
-    const actualUsage = isRecord(usage)
-      ? usage
-      : isRecord(o.message) && isRecord((o.message as Record<string, unknown>).usage)
-        ? ((o.message as Record<string, unknown>).usage as Record<string, unknown>)
-        : null;
-    const msg = isRecord(o.message) ? o.message : null;
-    const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
-      ?.sessionId as string | undefined;
-    const cost =
-      isRecord(actualUsage) && typeof (actualUsage as Record<string, unknown>).total === 'number'
-        ? ((actualUsage as Record<string, unknown>).total as number)
-        : typeof o.total_cost_usd === 'number'
-          ? o.total_cost_usd
-          : null;
-    const inputTokens = isRecord(actualUsage)
-      ? typeof (actualUsage as Record<string, unknown>).input === 'number'
-        ? ((actualUsage as Record<string, unknown>).input as number)
-        : typeof (actualUsage as Record<string, unknown>).input_tokens === 'number'
-          ? ((actualUsage as Record<string, unknown>).input_tokens as number)
-          : 0
-      : 0;
-    const outputTokens = isRecord(actualUsage)
-      ? typeof (actualUsage as Record<string, unknown>).output === 'number'
-        ? ((actualUsage as Record<string, unknown>).output as number)
-        : typeof (actualUsage as Record<string, unknown>).output_tokens === 'number'
-          ? ((actualUsage as Record<string, unknown>).output_tokens as number)
-          : 0
-      : 0;
+    const measured = (hs.turnCount ?? 0) > 0;
     const result: StreamedResult = {
       result:
         typeof o.result === 'string'
@@ -141,9 +167,10 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
             ? state.streamedText + streamedText
             : state.streamedText || (text ?? ''),
       isError: o.is_error === true,
-      numTurns: null,
-      totalCostUsd: cost,
-      sessionId: typeof o.session_id === 'string' ? o.session_id : typeof o.id === 'string' ? o.id : (latched ?? null),
+      numTurns: measured ? (hs.turnCount as number) : null,
+      totalCostUsd: measured ? (hs.costAccum as number) : null,
+      sessionId:
+        typeof o.session_id === 'string' ? o.session_id : typeof o.id === 'string' ? o.id : (hs.sessionId ?? null),
       stopReason:
         typeof o.stop_reason === 'string'
           ? o.stop_reason
@@ -165,18 +192,14 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
       model: typeof o.model === 'string' ? o.model : typeof msg?.model === 'string' ? (msg.model as string) : null,
       contextWindow: null,
       maxOutputTokens: null,
-      usage:
-        actualUsage && (inputTokens || outputTokens)
-          ? {
-              inputTokens,
-              outputTokens,
-              cacheCreationInputTokens: 0,
-              cacheReadInputTokens:
-                typeof (actualUsage as Record<string, unknown>).cacheRead === 'number'
-                  ? ((actualUsage as Record<string, unknown>).cacheRead as number)
-                  : 0,
-            }
-          : null,
+      usage: measured
+        ? {
+            inputTokens: hs.inputAccum ?? 0,
+            outputTokens: hs.outputAccum ?? 0,
+            cacheCreationInputTokens: hs.cacheWriteAccum ?? 0,
+            cacheReadInputTokens: hs.cacheReadAccum ?? 0,
+          }
+        : null,
     };
     if (!result.result) result.result = state.streamedText + (streamedText ?? '');
     return { activities, streamedText, result };
@@ -186,7 +209,7 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
 export const ampHarness: Harness = {
   name: 'amp',
   displayName: 'Amp',
-  binary: 'amp',
+  binary: RESOLVED_BINARY,
   async detect() {
     try {
       const { stdout } = await execFileAsync('amp', ['--version'], { timeout: 5000 });
@@ -201,11 +224,12 @@ export const ampHarness: Harness = {
     }
   },
   buildArgs(opts: BuildArgsOpts): string[] {
-    const perm = opts.nativePermission ?? PERMISSION_MAP[opts.permission] ?? 'workspace';
-    const args = ['--output', 'jsonl', opts.prompt, '--permission', perm];
+    const approvalMode = opts.nativePermission ?? PERMISSION_MAP[opts.permission] ?? 'always-ask';
+    const args = ['-p', '--mode', 'json', '--approval-mode', approvalMode];
     if (opts.model) args.push('--model', opts.model);
     if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
     for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
+    args.push(opts.prompt);
     return args;
   },
   parseLine(line: string, state: ParseState): ParseOutcome {
@@ -214,8 +238,7 @@ export const ampHarness: Harness = {
   extractResult(state: ParseState): StreamedResult | null {
     if (state.result) return state.result;
     if (state.streamedText.trim().length > 0) {
-      const latched = ((state as unknown as Record<string, unknown>)._harness as Record<string, unknown> | undefined)
-        ?.sessionId as string | undefined;
+      const latched = (state._harness as AmpHarnessState | undefined)?.sessionId;
       return {
         result: state.streamedText,
         isError: false,
@@ -235,5 +258,5 @@ export const ampHarness: Harness = {
     }
     return null;
   },
-  permissionMap: { readonly: ['read-only'], edit: ['workspace'], danger: ['danger'] },
+  permissionMap: { readonly: ['always-ask'], edit: ['write'], danger: ['yolo'] },
 };
