@@ -47,7 +47,7 @@ export function loadConfig(): DelegateConfig {
     inspectThinking: false,
     autoDelegateHints: false,
     modelAliases: { economy: 'haiku', balanced: 'sonnet', max: 'opus' },
-    maxConcurrent: 1,
+    maxConcurrent: 4,
     maxTranscripts: 100,
     harnesses: {},
   };

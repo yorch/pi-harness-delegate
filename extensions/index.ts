@@ -40,6 +40,7 @@ import {
   formatMetrics,
   formatSpend,
   formatToolUse,
+  orderFanoutResults,
   parseTranscriptMeta,
   pruneOutputs,
   resolveVerifyPlan,
@@ -49,6 +50,7 @@ import {
   type VerifyResult,
 } from './activity.ts';
 import { isFanoutSpec, parseDelegateCommand, resolveDefaults, resolveHarnessList } from './command.ts';
+import { acquireSlot, activeCount } from './concurrency.ts';
 import {
   type DelegateConfig,
   outputsDir as getOutputsDir,
@@ -69,7 +71,7 @@ import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
 import { NotifyBatcher } from './notify.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
-import { acquireRun, countActiveRuns, releaseRun } from './run-registry.ts';
+import { multiProgressWindow, type RunRow } from './progress-multi.ts';
 import { runHarness } from './runner.ts';
 import { type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
@@ -98,6 +100,12 @@ interface DelegateOptions {
   onStream?: (text: string) => void;
   onActivity?: (ev: ActivityEvent) => void;
   signal?: AbortSignal;
+  /** Queue for a concurrency slot instead of failing fast when at capacity — fan-out only, see
+   *  `acquireSlot` in concurrency.ts. Single-harness runs leave this false (the default). */
+  waitForSlot?: boolean;
+  /** Called once this run has acquired its concurrency slot and is about to actually start —
+   *  fan-out uses it to flip a row from "queued" to "running". */
+  onAcquired?: () => void;
 }
 
 /** Verify commands run on the host after the harness exits — bounded independent of harness timeoutMs. */
@@ -132,18 +140,6 @@ async function runVerify(pi: ExtensionAPI, cwd: string, command: string): Promis
   } catch (err) {
     return buildVerifyResult(command, 1, err instanceof Error ? err.message : String(err));
   }
-}
-
-const activeRuns = new Map<string, number>();
-let globalActiveRuns = 0;
-
-function getMaxConcurrentGlobal(): number {
-  const cfg = loadConfig();
-  if (typeof cfg.maxConcurrent === 'number') return cfg.maxConcurrent;
-  // SAFETY: maxConcurrent is validated to be number or object with global/perHarness in loadConfig
-  const mc = cfg.maxConcurrent as unknown as { global?: number }; // SAFETY: maxConcurrent validated in loadConfig
-  if (typeof mc.global === 'number') return mc.global;
-  return 1;
 }
 
 async function closeWhenMounted(getClose: () => (() => void) | null, capMs: number): Promise<void> {
@@ -419,7 +415,7 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
       templates = loadTemplates(ctx.cwd, h).size;
     } catch {}
     // cross-process count via the file registry, combined with the in-process counter as a fallback
-    const active = Math.max(activeRuns.get(h) ?? 0, countActiveRuns(h));
+    const active = activeCount(h);
     const hint = !det.ok && det.hint ? `  ← ${det.hint}` : '';
     lines.push(
       `${h.padEnd(20)} ${bin.padEnd(8)} ${ok.padEnd(3)} ${ver.padEnd(20)} ${String(outputs).padEnd(8)} ${String(templates).padEnd(10)} ${active}${hint}`,
@@ -437,7 +433,7 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
   if (!harnessFilter) {
     lines.push('');
     lines.push(
-      `global active: ${Math.max(globalActiveRuns, countActiveRuns())} · aliases: ${
+      `global active: ${activeCount()} · aliases: ${
         Object.entries(ALIASES)
           .map(([k, v]) => `${k}→${v}`)
           .join(', ') || '—'
@@ -524,32 +520,16 @@ async function delegate(
   const task = opts.task || template.defaultTask;
   if (!task) throw new Error(`delegate mode "${mode}" requires a task`);
 
-  // concurrency guard — combines the file-based cross-process registry with the in-process
-  // counters as a fallback, so registry I/O failures never block a delegation.
-  const maxGlobal = getMaxConcurrentGlobal();
-  const perHarnessCount = Math.max(activeRuns.get(harnessName) ?? 0, countActiveRuns(harnessName));
-  const globalCount = Math.max(globalActiveRuns, countActiveRuns());
-  if (maxGlobal > 0 && globalCount >= maxGlobal)
-    throw new Error('another delegate run is already in progress (global limit)');
-  // per-harness limit if configured as object
-  const perHarnessLimit = (() => {
-    const mc = config.maxConcurrent as unknown as { perHarness?: Record<string, number> };
-    if (mc && typeof mc === 'object' && mc.perHarness && typeof mc.perHarness[harnessName] === 'number') {
-      const v = mc.perHarness[harnessName];
-      if (typeof v === 'number') return v;
-    }
-    return maxGlobal;
-  })();
-  if (perHarnessLimit > 0 && perHarnessCount >= perHarnessLimit)
-    throw new Error(`another ${harnessName} run is already in progress`);
-  activeRuns.set(harnessName, perHarnessCount + 1);
-  globalActiveRuns++;
-  const runHandle = acquireRun(harnessName, mode);
-  const release = () => {
-    activeRuns.set(harnessName, Math.max(0, (activeRuns.get(harnessName) ?? 1) - 1));
-    globalActiveRuns = Math.max(0, globalActiveRuns - 1);
-    releaseRun(runHandle);
-  };
+  // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
+  // exactly as before; fan-out passes waitForSlot:true to queue instead.
+  const release = await acquireSlot({
+    harness: harnessName,
+    mode,
+    config,
+    wait: opts.waitForSlot ?? false,
+    signal: opts.signal,
+  });
+  opts.onAcquired?.();
 
   let scopeText: string | null = opts.scope ?? null;
   if (opts.scope === 'diff') {
@@ -851,8 +831,9 @@ async function runDelegateForTool(
 }
 
 /** `delegate({harness:"all"|"a,b"})` — resolve the requested harnesses to detected installs, run the
- *  existing `delegate()` engine once per harness sequentially (respects `maxConcurrent`), and
- *  mechanically synthesize one comparison report. No second model call. */
+ *  existing `delegate()` engine concurrently across all of them (bounded by `maxConcurrent` via
+ *  `acquireSlot({wait:true})` — see concurrency.ts), and mechanically synthesize one comparison
+ *  report ordered by the resolved harness list regardless of completion order. No second model call. */
 async function runFanoutTool(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -875,16 +856,12 @@ async function runFanoutTool(
   }
 
   const mode = params.mode ?? config.defaultMode;
-  const runs: FanoutRunSummary[] = [];
-  let sumInput = 0;
-  let sumOutput = 0;
-  let sumCacheCreate = 0;
-  let sumCacheRead = 0;
-  let sumCost = 0;
-  let anyCostKnown = false;
 
-  for (const h of resolved) {
-    onUpdate?.({ content: [{ type: 'text', text: `[${h}] running…` }], details: { progress: 0.5 } });
+  type TaskResult = FanoutRunSummary & {
+    usage?: import('./harnesses/types.ts').StreamedUsage | null;
+  };
+  const tasks = resolved.map(async (h): Promise<TaskResult> => {
+    onUpdate?.({ content: [{ type: 'text', text: `[${h}] queued…` }], details: { progress: 0.5 } });
     try {
       const run = await runDelegateForTool(
         pi,
@@ -901,13 +878,16 @@ async function runFanoutTool(
           sessionId: params.sessionId,
           pr: params.pr,
           // no verify: intentionally not model-settable — see DelegateToolParams
+          waitForSlot: true,
+          onAcquired: () =>
+            onUpdate?.({ content: [{ type: 'text', text: `[${h}] running…` }], details: { progress: 0.5 } }),
         },
         signal,
         onUpdate,
         `[${h}] `,
       );
       const summary = summarize(run.content);
-      runs.push({
+      return {
         harness: h,
         ok: !run.result.isError,
         metrics: formatMetrics({
@@ -922,19 +902,32 @@ async function runFanoutTool(
         file: (run.details.file as string) ?? undefined,
         sessionId: (run.details.sessionId as string) ?? undefined,
         verify: run.verify,
-      });
-      if (run.result.usage) {
-        sumInput += run.result.usage.inputTokens;
-        sumOutput += run.result.usage.outputTokens;
-        sumCacheCreate += run.result.usage.cacheCreationInputTokens;
-        sumCacheRead += run.result.usage.cacheReadInputTokens;
-      }
-      if (run.result.totalCostUsd !== null) {
-        sumCost += run.result.totalCostUsd;
-        anyCostKnown = true;
-      }
+        usage: run.result.usage,
+      };
     } catch (err) {
-      runs.push({ harness: h, ok: false, cost: null, error: err instanceof Error ? err.message : String(err) });
+      return { harness: h, ok: false, cost: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  const settled = await Promise.all(tasks);
+  const runs = orderFanoutResults(resolved, settled);
+
+  let sumInput = 0;
+  let sumOutput = 0;
+  let sumCacheCreate = 0;
+  let sumCacheRead = 0;
+  let sumCost = 0;
+  let anyCostKnown = false;
+  for (const r of runs) {
+    if (r.usage) {
+      sumInput += r.usage.inputTokens;
+      sumOutput += r.usage.outputTokens;
+      sumCacheCreate += r.usage.cacheCreationInputTokens;
+      sumCacheRead += r.usage.cacheReadInputTokens;
+    }
+    if (r.cost !== null) {
+      sumCost += r.cost;
+      anyCostKnown = true;
     }
   }
 
@@ -1308,9 +1301,162 @@ export default function (pi: ExtensionAPI) {
     return { result: failed ? null : result, error: runState.error, cancelled };
   };
 
-  /** `/delegate all …` / `/delegate a,b …` — resolve to detected harnesses, run each sequentially
-   *  through `runOneDelegation` (respects `maxConcurrent`), batch success notifications, and inject
-   *  one synthesized comparison report instead of one report per harness. */
+  interface FanoutSpec {
+    harnessName: string;
+    task: string;
+    scope?: string;
+    model?: string;
+    budget?: number;
+    sessionId?: string;
+    pr?: string;
+    verify?: string;
+    isDanger: boolean;
+  }
+  interface FanoutOutcome {
+    harnessName: string;
+    result: Awaited<ReturnType<typeof delegate>> | null;
+    error: Error | null;
+    cancelled: boolean;
+  }
+
+  /** Run `delegate()` concurrently across every spec in one multi-run overlay — the fan-out
+   *  counterpart to `runOneDelegation`. Concurrency is bounded by `maxConcurrent`: every run passes
+   *  `waitForSlot:true`, so `acquireSlot` (concurrency.ts) queues the ones that don't fit instead of
+   *  failing them, and a fan-out never exceeds the configured cap just because it's a fan-out.
+   *  Double-ESC cancel aborts every in-flight (and still-queued) run via one shared AbortController. */
+  const runFanoutConcurrent = async (ctx: ExtensionContext, mode: string | undefined, specs: FanoutSpec[]) => {
+    const ac = new AbortController();
+    let cancelledAll = false;
+    const runId = ++activeRunId;
+    const clearActive = () => {
+      if (activeOverlay?.runId === runId) activeOverlay = null;
+    };
+    const modeForDisplay = mode ?? 'general';
+    const anyDanger = specs.some(s => s.isDanger);
+    const overallStart = Date.now();
+    const rows: RunRow[] = specs.map(s => ({
+      harness: s.harnessName,
+      startedAt: null,
+      status: 'queued',
+      activity: '',
+    }));
+    let requestRender: (() => void) | null = null;
+
+    let chipLastPush = 0;
+    const pushChip = () => {
+      if (!ctx.hasUI) return;
+      const now = Date.now();
+      if (now - chipLastPush < 500) return;
+      chipLastPush = now;
+      const theme = ctx.ui.theme;
+      const runningCount = rows.filter(r => r.status === 'running').length;
+      ctx.ui.setStatus(
+        'delegate',
+        theme.fg('accent', '●') + theme.fg('dim', ` ${runningCount}/${rows.length} running`),
+      );
+    };
+
+    const runOne = async (spec: FanoutSpec, idx: number): Promise<FanoutOutcome> => {
+      const setRow = (patch: Partial<RunRow>) => {
+        rows[idx] = { ...rows[idx], ...patch };
+        requestRender?.();
+        pushChip();
+      };
+      let liveTail = '';
+      const onActivity = (ev: ActivityEvent) => {
+        if (ev.kind === 'tool_input') setRow({ activity: `▶ ${formatToolUse(ev.name, ev.input)}` });
+        else if (ev.kind === 'tool_result')
+          setRow({
+            activity: rows[idx].activity ? `${rows[idx].activity}${ev.isError ? ' ✗' : ' ✓'}` : rows[idx].activity,
+          });
+        else if (ev.kind === 'thinking') setRow({ activity: '💭 thinking…' });
+      };
+      const runState: { error: Error | null } = { error: null };
+      const run = delegate(pi, ctx, {
+        harness: spec.harnessName,
+        task: spec.task,
+        mode,
+        scope: spec.scope,
+        model: spec.model,
+        maxBudgetUsd: spec.budget,
+        sessionId: spec.sessionId,
+        pr: spec.pr,
+        verify: spec.verify,
+        signal: ac.signal,
+        waitForSlot: true,
+        onAcquired: () => setRow({ status: 'running', startedAt: Date.now() }),
+        onStream: t => {
+          liveTail = (liveTail + t).slice(-200);
+          setRow({ activity: `✍ ${liveTail}` });
+        },
+        onActivity,
+      }).catch((err: unknown) => {
+        runState.error = err instanceof Error ? err : new Error(String(err));
+        return null;
+      });
+      const result = await run;
+      const failed = cancelledAll || !result;
+      setRow({ status: failed ? 'failed' : 'done', activity: '' });
+      return {
+        harnessName: spec.harnessName,
+        result: failed ? null : result,
+        error: runState.error,
+        cancelled: cancelledAll,
+      };
+    };
+
+    const allSettled = Promise.all(specs.map((spec, idx) => runOne(spec, idx)));
+
+    let closeWindow: (() => void) | null = null;
+    let outcomes: FanoutOutcome[];
+    if (ctx.hasUI) {
+      let overlayHandle: OverlayHandle | null = null;
+      const uiPromise = ctx.ui
+        .custom(
+          (tui, theme, _kb, done) => {
+            requestRender = () => tui.requestRender();
+            closeWindow = () => done(undefined);
+            return multiProgressWindow(tui, theme, {
+              mode: modeForDisplay,
+              startedAt: overallStart,
+              getRows: () => rows,
+              dangerous: anyDanger,
+              onCancel: () => {
+                cancelledAll = true;
+                ac.abort();
+              },
+              onMinimize: () => {
+                overlayHandle?.setHidden(true);
+                overlayHandle?.unfocus();
+              },
+            });
+          },
+          {
+            overlay: true,
+            overlayOptions: { width: '70%', maxHeight: '60%', anchor: 'top-center' },
+            onHandle: h => {
+              overlayHandle = h;
+              activeOverlay = { show: () => h.setHidden(false), focus: () => h.focus(), runId };
+              h.focus();
+            },
+          },
+        )
+        .catch(() => {});
+      outcomes = await allSettled;
+      await closeWhenMounted(() => closeWindow, 2000);
+      await uiPromise;
+    } else {
+      outcomes = await allSettled;
+    }
+    clearActive();
+    if (ctx.hasUI) ctx.ui.setStatus('delegate', undefined);
+    return outcomes;
+  };
+
+  /** `/delegate all …` / `/delegate a,b …` — resolve to detected harnesses, run `delegate()`
+   *  concurrently across all of them in one multi-run overlay (see `runFanoutConcurrent`), batch
+   *  success notifications, and inject one synthesized comparison report ordered by the resolved
+   *  harness list regardless of completion order. */
   const runFanoutCommand = async (ctx: ExtensionContext, parsed: ReturnType<typeof parseDelegateCommand>) => {
     const harnessSpec = parsed.harness as string;
     const detection = await detectAll();
@@ -1328,19 +1474,23 @@ export default function (pi: ExtensionAPI) {
     }
 
     const modeForReport = parsed.mode ?? loadConfig().defaultMode;
-    const runs: FanoutRunSummary[] = [];
     const batcher = new NotifyBatcher((text, level) => {
       if (ctx.hasUI) ctx.ui.notify(text, level);
       else process.stdout.write(`${text}\n`);
     });
 
+    // Resolve each harness's task/scope/danger flag up front — cheap and synchronous — so a
+    // harness that can't even start (e.g. mode needs a prompt) fails immediately instead of
+    // occupying a concurrency slot.
+    const specs: FanoutSpec[] = [];
+    const immediateFailures: FanoutRunSummary[] = [];
     for (const h of resolved) {
       const templates = loadTemplates(ctx.cwd, h);
       const resolvedTaskScope = resolveDefaults(parsed, templates);
       const template = parsed.mode ? templates.get(parsed.mode) : undefined;
       if (!resolvedTaskScope) {
         const message = `mode "${parsed.mode ?? 'general'}" needs a prompt`;
-        runs.push({ harness: h, ok: false, cost: null, error: message });
+        immediateFailures.push({ harness: h, ok: false, cost: null, error: message });
         batcher.failure(`${h}: ${message}`);
         continue;
       }
@@ -1349,9 +1499,8 @@ export default function (pi: ExtensionAPI) {
         (template?.nativePermission
           ? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission)
           : false);
-      const outcome = await runOneDelegation(ctx, {
+      specs.push({
         harnessName: h,
-        mode: parsed.mode,
         task: resolvedTaskScope.task,
         scope: resolvedTaskScope.scope,
         model: parsed.model,
@@ -1359,15 +1508,16 @@ export default function (pi: ExtensionAPI) {
         sessionId: parsed.sessionId,
         pr: parsed.pr,
         verify: parsed.verify,
-        template,
         isDanger,
       });
+    }
+
+    const outcomes = specs.length > 0 ? await runFanoutConcurrent(ctx, parsed.mode, specs) : [];
+    const completed: FanoutRunSummary[] = outcomes.map(outcome => {
       if (outcome.cancelled || !outcome.result) {
         const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
-        runs.push({ harness: h, ok: false, cost: null, error: message });
-        batcher.failure(`${h}: ${outcome.cancelled ? 'cancelled' : 'failed'} — ${message}`);
-        if (outcome.cancelled) break; // user cancelled — stop the rest of the fan-out
-        continue;
+        batcher.failure(`${outcome.harnessName}: ${outcome.cancelled ? 'cancelled' : 'failed'} — ${message}`);
+        return { harness: outcome.harnessName, ok: false, cost: null, error: message };
       }
       const { content, details, result, verify } = outcome.result;
       const summary = summarize(content);
@@ -1378,8 +1528,9 @@ export default function (pi: ExtensionAPI) {
         contextPercent: typeof details.contextPercent === 'number' ? details.contextPercent : null,
         durationMs: typeof details.durationMs === 'number' ? details.durationMs : null,
       });
-      runs.push({
-        harness: h,
+      batcher.success(`${outcome.harnessName} ${parsed.mode ?? 'general'} — ${metrics}`);
+      return {
+        harness: outcome.harnessName,
         ok: !result.isError,
         metrics,
         cost: result.totalCostUsd,
@@ -1387,10 +1538,10 @@ export default function (pi: ExtensionAPI) {
         file: (details.file as string) ?? undefined,
         sessionId: (details.sessionId as string) ?? undefined,
         verify,
-      });
-      batcher.success(`${h} ${parsed.mode ?? 'general'} — ${metrics}`);
-    }
+      };
+    });
 
+    const runs = orderFanoutResults(resolved, [...immediateFailures, ...completed]);
     const okCount = runs.filter(r => r.ok).length;
     const report = buildFanoutReport({ runs, skipped, unknown });
     injectReport(ctx, {
