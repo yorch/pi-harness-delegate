@@ -6,6 +6,7 @@ import {
   buildTranscript,
   buildVerifyResult,
   formatVerifySection,
+  orderFanoutResults,
   resolveVerifyCommand,
   resolveVerifyPlan,
   skipVerifyResult,
@@ -208,4 +209,47 @@ test('buildFanoutReport: no unknown/skipped lines when everything resolved', () 
   });
   assert.ok(!report.includes('skipped'));
   assert.ok(report.startsWith('**Total spend:**'));
+});
+
+test('orderFanoutResults: orders by the resolved harness list regardless of completion order', () => {
+  const resolvedOrder = ['claude', 'codex', 'opencode', 'amp'];
+  // codex finished first, then amp, then claude, then opencode — out of order
+  const outOfOrder = [
+    { harness: 'codex', ok: true },
+    { harness: 'amp', ok: true },
+    { harness: 'claude', ok: true },
+    { harness: 'opencode', ok: false },
+  ];
+  const ordered = orderFanoutResults(resolvedOrder, outOfOrder);
+  assert.deepEqual(
+    ordered.map(r => r.harness),
+    resolvedOrder,
+  );
+});
+
+test('orderFanoutResults: same input in any completion order produces the same report', () => {
+  const resolvedOrder = ['claude', 'codex', 'opencode'];
+  const runs = [
+    { harness: 'claude', ok: true, metrics: '1 turn(s)', cost: 0.1, body: 'a' },
+    { harness: 'codex', ok: true, metrics: '2 turn(s)', cost: 0.2, body: 'b' },
+    { harness: 'opencode', ok: true, metrics: '3 turn(s)', cost: 0.3, body: 'c' },
+  ];
+  const reportA = buildFanoutReport({ runs: orderFanoutResults(resolvedOrder, runs), skipped: [], unknown: [] });
+  const shuffled = [runs[2], runs[0], runs[1]];
+  const reportB = buildFanoutReport({ runs: orderFanoutResults(resolvedOrder, shuffled), skipped: [], unknown: [] });
+  assert.equal(reportA, reportB);
+});
+
+test('orderFanoutResults: drops entries whose harness is not in the resolved order', () => {
+  const ordered = orderFanoutResults(
+    ['claude'],
+    [
+      { harness: 'claude', ok: true },
+      { harness: 'stray', ok: true },
+    ],
+  );
+  assert.deepEqual(
+    ordered.map(r => r.harness),
+    ['claude'],
+  );
 });

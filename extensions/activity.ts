@@ -206,6 +206,17 @@ export interface FanoutRunSummary {
 }
 
 /**
+ * Order fan-out results by the originally resolved harness list rather than completion order.
+ * Concurrent fan-out runs finish in whatever order their harnesses happen to complete; this keeps
+ * `buildFanoutReport`'s output deterministic regardless of which one lands first. Entries with a
+ * harness not present in `order` are dropped (shouldn't happen — every result comes from `order`).
+ */
+export function orderFanoutResults<T extends { harness: string }>(order: readonly string[], results: T[]): T[] {
+  const byHarness = new Map(results.map(r => [r.harness, r]));
+  return order.map(h => byHarness.get(h)).filter((r): r is T => r !== undefined);
+}
+
+/**
  * Mechanically assemble one comparison report across all fan-out runs — no second model call.
  * Groups per-harness metrics/output and rolls up total spend via `aggregateSpend`/`formatSpend`.
  * Header-free — callers wrap this body with their own `## <label> (...)` header.
