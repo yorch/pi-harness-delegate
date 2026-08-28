@@ -2,11 +2,13 @@
 
 Working document for planned and in-flight work. Forked from pi-claude-delegate. Statuses: `done` · `in progress` · `todo` · `future`.
 
+Current release: **0.3.0** (npm `latest`). Sections 1–7 describe the fork/rename work that shipped in this package's initial release; they were originally drafted against `pi-claude-delegate`'s version numbering, which this package never adopted (its own line is 0.1.0 → 0.3.0).
+
 ---
 
 ## 1. Harness abstraction (Phase 0–1)
 
-**Status:** done (0.6.0)
+**Status:** done (initial release)
 
 Extract `Harness` interface (`NormalizedPermission`, `detect`, `buildArgs`, `parseLine`, `extractResult`), generic `runHarness`, `registry`, `config` with `delegate` + `claudeDelegate` fallback, partitioned outputs `~/.pi/agent/delegate/outputs/<harness>/`.
 
@@ -20,13 +22,13 @@ Extract `Harness` interface (`NormalizedPermission`, `detect`, `buildArgs`, `par
 
 ## 2. Claude harness (faithful port)
 
-**Status:** done (0.6.0)
+**Status:** done (initial release)
 
 `extensions/harnesses/claude.ts` — exact port of `run-claude` + `stream-parse`, args `claude -p --output-format stream-json --verbose ... --permission-mode <mapped>`, detects via `claude --version`, permissionMap readonly→plan, edit→acceptEdits, danger→bypassPermissions.
 
 ## 3. Codex harness
 
-**Status:** done (0.6.0)
+**Status:** done (initial release)
 
 `extensions/harnesses/codex.ts` — `codex exec --json <prompt> --sandbox <level>`, tolerant JSONL + plain-text fallback, synthesizes result if needed, detects via `codex --version`, permissionMap read-only/workspace-write/danger-full-access.
 
@@ -34,19 +36,19 @@ Extract `Harness` interface (`NormalizedPermission`, `detect`, `buildArgs`, `par
 
 ## 4. OpenCode harness
 
-**Status:** done (0.6.0)
+**Status:** done (initial release)
 
 `extensions/harnesses/opencode.ts` — `opencode run --format json <prompt>`, tolerant parser, detects via `opencode --version`, permission not yet CLI-flagged (gated upstream). Placeholder parser — refine with real transcript.
 
 ## 5. Amp harness (omp alias)
 
-**Status:** done (0.6.0)
+**Status:** done (initial release)
 
 `extensions/harnesses/amp.ts` — `amp --output jsonl <prompt>`, tolerant parser, detects via `amp --version` (fallback `omp`), alias `omp:amp`. Placeholder — refine with real transcript.
 
 ## 6. Tests for harness layer
 
-**Status:** done (0.6.0)
+**Status:** done (initial release)
 
 - `tests/harness.test.ts` — claude/codex/opencode/amp parsers, buildArgs permission mapping, registry aliases
 - `tests/config.test.ts` — delegate vs claudeDelegate precedence, legacy migration, outputsDir partitioning
@@ -57,29 +59,57 @@ Updated `tests/activity.test.ts`, `tests/metrics.test.ts` for harness-aware tran
 
 ## 7. Docs & package rename
 
-**Status:** done (0.6.0)
+**Status:** done (initial release)
 
-- `package.json` name `pi-harness-delegate` (unscoped), description, repo `yorch/pi-harness-delegate`, keywords, version 0.6.0
+- `package.json` name `pi-harness-delegate` (unscoped), description, repo `yorch/pi-harness-delegate`, keywords
 - `README.md` rewritten for harness table, `/delegate` primary + aliases, migration guide, config with `harnesses` per-harness models and `maxConcurrent` object
 - `AGENTS.md` rewritten for new architecture
 - `CLAUDE.md` symlink kept
 - Templates partitioned; `files` still ships `templates/` recursively (covers shared + harness subdirs)
 
-## 8. Future
+## 8. Observability & metric honesty
 
-- Capture real JSONL for codex/opencode/amp to tighten parsers (tool/activity extraction heuristics currently heuristic)
-- `maxConcurrent` per-harness UI + tests for object shape
-- `/delegate list --harness=...` and `history` harness filter polish, `detectAll` health command
-- Keep `pi-claude-delegate` as deprecated wrapper (re-export) — publish once with deprecation notice
-- Consider `pi install npm:pi-harness-delegate` name availability check and `--access public` (unscoped default private? verify)
-- See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for a researched comparison against `pi-subagents` (in-process Pi child delegation) and prioritized candidate improvements — top pick: multi-harness comparison fanout
+**Status:** done (0.3.0, [#11](https://github.com/yorch/pi-harness-delegate/pull/11))
+
+- `ToolCallIndex` (`extensions/activity.ts`) attributes a `tool_result` to its originating `tool_input` by id, fixing ✓/✗ marks landing on the wrong row for parallel tool batches.
+- `numTurns`/`totalCostUsd` are `number | null` — `null` means the harness didn't report the field, rendered `—`/`$—`, never a fake `0`. `mapHarnessUsage` returns `undefined` rather than feeding pi's session totals a fake `$0`.
+- `extensions/run-registry.ts` — cross-process active-run registry so the concurrency guard and `/delegate status` are accurate across pi processes.
+- `aggregateSpend`/`formatSpend` rollup in `/delegate status`; unknown-cost runs counted separately, never folded in as `$0`.
+
+## 9. Real harness schemas + CLI arg fixes
+
+**Status:** done (0.3.0, [#13](https://github.com/yorch/pi-harness-delegate/pull/13))
+
+Captured real JSONL from every installed CLI and wired parsers from it. **codex and opencode delegation was entirely broken** — `codex exec` rejected `--ask-for-approval`/`--thread-id`, `opencode run` rejected `--permission`/`--add-dir`, so every delegation to those harnesses failed before emitting a line. Fixtures in `tests/fixtures/*.jsonl`; each parser records the CLI version its schema was verified against.
+
+- codex (codex-cli 0.149.1): real id `item.id`, usage on `turn.completed`, no cost reported under ChatGPT-plan auth (stays `null`).
+- opencode (1.18.16): real id `part.callID`; permission tiers map onto built-in agents (`plan`/`build`/`build --auto`); per-step usage now accumulated rather than last-step-only.
+- amp/omp: `omp` is **not** a renamed Sourcegraph Amp CLI but a different tool; binary resolved dynamically (`amp` then `omp`); real id `toolCallId`; fixed nested `usage.cost.total` and `agent_end` clobbering the good `turn_end` result.
+
+## 10. Verify, fan-out, notifications
+
+**Status:** done (0.3.0, [#13](https://github.com/yorch/pi-harness-delegate/pull/13))
+
+- **Post-run verify** — optional `verify:` template frontmatter / `--verify=` flag, run host-side after the harness exits. Report-only: never flips `isError`. Deliberate security boundary: **not** a `delegate` tool param (would be model-settable, and the model's context includes attacker-influenceable repo/harness output), and **never runs on a `readonly` permission** (would be a permission-tier bypass) — recorded as skipped instead.
+- **Multi-harness fan-out** — `harness: "all"` or a comma list; `all` resolves against `detectAll()`, skipping uninstalled. Runs sequentially through the existing `delegate()` engine (its concurrency guard rejects rather than queues, so a loop is the only way to respect `maxConcurrent` without touching it). One synthesized comparison report, no second model call.
+- **Batched notifications** — successful fan-out completions debounce into one message; failures never batched.
+
+## 11. Future
+
+- **Raise the `maxConcurrent` default above 1** — now newly unblocked by the cross-process registry, and what makes fan-out actually pleasant (today a 4-harness fan-out runs one at a time).
+- Codex runs contribute **no tokens** to pi's session totals — `mapHarnessUsage` returns `undefined` when cost is unknown, and codex reports no cost under ChatGPT-plan auth. Revisit if pi ever accepts tokens-without-cost.
+- Verify codex's resume path against a captured resume transcript (currently derived from `--help` only).
+- Verify whether `--add-dir` exists on omp (absent from its help; inert today since `addDirs` defaults empty).
+- Run registry is count-then-acquire, so the cap is best-effort, not a hard mutex. Only worth hardening if the cap becomes a spend control.
+- `maxConcurrent` per-harness UI + tests for the object shape.
+- `/delegate list --harness=...` and `history` harness filter polish.
+- Keep `pi-claude-delegate` as a deprecated wrapper (re-export) — publish once with a deprecation notice.
+- See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions) is blocked upstream on the harness CLIs, not on this repo.
 
 ---
 
 ## In-flight / TODO
 
-- [ ] Publish 0.6.0 to npm (verify unscoped name not taken, `npm view pi-harness-delegate` 404 → publish)
-- [ ] `pi install npm:pi-harness-delegate` smoke test, `pi -e ./pi-harness-delegate -p "/delegate claude review hi" --no-tools`
-- [ ] Publish deprecated `pi-claude-delegate@0.5.4` with deprecation notice pointing to new package
-- [ ] Real harness integration tests (requires binaries, mocked otherwise)
-
+- [ ] Live integration tests against real binaries (fixtures cover parsing; nothing exercises a real spawn end-to-end).
+- [ ] Re-capture fixtures on each harness CLI upgrade — the shipped binary is the contract, not its docs. Both broken-args bugs would have been caught by one real run per harness.
+- [ ] Publish deprecated `pi-claude-delegate` with a deprecation notice pointing here.
