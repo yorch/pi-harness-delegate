@@ -1,5 +1,20 @@
 # pi-harness-delegate
 
+## 0.4.0
+
+### Minor Changes
+
+- [#15](https://github.com/yorch/pi-harness-delegate/pull/15) [`9abb7a1`](https://github.com/yorch/pi-harness-delegate/commit/9abb7a18d44ad091321f23b2fd90fe670858578b) Thanks [@yorch](https://github.com/yorch)! - Multi-harness fan-out (`/delegate all`, `harness: "claude,codex"`) now runs concurrently instead of one harness at a time, and `maxConcurrent` defaults to `4` instead of `1`.
+  
+  - **Concurrency guard refactor**: the `delegate()` concurrency check is factored into `acquireSlot()` (`extensions/concurrency.ts`), a single choke point that either fails fast at capacity (`wait: false` — unchanged behavior for a single-harness `/delegate` run) or queues for a free slot (`wait: true` — what fan-out uses). This *is* the bounded pool: fan-out launches every resolved harness's `delegate()` call at once and lets `acquireSlot` serialize the ones that don't fit under `maxConcurrent`, so a fan-out never exceeds the configured cap.
+  - **`maxConcurrent` default raised from `1` to `4`** — one slot per supported harness (claude/codex/opencode/amp), now that fan-out is genuinely parallel and the cap is already enforced across pi processes via the run registry. This means fan-out spend can now be genuinely simultaneous: with the default cap, a 4-harness fan-out can bill all four harnesses at once. Set `"maxConcurrent": 1` to restore fully sequential behavior.
+  - **Deterministic report ordering**: concurrent runs finish out of order, so results are reordered back to the resolved harness list (`orderFanoutResults()`) before the comparison report is assembled — the same fan-out always produces the same report regardless of completion order.
+  - **New multi-run progress overlay** (`extensions/progress-multi.ts`) for `/delegate all …`: one overlay with a compact row per harness (status, elapsed, current activity) instead of N stacked overlays or an interleaved single feed. Double-ESC cancel aborts every in-flight and still-queued run. Single-harness runs are unchanged — same overlay, same fail-fast-at-capacity behavior as before.
+
+### Patch Changes
+
+- [#17](https://github.com/yorch/pi-harness-delegate/pull/17) [`803689d`](https://github.com/yorch/pi-harness-delegate/commit/803689d78972c5a43c273de7d22a83b8a8531e5b) Thanks [@yorch](https://github.com/yorch)! - Fan-out overlay polish: a failed harness row now keeps its failure reason (or last activity) instead of blanking at the moment that context matters most, and the status-bar chip reports every status (`1✓ 1✗ 1▶ 1…`) rather than counting only running runs — which rendered `0/4 running` when runs had actually failed or were queued behind the concurrency cap.
+
 ## 0.3.0
 
 ### Minor Changes
