@@ -45,7 +45,7 @@ The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff
 
 ### Fan out to multiple harnesses
 
-`harness` also accepts `all` or a comma-separated list — the same task runs on every harness, sequentially, and comes back as one comparison report instead of one report per harness:
+`harness` also accepts `all` or a comma-separated list — the same task runs on every harness **concurrently**, up to `maxConcurrent`, and comes back as one comparison report instead of one report per harness:
 
 ```bash
 /delegate all review the auth flow                 # every *detected* harness
@@ -54,10 +54,21 @@ delegate({ harness: "all", mode: "review", scope: "diff" })   # tool call form
 ```
 
 - `all` resolves to whatever's actually installed (`detectAll()`) — an uninstalled harness is skipped and named in the report, it doesn't fail the run. An explicit list is validated the same way; an unknown name is also reported rather than aborting the rest.
-- Each harness's run goes through the same `delegate()` engine as a single-harness call and writes its own transcript to its own `~/.pi/agent/delegate/outputs/<harness>/`; a fan-out costs roughly N× a single run (respects `maxBudgetUsd` per run) and always runs sequentially, respecting `maxConcurrent`.
-- The synthesized report groups each harness's metrics + output and a total spend line (unknown-cost runs called out separately, same as `/delegate status`) — it's assembled mechanically, not by asking a model to summarize.
-- A single-harness call (`harness: "claude"`, or omitted) behaves exactly as before — fan-out is opt-in by typing `all`/a list.
+- Each harness's run goes through the same `delegate()` engine as a single-harness call and writes its own transcript to its own `~/.pi/agent/delegate/outputs/<harness>/`. Runs are launched together and execute in parallel, bounded by `maxConcurrent` (default `4`, one slot per supported harness) — a run beyond the cap queues for a free slot instead of failing, and the cap is enforced across pi processes, not just this one. **This means fan-out spend is genuinely simultaneous**: with the default cap, a 4-harness fan-out can bill all four at once instead of one after another — budget accordingly (`maxBudgetUsd` still applies per run).
+- The synthesized report is always ordered by the resolved harness list (e.g. `claude, codex, opencode`), regardless of which harness actually finishes first — it groups each harness's metrics + output and a total spend line (unknown-cost runs called out separately, same as `/delegate status`), assembled mechanically, not by asking a model to summarize.
+- A single-harness call (`harness: "claude"`, or omitted) behaves exactly as before, including the concurrency guard: it still fails fast with "another delegate run is already in progress" at capacity rather than queueing. Fan-out is opt-in by typing `all`/a list.
 - `/delegate all …` batches successful completions into one notification instead of one per harness; a failure is never delayed or folded into the batch — it surfaces immediately.
+- In the TUI, a fan-out shows **one overlay for the whole run** — a compact row per harness (spinner/✓/✗, elapsed, current tool activity) — rather than one popup per harness or an interleaved feed you can't attribute to a harness:
+  ```
+  ╭─ ⠋ delegate all · review · 1/4 · ⏱ 0:42──────────────────╮
+  │ ✓ claude   0:38  done                                    │
+  │ ⠹ codex    0:41  ▶ Bash: bun test                        │
+  │ ⠹ opencode 0:12  ✍ Looking at the auth middleware next…  │
+  │ … amp      queued                                        │
+  │ esc cancel all · m minimize                               │
+  ╰────────────────────────────────────────────────────────────╯
+  ```
+  Double-ESC cancels every in-flight (and still-queued) run at once; `m` minimizes; the status bar chip shows aggregate state (e.g. `● 2/4 running`). Single-harness runs keep the original one-run overlay unchanged.
 
 ## Harnesses
 
@@ -148,7 +159,7 @@ In `~/.pi/agent/settings.json`:
     "maxBudgetUsd": 3,
     "autoDelegateHints": false,
     "modelAliases": { "economy": "haiku", "balanced": "sonnet", "max": "opus" },
-    "maxConcurrent": 1,
+    "maxConcurrent": 4,
     "maxTranscripts": 100,
     "harnesses": {
       "claude": { "model": "sonnet" },
@@ -162,7 +173,7 @@ In `~/.pi/agent/settings.json`:
 Legacy `claudeDelegate` is auto-migrated into `delegate.harnesses.claude` (deprecated).
 
 - `modelAliases` — templates may use `economy|balanced|max` or any alias; resolution: call → template → harness → global.
-- `maxConcurrent` — cap overlapping runs (default 1 global; may be `{global:1, perHarness:{claude:1}}`). Enforced across pi processes, not just the current one — a file-based registry under `~/.pi/agent/delegate/runs/` tracks active runs.
+- `maxConcurrent` — cap overlapping runs (default **`4`**, one slot per supported harness; may be `{global:4, perHarness:{claude:1}}`). Enforced across pi processes, not just the current one — a file-based registry under `~/.pi/agent/delegate/runs/` tracks active runs, so the slots available to you also depend on any other pi session running `delegate`. This is a **genuinely parallel** spend cap now, not just a "don't overlap" guard: a single-harness `/delegate` call still fails fast (`another delegate run is already in progress`) the moment it's at capacity, but `/delegate all …` fan-out queues for a free slot instead and can run up to `maxConcurrent` harnesses at once — meaning up to that many harnesses billing simultaneously. Lower it if you want fan-out to stay sequential/cheaper (`"maxConcurrent": 1` restores the old one-at-a-time behavior for everything, single runs included).
 - `maxTranscripts` — oldest transcripts pruned beyond this count per harness (`0` disables).
 
 `autoDelegateHints` is off by default — no system-prompt bias. When `true`, explicit markers (`@harness`, `with codex`, `delegate … to claude`) and imperative review/plan phrasing append a hint.

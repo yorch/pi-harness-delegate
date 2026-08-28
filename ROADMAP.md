@@ -94,16 +94,24 @@ Captured real JSONL from every installed CLI and wired parsers from it. **codex 
 - **Multi-harness fan-out** — `harness: "all"` or a comma list; `all` resolves against `detectAll()`, skipping uninstalled. Runs sequentially through the existing `delegate()` engine (its concurrency guard rejects rather than queues, so a loop is the only way to respect `maxConcurrent` without touching it). One synthesized comparison report, no second model call.
 - **Batched notifications** — successful fan-out completions debounce into one message; failures never batched.
 
-## 11. Future
+## 11. Parallel fan-out, `maxConcurrent` default raised
 
-- **Raise the `maxConcurrent` default above 1** — now newly unblocked by the cross-process registry, and what makes fan-out actually pleasant (today a 4-harness fan-out runs one at a time).
+**Status:** done ([#15](https://github.com/yorch/pi-harness-delegate/pull/15))
+
+- **`acquireSlot({wait})`** (`extensions/concurrency.ts`) — the concurrency guard factored out of `delegate()` and made testable on its own. `wait: false` is the unchanged single-run fail-fast behavior; `wait: true` polls for a free slot instead of throwing. This *is* the bounded pool — no separate worker-pool abstraction needed.
+- **Fan-out is now concurrent** — both `runFanoutTool` and `runFanoutCommand` launch every resolved harness's `delegate()` call at once (`waitForSlot: true`), bounded by `maxConcurrent` (including the cross-process count from the run registry). A fan-out no longer runs one harness at a time.
+- **`maxConcurrent` default raised from `1` to `4`** — one slot per supported harness, now that fan-out is genuinely parallel and the cross-process registry makes the cap accurate across pi processes.
+- **Deterministic report ordering** — `orderFanoutResults()` (`extensions/activity.ts`) reorders concurrent, out-of-order completions back to the resolved harness list before `buildFanoutReport()` runs, so the same fan-out produces the same report regardless of which harness finishes first.
+- **One multi-run overlay for fan-out** (`extensions/progress-multi.ts`) — a compact row per harness (status, elapsed, current activity) instead of N stacked overlays or an interleaved single feed. Single-harness runs still use the original `progressWindow` unchanged. Double-ESC cancel aborts every in-flight and still-queued run via one shared `AbortController`.
+
+## 12. Future
+
 - Codex runs contribute **no tokens** to pi's session totals — `mapHarnessUsage` returns `undefined` when cost is unknown, and codex reports no cost under ChatGPT-plan auth. Revisit if pi ever accepts tokens-without-cost.
 - Verify codex's resume path against a captured resume transcript (currently derived from `--help` only).
 - Verify whether `--add-dir` exists on omp (absent from its help; inert today since `addDirs` defaults empty).
-- Run registry is count-then-acquire, so the cap is best-effort, not a hard mutex. Only worth hardening if the cap becomes a spend control.
+- Run registry is count-then-acquire, so the cap is best-effort, not a hard mutex. Only worth hardening if the cap becomes a spend control — this also bounds `acquireSlot`'s `wait: true` polling: two waiters can still both observe a just-freed slot and both proceed.
 - `maxConcurrent` per-harness UI + tests for the object shape.
 - `/delegate list --harness=...` and `history` harness filter polish.
-- Keep `pi-claude-delegate` as a deprecated wrapper (re-export) — publish once with a deprecation notice.
 - See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions) is blocked upstream on the harness CLIs, not on this repo.
 
 ---
@@ -112,4 +120,3 @@ Captured real JSONL from every installed CLI and wired parsers from it. **codex 
 
 - [ ] Live integration tests against real binaries (fixtures cover parsing; nothing exercises a real spawn end-to-end).
 - [ ] Re-capture fixtures on each harness CLI upgrade — the shipped binary is the contract, not its docs. Both broken-args bugs would have been caught by one real run per harness.
-- [ ] Publish deprecated `pi-claude-delegate` with a deprecation notice pointing here.
