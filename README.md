@@ -68,7 +68,7 @@ delegate({ harness: "all", mode: "review", scope: "diff" })   # tool call form
   │ esc cancel all · m minimize                               │
   ╰────────────────────────────────────────────────────────────╯
   ```
-  Double-ESC cancels every in-flight (and still-queued) run at once; `m` minimizes; the status bar chip shows aggregate state (e.g. `● 2/4 running`). Single-harness runs keep the original one-run overlay unchanged.
+  Double-ESC cancels every in-flight (and still-queued) run at once; `m` minimizes; the status bar chip shows aggregate state across every status (e.g. `● 1✓ 1✗ 1▶ 1…` — done, failed, running, queued; zero counts are omitted, so it reads `● 4▶` while all four are in flight). A harness that fails keeps its failure reason on its row rather than blanking, so the overlay still says *why*. Single-harness runs keep the original one-run overlay unchanged.
 
 ## Harnesses
 

@@ -26,7 +26,11 @@ export interface RunRow {
   /** Set once the run has acquired its concurrency slot and started executing; null while queued. */
   startedAt: number | null;
   status: RunStatus;
-  /** Short current-activity text (tool call, "thinking…", or a text tail). Empty when queued/done. */
+  /**
+   * Short current-activity text (tool call, "thinking…", or a text tail). Empty when queued or
+   * done; on a failed run it holds the failure reason (or the last activity seen), so the row
+   * still says *why* rather than going blank at the moment that matters most.
+   */
   activity: string;
 }
 
@@ -43,6 +47,28 @@ export interface MultiProgressWindowOptions {
   onCancel: () => void;
   /** Called when the user presses `m` (minimize — runs continue in the background). */
   onMinimize: () => void;
+}
+
+/** Per-status glyphs, matching the row markers in the overlay so the chip and the window read alike. */
+const CHIP_GLYPHS: ReadonlyArray<readonly [RunStatus, string]> = [
+  ['done', '✓'],
+  ['failed', '✗'],
+  ['running', '▶'],
+  ['queued', '…'],
+];
+
+/**
+ * Compact fan-out status-bar summary, e.g. `1✓ 1✗ 1▶ 1…`. Zero counts are omitted, so the common
+ * cases stay short (`4▶`, then `4✓`). Counting only `running` — as the first cut did — renders
+ * `0/4 running`, which reads as idle when runs have actually failed or are queued behind the cap.
+ * Pure — testable without a TUI.
+ */
+export function formatFanoutChip(rows: RunRow[]): string {
+  const parts = CHIP_GLYPHS.map(([status, glyph]) => {
+    const n = rows.filter(r => r.status === status).length;
+    return n > 0 ? `${n}${glyph}` : null;
+  }).filter((s): s is string => s !== null);
+  return parts.length > 0 ? parts.join(' ') : `${rows.length}…`;
 }
 
 /** One row's marker + label, e.g. "✓ claude" / "✗ codex" / "⠋ opencode" / "… amp". Pure — testable
