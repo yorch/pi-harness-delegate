@@ -71,7 +71,7 @@ import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
 import { NotifyBatcher } from './notify.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
-import { multiProgressWindow, type RunRow } from './progress-multi.ts';
+import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
 import { runHarness } from './runner.ts';
 import { type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
@@ -1349,11 +1349,7 @@ export default function (pi: ExtensionAPI) {
       if (now - chipLastPush < 500) return;
       chipLastPush = now;
       const theme = ctx.ui.theme;
-      const runningCount = rows.filter(r => r.status === 'running').length;
-      ctx.ui.setStatus(
-        'delegate',
-        theme.fg('accent', '●') + theme.fg('dim', ` ${runningCount}/${rows.length} running`),
-      );
+      ctx.ui.setStatus('delegate', theme.fg('accent', '●') + theme.fg('dim', ` ${formatFanoutChip(rows)}`));
     };
 
     const runOne = async (spec: FanoutSpec, idx: number): Promise<FanoutOutcome> => {
@@ -1396,7 +1392,13 @@ export default function (pi: ExtensionAPI) {
       });
       const result = await run;
       const failed = cancelledAll || !result;
-      setRow({ status: failed ? 'failed' : 'done', activity: '' });
+      // On failure keep context on the row: the reason if we have one, else whatever the run was
+      // last doing. Blanking it here would drop the only on-screen hint at *why* it failed.
+      const reason = runState.error ? runState.error.message.split('\n')[0].slice(0, 60) : '';
+      setRow({
+        status: failed ? 'failed' : 'done',
+        activity: failed ? reason || rows[idx].activity : '',
+      });
       return {
         harnessName: spec.harnessName,
         result: failed ? null : result,
