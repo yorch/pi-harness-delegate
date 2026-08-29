@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fmtElapsed, renderEntry } from '../extensions/progress.ts';
+import { fmtElapsed, renderEntry, truncateFeed } from '../extensions/progress.ts';
 
 test('fmtElapsed formats mm:ss', () => {
   assert.equal(fmtElapsed(0), '0:00');
@@ -22,4 +22,22 @@ test('renderEntry styles by kind', () => {
   assert.equal(renderEntry({ kind: 'tool', text: 'Read: a.ts' }, theme), 'accent:▶ muted:Read: a.ts');
   assert.equal(renderEntry({ kind: 'thinking', text: '💭 thinking…' }, theme), 'dim:💭 thinking…');
   assert.equal(renderEntry({ kind: 'text', text: 'tail' }, theme), 'text:tail');
+});
+
+test('truncateFeed: no marker when everything fits, reports the drop count when it does not', () => {
+  assert.deepEqual(truncateFeed([1, 2, 3], 12), { visible: [1, 2, 3], hiddenCount: 0 });
+  assert.deepEqual(truncateFeed([], 12), { visible: [], hiddenCount: 0 });
+  const entries = Array.from({ length: 15 }, (_, i) => i);
+  assert.deepEqual(truncateFeed(entries, 12), { visible: entries.slice(3), hiddenCount: 3 });
+  // exactly at the cap — still no marker
+  assert.deepEqual(
+    truncateFeed(
+      Array.from({ length: 12 }, (_, i) => i),
+      12,
+    ),
+    {
+      visible: Array.from({ length: 12 }, (_, i) => i),
+      hiddenCount: 0,
+    },
+  );
 });
