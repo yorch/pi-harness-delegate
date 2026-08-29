@@ -136,6 +136,11 @@ not just its docs — see the doc's §4).
 - Verify codex's resume path against a captured resume transcript (currently derived from `--help` only).
 - Verify whether `--add-dir` exists on omp (absent from its help; inert today since `addDirs` defaults empty).
 - Run registry is count-then-acquire, so the cap is best-effort, not a hard mutex. Only worth hardening if the cap becomes a spend control — this also bounds `acquireSlot`'s `wait: true` polling: two waiters can still both observe a just-freed slot and both proceed.
+- Devin as a fifth harness — scoped in [`docs/devin-acp-harness-design.md`](docs/devin-acp-harness-design.md).
+  Verified by real capture: `devin -p` is prose-only (rejected); `devin acp` (Agent Client Protocol over
+  stdio) carries tool ids, usage, context window, stopReason and session id. Needs a sibling `acp-runner.ts`
+  because `runner.ts` is one-way and ACP is bidirectional — build it as a general ACP transport, with Devin
+  as first consumer, not as a Devin special case.
 - `maxConcurrent` per-harness UI + tests for the object shape.
 - `/delegate list --harness=...` and `history` harness filter polish.
 - See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "clearly worth doing" display/inspection items shipped in §12 above. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions, per-child drill-in transcript viewer, steering) is blocked upstream on the harness CLIs, not on this repo.
