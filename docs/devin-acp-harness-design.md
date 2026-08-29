@@ -178,3 +178,35 @@ exercised); whether cost ever appears (`cognition.ai/totalCreditCost` and `total
 strings in the binary but appeared in no captured event); `numTurns` semantics across multiple
 prompts in one session; behaviour of the `review` and `summarizer` `--agent-type` variants; whether
 `devin cloud` sessions change the execution model.
+
+## 8. Errata (found during implementation)
+
+**§4's workspace-trust claim was too broad — it does not apply to `devin acp`.** This note's §4 says
+"Devin refuses to run in a directory not interactively trusted" and treats that as fatal for a tool
+that spawns in arbitrary `ctx.cwd`. That refusal is real, but it's specific to `devin -p` / interactive
+`devin` — verified live, twice, against directories `devin` had never seen (no `--config` bypass): the
+raw `initialize`/`session/new` ACP handshake succeeded with no refusal and no prompt, in the same test
+session where `devin -p` in the exact same directory printed the documented
+`Refusing to run in an untrusted workspace` error. The shipped harness (`extensions/harnesses/devin.ts`)
+therefore carries no trust-check hint and never touches `skip_workspace_trust` — not because doing so
+was rejected as a design choice (§4's reasoning there still holds, if it turns out to be needed), but
+because the gate this note worried about never fires on the code path this harness actually uses. If a
+future Devin version starts enforcing trust over ACP too, `acp-runner.ts`'s generic non-zero-exit
+handling already surfaces whatever refusal message `devin` prints, same as any other process failure.
+
+**Resume works.** `session/load` (sessionId + cwd + mcpServers, same shape as `session/new` minus
+minting a new id) round-trips cleanly through a real `runAcpHarness` call: a second process resumed a
+session created by a first, replayed its prior turn, and correctly recalled information only given in
+that first turn. Wired in `acp-runner.ts` — `opts.resumeSessionId` set sends `session/load` instead of
+`session/new`.
+
+**One handshake step this note didn't call out: `session/set_mode`.** `session/new`'s request has no
+field for requesting an initial mode — the mode is set with a separate `session/set_mode` call after
+session creation. Confirmed by fetching the real `NewSessionRequest`/`SetSessionModeRequest` schemas
+(not the docs site, which doesn't show it either) from the `agent-client-protocol` Rust crate on GitHub.
+
+**The agent doesn't exit once a prompt turn completes.** An ACP session can outlive a single
+`session/prompt` (resume, follow-up turns) — real-run testing found `session/prompt`'s response
+resolving correctly while the process kept idling afterward, so a runner that waits for the process to
+exit on its own (the stdout harnesses' pattern) hangs until the outer timeout fires. `acp-runner.ts`
+finishes and kills the process itself as soon as the response resolves.
