@@ -74,6 +74,11 @@ export interface DetectResult {
   hint?: string;
 }
 
+/** Which runner drives a harness. Defaults to 'stdout' (extensions/runner.ts) when omitted.
+ *  'acp' (extensions/acp-runner.ts) is for Agent Client Protocol agents — a bidirectional
+ *  JSON-RPC session over stdio rather than a one-way JSONL stream. See AGENTS.md. */
+export type Transport = 'stdout' | 'acp';
+
 export interface Harness {
   name: string;
   displayName: string;
@@ -90,6 +95,10 @@ export interface Harness {
   /** Normalized -> native arg fragments. */
   permissionMap?: Record<NormalizedPermission, string[]>;
   permissionHint?: (permission: NormalizedPermission) => string[];
+  /** Runner selection. Omitted/'stdout' -> runner.ts (the four existing harnesses); 'acp' -> acp-runner.ts.
+   *  For 'acp', `permissionMap`'s first element per tier is the ACP session mode id (session/set_mode) —
+   *  the same field the stdout harnesses use for CLI arg fragments, reused rather than duplicated. */
+  transport?: Transport;
 }
 
 export const DEFAULT_TIMEOUT_MS = 600_000;
