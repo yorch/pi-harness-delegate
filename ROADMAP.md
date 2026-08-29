@@ -106,7 +106,7 @@ Captured real JSONL from every installed CLI and wired parsers from it. **codex 
 
 ## 12. Fan-out UI follow-ups
 
-**Status:** done
+**Status:** done ([#18](https://github.com/yorch/pi-harness-delegate/pull/18))
 
 Source-verified follow-up to `docs/pi-subagents-assessment.md`'s "clearly worth doing" bucket (a second
 research pass that read `pi-subagents@0.58.0`'s actual TypeScript source for its live-display surfaces,
