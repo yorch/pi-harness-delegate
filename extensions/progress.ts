@@ -46,6 +46,15 @@ export function fmtElapsed(ms: number): string {
   return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `0:${String(s).padStart(2, '0')}`;
 }
 
+/**
+ * Slice a feed down to its last `max` entries, reporting how many were dropped so the caller can
+ * show a "+N earlier" marker instead of silently truncating with no hint older entries existed.
+ * Pure — testable without a TUI.
+ */
+export function truncateFeed<T>(entries: T[], max: number): { visible: T[]; hiddenCount: number } {
+  return { visible: entries.slice(-max), hiddenCount: Math.max(0, entries.length - max) };
+}
+
 /** Style one feed entry; the returned string may contain ANSI colors. */
 export function renderEntry(entry: FeedEntry, theme: Theme): string {
   switch (entry.kind) {
@@ -98,8 +107,13 @@ export function progressWindow(tui: TUI, theme: Theme, opts: ProgressWindowOptio
         out.push(`│ ${padTo(banner, inner)} │`);
       }
 
-      // feed
-      for (const entry of opts.getEntries().slice(-MAX_VISIBLE_ENTRIES)) {
+      // feed — "+N earlier" marker when older entries were dropped, instead of truncating silently
+      const { visible, hiddenCount } = truncateFeed(opts.getEntries(), MAX_VISIBLE_ENTRIES);
+      if (hiddenCount > 0) {
+        const marker = theme.fg('dim', `+${hiddenCount} earlier`);
+        out.push(`│ ${padTo(truncateToWidth(marker, inner), inner)} │`);
+      }
+      for (const entry of visible) {
         out.push(`│ ${padTo(truncateToWidth(renderEntry(entry, theme), inner), inner)} │`);
       }
 

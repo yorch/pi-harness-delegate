@@ -11,6 +11,20 @@ precisely, but internal implementation claims below are the package's own docume
 against its TypeScript source. Where I could not confirm something, it's called out explicitly rather than
 inferred.
 
+**Update (2026-08-29).** A follow-up pass read `pi-subagents@0.58.0`'s actual npm tarball TypeScript
+source (not just its docs) for the live-display/inspection surfaces specifically: `src/tui/fleet.ts`
+(1430 lines, full), `src/tui/fleet-status.ts` (846 lines, full), `src/tui/fleet-transcript.ts` (536
+lines, partial), `src/tui/render.ts` (2329 lines, partial — the two subagent-result renderers plus the
+exports list, not the ~2000 lines of formatting helpers between them), `src/workflows/chat-progress.ts`
+(148 lines, full), `src/runs/background/notify.ts` (442 lines, full), and `src/shared/shortcuts.ts` (17
+lines, full). §4 below is source-verified from that pass and says so inline; everything else in this
+document is unchanged from the original documentation-only research above. Still not read, even in the
+follow-up: `src/runs/background/completion-batcher.ts` (its debounce-timing logic itself — only its call
+sites in `notify.ts`), `src/runs/foreground/execution.ts` (2,368 lines — the actual foreground
+child-spawn loop that populates the state `fleet.ts`/`fleet-status.ts` read), and `src/inspectors/herdr/*`
+(the external "Herdr" inspector `H` opens — the keybinding and its call site were confirmed, not what
+Herdr itself renders).
+
 ## 1. What `pi-subagents` is
 
 `pi-subagents` is "Pi extension for single-agent delegation and scripted multi-agent workflows" — a
@@ -126,11 +140,16 @@ Concrete enough to reimplement, in the order a user would encounter them:
    restrictive-but-documented subset (no nested `async function`/arrow helpers, because those break child-launch
    tracking across the Node/Bun boundary).
 
-4. **Two-tier live progress: compact always-on chrome + an expand key for detail.** A persistent FleetView
-   strip below the editor (`2 active agents · 1 pane · ↓ 3.1k window · 4.2k spent`) is always visible; a
-   configured expand key (`Ctrl+O` default) blows one card up to full streaming detail; `Ctrl+Alt+F` opens a
-   dedicated full-screen inspector (`/subagents-fleet`) with its own keybindings (`↑↓/jk` select, `s` compose
-   a steer/follow-up/auto message, `D` stop-with-confirmation, `H` open in an external pane inspector).
+4. **Two-tier live progress: compact always-on chrome + a full-screen inspector for detail.** A persistent
+   FleetView strip below the editor (`2 active agents · 1 pane · ↓ 3.1k window · 4.2k spent`) is always
+   visible; `↓`/`←` expands it in place into a tree roster, `Enter` on a roster row opens `Ctrl+Alt+F`'s
+   dedicated full-screen inspector (`/subagents-fleet`) focused on that child, and *inside* the inspector
+   `x`/`X`/`Ctrl+O` toggles a selected child's tool output between collapsed and full detail — three
+   separate keys for three separate steps, not one "expand to full streaming detail" keystroke (corrected
+   from an earlier draft of this document against source — see §4).
+
+   The inspector has its own keybindings beyond that toggle (`↑↓/jk` select, `s` compose a
+   steer/follow-up/auto message, `D` stop-with-confirmation, `H` open in an external pane inspector).
 
 5. **Foreground vs. background is a first-class run property, not a side effect of tool-call return.**
    `async: true/false` decides whether the parent's turn blocks. Background runs persist status/events/logs
@@ -178,7 +197,87 @@ Concrete enough to reimplement, in the order a user would encounter them:
     — cross-referencing into the separate durable mission/receipt record without requiring the user to go
     find it themselves.
 
-## 4. Side-by-side with `pi-harness-delegate`
+## 4. Live display and inspection surfaces (source-verified)
+
+Everything in this section comes from the follow-up source-reading pass described in the update note
+above, not from `pi-subagents`' documentation. It's scoped narrowly to what's actually on screen while
+children run, N-concurrent handling, drill-in views, and failure/cancel/completion/persistence signalling
+— not architecture, permissions, or workflow scripting, which §1–§2 above already cover from docs and
+which this pass found no contradictions with wherever it could cross-check them (the update note at the
+top of this document lists exactly what was and wasn't read this time around).
+
+**Three separate, separately-registered surfaces, not one:**
+
+- **(a) Inline in the main conversation.** `renderSubagentResult`/`renderSubagentSummary` (`render.ts`)
+  render the `subagent` tool call's own result block like any other tool result would: collapsed to one
+  line (`✓ reviewer · completed`), or expanded into one row per child with a live `⎿ <activity>` line
+  while running. This scrolls with the transcript — it is not an overlay.
+- **(b) The persistent FleetView strip** (`fleet-status.ts`), placed above or below the editor, refreshed
+  every 500ms and content-hashed so it only repaints on an actual change. Collapsed, it's the one-liner
+  already described in §3 item 4; `↓`/`←` expands it in place into a tree roster, capped at
+  `MAX_AGENT_ROWS = 6` visible rows with `↑ N more`/`↓ N more` overflow bars rather than silent truncation.
+- **(c) The full-screen inspector** (`fleet.ts`, opened by `Ctrl+Alt+F` or `/subagents-fleet`), a
+  two-pane layout (roster left, detail right) refreshed every 750ms. This is the real drill-in: selecting
+  a child auto-loads its parsed transcript (assistant/user/tool events, tool output collapsed to 7 lines
+  unless expanded) whenever a transcript file resolves, falling back to a flat key/value block otherwise.
+
+**Keybindings** — all in the full-screen inspector (`DEFAULT_FLEET_KEYBINDINGS`, `fleet.ts:33-48`, every
+one overridable) unless noted:
+
+| Key(s) | Action |
+| --- | --- |
+| `Esc`, `Ctrl+C`, `q` | close the inspector |
+| `↑`/`k`, `↓`/`j`, `Home`, `End` | move/jump the roster selection |
+| `K`/`J`, `PageUp`/`PageDown` | scroll/page the detail pane |
+| `r`/`R` | force refresh |
+| `s` | steer — opens a draft input; `Tab` cycles `steer`/`follow_up`/`auto` delivery mode |
+| `D` | stop, with a confirm step; footer copy explicitly separates "stop" from a resumable "interrupt" |
+| `H` | open the external "Herdr" pane inspector (not traced further — see the update note above) |
+| `x`/`X`/`Ctrl+O` | toggle a *selected child's* tool output between collapsed and full detail |
+| `p` | Prompt Audit (live foreground children only) — authored / runtime-additions / final-effective prompt views |
+
+The strip (b) has its own, separate nav, not shared with the inspector: `↓`/`←` expand, `↑`/`↓`/`j`/`k`
+move (pressing `↑` on the first row collapses back to the one-liner rather than wrapping), `Esc` collapse,
+`Enter` open the full inspector focused on that row.
+
+**Failure.** A failed child's row does not disappear from the full inspector — `orderFleetAsyncRuns()`
+keeps every terminal run (newest-first, up to `MAX_RECENT_ASYNC_RUNS = 20`) alongside the still-active
+ones, so a failed run stays selectable with its transcript and an `Error:` line intact. But the
+*always-on strip* (b) filters to `running`/`queued`/`pending` only (`isActiveState`) — a failed child
+vanishes from the persistent chrome the instant it goes terminal, whether it succeeded or failed, and
+survives only in the on-demand inspector and the injected completion message described below.
+
+*Deliberate divergence, not a gap this repo should close:* `extensions/progress-multi.ts`'s fan-out rows
+freeze on failure — `RunRow.activity` keeps the failure reason instead of blanking it — rather than
+dropping the row. That is the better behavior of the two; `pi-subagents`' always-visible surface is worse
+here, not better, and this is noted so nobody "fixes" this repo's freeze-on-failure behavior to match it.
+
+**Cancellation.** `D` in the inspector stops exactly the selected child, with a confirm step. No bulk
+"stop all children" was found anywhere in the files read — every stop/steer call targets one row; a
+workflow fan-out has to be stopped child-by-child.
+
+*Also a deliberate divergence:* this repo's shared `AbortController` plus one double-`Esc`
+(`runFanoutConcurrent` in `extensions/index.ts`) cancels every in-flight *and* still-queued run in a
+fan-out with one gesture — a bulk-cancel capability `pi-subagents` doesn't have. Worth keeping as-is, not
+narrowing to a per-child-only model.
+
+**Completion** is not a UI event at all — it's an injected chat message
+(`pi.sendMessage({ customType: "subagent-notify", ... }, { triggerTurn })`), the same "inject on the next
+turn boundary" mechanism this repo already uses for its own report. Several simultaneous completions fold
+into one digest, but the batching gate is explicit and matches §3 item 5's claim — now confirmed against
+source rather than docs alone: only `status === "completed"` results go through the debounce batcher;
+`failed`/`paused`/`stopped` always fire immediately, bypassing it.
+
+**Persistence** has a hard edge the docs alone didn't surface: the inspector's `asyncDetail()` reads a
+run's on-disk `status.json`, and once that file is pruned/GC'd, only bare identifiers remain in memory —
+nothing richer can be shown. No on-disk equivalent of this repo's `/delegate history` turned up in the
+files read; the closest thing, the inspector's own roster, is session-scoped and bounded
+(`MAX_RECENT_ASYNC_RUNS`/`MAX_FLEET_HISTORY_CANDIDATES`), not a standalone cross-session browser. That's a
+genuine difference from `/delegate history`, which reads persisted `.md` transcripts directly from disk
+regardless of session (`readAllHistory()` in `extensions/index.ts`). Missions (`docs/missions.md`, still
+out of this section's scope) are `pi-subagents`' durable cross-session layer instead.
+
+## 5. Side-by-side with `pi-harness-delegate`
 
 | Dimension | `pi-harness-delegate` | `pi-subagents` |
 | --- | --- | --- |
@@ -229,7 +328,7 @@ process and don't transfer to this repo's actual problem. The things that *do* t
 are properties of *the task*, not the child's runtime: parallel fanout, worktree isolation, gate/verify
 commands, batched completion notifications, per-run budget policy, mission-style continuity.
 
-## 5. Assessment: candidate improvements for `pi-harness-delegate`
+## 6. Assessment: candidate improvements for `pi-harness-delegate`
 
 Ordered by priority within each bucket.
 
@@ -326,7 +425,7 @@ it.
 solve "let *other* Pi extensions compose with subagents programmatically." Nothing in `pi-harness-delegate`'s
 current scope suggests other extensions need to drive harness delegation; premature to build.
 
-## 6. Open questions / what I could not verify
+## 7. Open questions / what I could not verify
 
 - **`pi-subagents`' actual TypeScript implementation.** I read `index.ts` (10 lines, a thin re-export guard)
   and the `extension-api.md` "Runtime files" table's file list/purposes, but did not read `src/**/*.ts`
