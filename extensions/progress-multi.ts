@@ -9,7 +9,8 @@
  * N row summaries).
  *
  * Controls: same as progressWindow — ESC twice to cancel (aborts every in-flight run), `m` to
- * minimize.
+ * minimize. Once every row is terminal, a single Esc or `m` instead dismisses immediately (see
+ * `isFanoutComplete`) rather than arming/minimizing, since there's nothing left to cancel.
  */
 
 import type { Theme } from '@earendil-works/pi-coding-agent';
@@ -32,6 +33,9 @@ export interface RunRow {
    * still says *why* rather than going blank at the moment that matters most.
    */
   activity: string;
+  /** Cost reported once the run completes successfully; null while queued/running/failed, or when
+   *  the harness didn't report one. Feeds the chip's aggregate spend figure. */
+  costUsd: number | null;
 }
 
 export interface MultiProgressWindowOptions {
@@ -47,6 +51,19 @@ export interface MultiProgressWindowOptions {
   onCancel: () => void;
   /** Called when the user presses `m` (minimize — runs continue in the background). */
   onMinimize: () => void;
+  /**
+   * Called when the user presses Esc or `m` while every row is already terminal — i.e. during the
+   * post-completion linger, before the caller tears the overlay down on its own timer. Lets a user
+   * who's still watching dismiss the finished board immediately instead of waiting it out. Optional
+   * so existing callers/tests that don't care about the linger keep working.
+   */
+  onDismiss?: () => void;
+}
+
+/** True once every row has reached a terminal state — the fan-out is fully done. Pure — testable
+ *  without a TUI. Used to gate the post-completion dismiss-on-any-key behavior. */
+export function isFanoutComplete(rows: RunRow[]): boolean {
+  return rows.length > 0 && rows.every(r => r.status === 'done' || r.status === 'failed');
 }
 
 /** Per-status glyphs, matching the row markers in the overlay so the chip and the window read alike. */
@@ -58,17 +75,26 @@ const CHIP_GLYPHS: ReadonlyArray<readonly [RunStatus, string]> = [
 ];
 
 /**
- * Compact fan-out status-bar summary, e.g. `1✓ 1✗ 1▶ 1…`. Zero counts are omitted, so the common
- * cases stay short (`4▶`, then `4✓`). Counting only `running` — as the first cut did — renders
- * `0/4 running`, which reads as idle when runs have actually failed or are queued behind the cap.
- * Pure — testable without a TUI.
+ * Compact fan-out status-bar summary, e.g. `1✓ 1✗ 1▶ 1… · ⏱ 0:42 · $0.123`. Zero status counts are
+ * omitted, so the common cases stay short (`4▶`, then `4✓`); the aggregate spend segment is
+ * likewise omitted until at least one run has actually reported a cost. Counting only `running` —
+ * as the first cut did — renders `0/4 running`, which reads as idle when runs have actually failed
+ * or are queued behind the cap. `elapsedMs` is passed in (rather than read via `Date.now()`
+ * internally) so this stays pure and testable without a TUI.
  */
-export function formatFanoutChip(rows: RunRow[]): string {
+export function formatFanoutChip(rows: RunRow[], elapsedMs: number): string {
   const parts = CHIP_GLYPHS.map(([status, glyph]) => {
     const n = rows.filter(r => r.status === status).length;
     return n > 0 ? `${n}${glyph}` : null;
   }).filter((s): s is string => s !== null);
-  return parts.length > 0 ? parts.join(' ') : `${rows.length}…`;
+  const statusText = parts.length > 0 ? parts.join(' ') : `${rows.length}…`;
+
+  const costs = rows.map(r => r.costUsd).filter((c): c is number => typeof c === 'number');
+  const totalCost = costs.length > 0 ? costs.reduce((sum, c) => sum + c, 0) : null;
+
+  const segments = [statusText, `⏱ ${fmtElapsed(elapsedMs)}`];
+  if (totalCost !== null) segments.push(`$${totalCost.toFixed(3)}`);
+  return segments.join(' · ');
 }
 
 /** One row's marker + label, e.g. "✓ claude" / "✗ codex" / "⠋ opencode" / "… amp". Pure — testable
@@ -140,15 +166,27 @@ export function multiProgressWindow(
         out.push(`│ ${padTo(truncateToWidth(line, inner), inner)} │`);
       }
 
-      const hint = armed
-        ? theme.fg('warning', 'press esc again to cancel all') + theme.fg('dim', ' · m minimize')
-        : theme.fg('dim', 'esc cancel all') + theme.fg('dim', ' · m minimize');
+      const hint = isFanoutComplete(rows)
+        ? theme.fg('dim', 'esc/m dismiss')
+        : armed
+          ? theme.fg('warning', 'press esc again to cancel all') + theme.fg('dim', ' · m minimize')
+          : theme.fg('dim', 'esc cancel all') + theme.fg('dim', ' · m minimize');
       out.push(`│ ${padTo(hint, inner)} │`);
 
       out.push(theme.fg('accent', `╰${'─'.repeat(Math.max(1, width - 2))}╯`));
       return out;
     },
     handleInput(data: string): void {
+      // Once every run has reached a terminal state, the overlay is just lingering on the
+      // finished board before the caller closes it on a timer — any Esc/m here dismisses it right
+      // away instead of making a user who's still watching wait out the linger.
+      if (isFanoutComplete(opts.getRows()) && opts.onDismiss) {
+        if (matchesKey(data, Key.escape) || data === 'm') {
+          disarm();
+          opts.onDismiss();
+        }
+        return;
+      }
       if (matchesKey(data, Key.escape)) {
         if (armed) {
           disarm();

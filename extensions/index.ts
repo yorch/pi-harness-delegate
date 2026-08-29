@@ -110,6 +110,9 @@ interface DelegateOptions {
 
 /** Verify commands run on the host after the harness exits — bounded independent of harness timeoutMs. */
 const VERIFY_TIMEOUT_MS = 5 * 60_000;
+/** How long the fan-out overlay lingers on the finished board after the last run resolves, so a
+ *  user who looked away still catches the final state instead of it clearing instantly. */
+const FANOUT_LINGER_MS = 3000;
 
 /**
  * Run a verify command in-process on the host (never delegated to the harness). Report-only —
@@ -1339,6 +1342,7 @@ export default function (pi: ExtensionAPI) {
       startedAt: null,
       status: 'queued',
       activity: '',
+      costUsd: null,
     }));
     let requestRender: (() => void) | null = null;
 
@@ -1349,7 +1353,10 @@ export default function (pi: ExtensionAPI) {
       if (now - chipLastPush < 500) return;
       chipLastPush = now;
       const theme = ctx.ui.theme;
-      ctx.ui.setStatus('delegate', theme.fg('accent', '●') + theme.fg('dim', ` ${formatFanoutChip(rows)}`));
+      ctx.ui.setStatus(
+        'delegate',
+        theme.fg('accent', '●') + theme.fg('dim', ` ${formatFanoutChip(rows, now - overallStart)}`),
+      );
     };
 
     const runOne = async (spec: FanoutSpec, idx: number): Promise<FanoutOutcome> => {
@@ -1398,6 +1405,7 @@ export default function (pi: ExtensionAPI) {
       setRow({
         status: failed ? 'failed' : 'done',
         activity: failed ? reason || rows[idx].activity : '',
+        costUsd: !failed && result ? result.result.totalCostUsd : null,
       });
       return {
         harnessName: spec.harnessName,
@@ -1413,6 +1421,10 @@ export default function (pi: ExtensionAPI) {
     let outcomes: FanoutOutcome[];
     if (ctx.hasUI) {
       let overlayHandle: OverlayHandle | null = null;
+      let resolveDismiss = (): void => {};
+      const dismissed = new Promise<void>(resolve => {
+        resolveDismiss = () => resolve();
+      });
       const uiPromise = ctx.ui
         .custom(
           (tui, theme, _kb, done) => {
@@ -1431,6 +1443,7 @@ export default function (pi: ExtensionAPI) {
                 overlayHandle?.setHidden(true);
                 overlayHandle?.unfocus();
               },
+              onDismiss: () => resolveDismiss(),
             });
           },
           {
@@ -1445,13 +1458,26 @@ export default function (pi: ExtensionAPI) {
         )
         .catch(() => {});
       outcomes = await allSettled;
-      await closeWhenMounted(() => closeWindow, 2000);
-      await uiPromise;
+      // Cancelling already means "I'm done watching" — skip the linger so the overlay closes
+      // right away instead of sitting on a cancelled board for FANOUT_LINGER_MS.
+      if (cancelledAll) resolveDismiss();
+      // Tear the overlay down after a short linger (or immediately on Esc/m/cancel) — in the
+      // background, so this doesn't delay the outcomes we're about to return (and thus the
+      // injected report). `activeOverlay` stays valid for `/delegate watch` until this settles.
+      void (async () => {
+        const timer = setTimeout(() => resolveDismiss(), FANOUT_LINGER_MS);
+        timer.unref?.();
+        await dismissed;
+        clearTimeout(timer);
+        await closeWhenMounted(() => closeWindow, 2000);
+        await uiPromise;
+        clearActive();
+        ctx.ui.setStatus('delegate', undefined);
+      })();
     } else {
       outcomes = await allSettled;
+      clearActive();
     }
-    clearActive();
-    if (ctx.hasUI) ctx.ui.setStatus('delegate', undefined);
     return outcomes;
   };
 
