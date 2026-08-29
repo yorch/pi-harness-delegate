@@ -104,7 +104,33 @@ Captured real JSONL from every installed CLI and wired parsers from it. **codex 
 - **Deterministic report ordering** — `orderFanoutResults()` (`extensions/activity.ts`) reorders concurrent, out-of-order completions back to the resolved harness list before `buildFanoutReport()` runs, so the same fan-out produces the same report regardless of which harness finishes first.
 - **One multi-run overlay for fan-out** (`extensions/progress-multi.ts`) — a compact row per harness (status, elapsed, current activity) instead of N stacked overlays or an interleaved single feed. Single-harness runs still use the original `progressWindow` unchanged. Double-ESC cancel aborts every in-flight and still-queued run via one shared `AbortController`.
 
-## 12. Future
+## 12. Fan-out UI follow-ups
+
+**Status:** done
+
+Source-verified follow-up to `docs/pi-subagents-assessment.md`'s "clearly worth doing" bucket (a second
+research pass that read `pi-subagents@0.58.0`'s actual TypeScript source for its live-display surfaces,
+not just its docs — see the doc's §4).
+
+- **Richer fan-out chip** — `formatFanoutChip()` (`extensions/progress-multi.ts`) now takes an explicit
+  elapsed-ms and adds `⏱ <elapsed>` plus `$<total spend>` (once at least one run has reported a cost) to
+  the existing per-status counts. Zero-count omission unchanged.
+- **`+N earlier` overflow marker** — `progress.ts`'s feed (`truncateFeed()`) shows a dim marker line
+  instead of silently dropping entries past `MAX_VISIBLE_ENTRIES`. The multi-run overlay has no analogous
+  truncation point (one row per harness, never sliced), so nothing to change there.
+- **Fan-out overlay lingers ~3s after the last row goes terminal** (`FANOUT_LINGER_MS`,
+  `runFanoutConcurrent` in `extensions/index.ts`) instead of tearing down the instant the promise
+  settles, so a user who looked away still sees the final board. Doesn't delay the returned outcomes or
+  the injected report — the linger runs detached after `runFanoutConcurrent` returns. Esc/`m` during the
+  linger dismiss immediately (`isFanoutComplete()` gates this in `multiProgressWindow`); an explicit
+  double-Esc cancel also skips the linger.
+- Source reading confirmed this repo already does two things `pi-subagents` does *worse*, not better —
+  recorded in the assessment doc (§4) so they don't get "fixed" to match it later: its always-on strip
+  drops a failed child the instant it goes terminal (this repo's fan-out rows freeze with the failure
+  reason instead), and it has no bulk stop-all (this repo's double-Esc cancels every in-flight and queued
+  run in a fan-out with one gesture).
+
+## 13. Future
 
 - Codex runs contribute **no tokens** to pi's session totals — `mapHarnessUsage` returns `undefined` when cost is unknown, and codex reports no cost under ChatGPT-plan auth. Revisit if pi ever accepts tokens-without-cost.
 - Verify codex's resume path against a captured resume transcript (currently derived from `--help` only).
@@ -112,7 +138,7 @@ Captured real JSONL from every installed CLI and wired parsers from it. **codex 
 - Run registry is count-then-acquire, so the cap is best-effort, not a hard mutex. Only worth hardening if the cap becomes a spend control — this also bounds `acquireSlot`'s `wait: true` polling: two waiters can still both observe a just-freed slot and both proceed.
 - `maxConcurrent` per-harness UI + tests for the object shape.
 - `/delegate list --harness=...` and `history` harness filter polish.
-- See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions) is blocked upstream on the harness CLIs, not on this repo.
+- See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "clearly worth doing" display/inspection items shipped in §12 above. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions, per-child drill-in transcript viewer, steering) is blocked upstream on the harness CLIs, not on this repo.
 
 ---
 
