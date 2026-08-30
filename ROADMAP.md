@@ -181,12 +181,16 @@ Real-run assessment of ACP support across all five harnesses, same standard as t
 probe). `opencode acp` and `omp acp` are both real and were driven end-to-end with genuine captures
 (`tests/fixtures/opencode-acp.jsonl`, `tests/fixtures/amp-acp.jsonl`) — `acp-runner.ts` already
 handles both dialects without modification, since it sources the ACP mode id from the `Harness`'s own
-`permissionMap`, never from `session/new`'s response. No switch recommended yet: opencode's
-permission-tier fidelity matches what the stdout harness already ships, gated on one unverified
-question (does `build`-mode write behavior get silently swallowed by the ACP client's defensive
-permission-decline?); omp's ACP mode surface is strictly coarser than its stdout `--approval-mode` (2
-tiers vs. 3), and live tool-use/cost capture for omp was blocked by account quota/credit exhaustion
-across three attempts in this environment, not by the protocol.
+`permissionMap`, never from `session/new`'s response. Reframed mid-assessment (per the user) from
+"switch or don't switch" to **a configurable transport, selectable per harness**, stdout default and
+fallback, ACP opt-in only where the permission-tier gate is clean: opencode is close (fidelity gains,
+no tier-granularity loss versus what ships today, one closeable open question on `build`-mode write
+behavior); amp/omp should not even have `transport: 'acp'` as a legal config value yet — its ACP mode
+surface is structurally coarser than its stdout `--approval-mode` (2 tiers vs. 3), on top of live
+tool-use/cost capture being blocked by account quota/credit exhaustion across three attempts in this
+environment, not by the protocol. Also surfaced (not fixed here): a real `acp-runner.ts` bug sending
+`session/set_mode` unconditionally despite it being spec-optional — didn't affect this assessment's
+findings, but argues for a capability-aware handshake in any follow-up implementation.
 
 ---
 

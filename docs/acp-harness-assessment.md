@@ -4,16 +4,24 @@
 `codex-cli 0.150.1`, `opencode 1.18.16`, `omp 17.2.9`, `devin 3000.6.7 (260a97c8)`
 
 Question: for each of the five harnesses, does it support [ACP](https://agentclientprotocol.com)
-(Agent Client Protocol — JSON-RPC 2.0 over stdio, bidirectional), and should we switch it? Same
-standard as `docs/devin-acp-harness-design.md`: verify by running it, not by reading docs. Two
-harnesses shipped with `buildArgs` that were pure fiction until real captures exposed them (#13);
-the Devin design note's own central warning turned out to be wrong (see its §8 errata). This note
-follows the same discipline.
+(Agent Client Protocol — JSON-RPC 2.0 over stdio, bidirectional)? Same standard as
+`docs/devin-acp-harness-design.md`: verify by running it, not by reading docs. Two harnesses shipped
+with `buildArgs` that were pure fiction until real captures exposed them (#13); the Devin design
+note's own central warning turned out to be wrong (see its §8 errata). This note follows the same
+discipline.
+
+**Reframed mid-assessment, per the user:** the original brief asked "switch or don't switch" per
+harness. A better framing surfaced partway through — for any harness that supports *both* a stdout
+mode and ACP, **support both, selectable per harness via config**, rather than an all-or-nothing
+replacement. "Switch" and "don't switch" become special cases of that (harnesses with only one
+working transport have nothing to select between). §5 and §6 are written against this framing; §1–4
+are the same evidence gathered under the original brief and stand unchanged.
 
 **Verdict, up front:** `claude` and `codex` have no ACP surface at all — confirmed by reading their
 full `--help` output, not just re-trusting an earlier probe. `opencode acp` and `omp acp` are both
-real, and both were driven end-to-end with a genuine capture. `devin` already ships. Nothing here
-recommends switching a working harness today — see §5.
+real, and both were driven end-to-end with a genuine capture. `devin` already ships, ACP-only (no
+stdout mode exists to select between). Nothing here recommends defaulting any dual-capable harness to
+ACP today, but opencode is close to worth *offering* as an opt-in — see §5.
 
 ## 1. Method and what was run
 
@@ -151,6 +159,19 @@ test: process A created a session and was told a fact ("the secret passphrase is
 session id and, after replaying process A's turn, was asked to recall the fact — and answered
 `"violet-otter-42"` correctly. Resume is real, not merely advertised.
 
+**Usage accumulates server-side, keyed by session — not per-process.** The same cross-process resume
+run gives real evidence, not just an inference, on whether a harness would need to sum `usage_update`
+across steps the way the current stdout `opencode.ts` sums `step_finish` events. Process A's turn
+ended at `usage: {inputTokens: 70896, outputTokens: 12, totalTokens: 71164, cachedReadTokens: 256}`;
+process B — a *completely separate process* — sent one small follow-up prompt and ended at
+`{inputTokens: 275, outputTokens: 8, totalTokens: 71195, cachedReadTokens: 70912}`. The total grew by
+only 31 tokens for a whole new prompt+response, and `cachedReadTokens` jumped to nearly all of process
+A's total — i.e. the session's running token count lives server-side against the `sessionId`, not in
+the spawned process, and each `usage_update`/prompt-result already *is* the running session total, not
+a per-step delta. A harness translator would need to **latch the latest value, not sum a series** —
+simpler than the current stdout accumulator, and a real behavioral difference worth stating as a
+concrete "loss" if that accumulation logic were ported over unchanged (see §5).
+
 **No `model` or `numTurns` anywhere in any response observed** — the final result reports
 `stopReason` and `usage` only; the model that ran is only ever the `configOptions`'s `"model"`
 *requested* value from `session/new`, never confirmed back the way Devin's
@@ -242,6 +263,9 @@ attempts; the model catalog inside its `configOptions` is trimmed for size, same
 
 ## 3. Comparison table
 
+(`transport` here means "what was captured/exists," not a recommendation — §5 covers what to
+actually offer per harness.)
+
 | Harness | transport | tool-call ids | cost | contextWindow | modes/tiers | resume |
 | --- | --- | --- | --- | --- | --- | --- |
 | claude | stdout | real | ✅ | ✅ | n/a (no ACP) | n/a |
@@ -256,6 +280,33 @@ attempts; the model catalog inside its `configOptions` is trimmed for size, same
 
 This is the section that decides everything else. "Readonly must genuinely mean readonly" — verified
 here, not assumed.
+
+**Does it advertise `modes`?** This is now the single most important input to this section (per
+parallel research into `acp-runner.ts` itself — see the callout below), since "no `modes` field"
+does not mean "no permission model": **opencode does not** advertise the spec's `modes` field in
+`session/new` at all (only its own `configOptions`, category `"mode"`) — **omp does**, the spec-
+standard `{availableModes, currentModeId}` shape, *alongside* the same `configOptions` opencode uses.
+Despite that difference, both agents were live-confirmed to implement the `session/set_mode` RPC
+method correctly regardless of whether they advertise it via `modes` — see the callout.
+
+> **Callout — a real bug in our own `acp-runner.ts`, and why it doesn't change any finding here.**
+> Parallel research (not this session's) found that `acp-runner.ts` sends `session/set_mode`
+> **unconditionally** during the handshake, but per spec `Agent.setSessionMode` is *optional* and
+> `NewSessionResponse.modes` is nullable — an ACP agent that implements neither would have its whole
+> run fail mid-handshake rather than degrade gracefully, and — since it happens before
+> `session/prompt` — that failure would look exactly like "this agent's ACP doesn't work," when
+> the bug is ours. **This did not affect anything in this document.** Every capture here was driven
+> by a small standalone JSON-RPC client (§1), not by `acp-runner.ts` — deliberately, so the capture
+> wasn't shaped by what the runner assumes — and, independently of that, both opencode and omp were
+> *live-tested* calling `session/set_mode` directly and both accepted a valid modeId and rejected a
+> bogus one (§2). So even had these captures gone through the real (buggy) runner, neither would have
+> failed here. The bug is real and worth fixing (in its own PR, not this docs-only one — noted in §7),
+> but it is not why any omp capture failed in this session; those failures were account/billing (§2).
+> It does matter for §6's design sketch: a runner that probes `agentCapabilities`/`session/new`'s
+> response before deciding whether to call `session/set_mode` at all is the more correct general
+> shape, not just a fix for this one bug — the ACP spec has grown purely additively since 1.0 (still
+> wire `protocolVersion: 1`), so cross-agent dialect gaps are much more likely to be *optional
+> features one agent implements and another doesn't* than genuine incompatibilities.
 
 **opencode ACP:** `readonly → plan` is **live-verified faithful** — a real write attempt under `plan`
 produced zero tool calls and a self-aware refusal, with a genuine `-32602` rejection backing up any
@@ -286,78 +337,194 @@ narrow, closeable unknown (`build`-mode write behavior). omp's tier story is *wo
 ships* (3 tiers → 2) on top of being largely unverified live. Per the brief's own standard, neither
 is safe to switch today; opencode is closer.
 
-## 5. Recommendation per harness
+## 5. Recommendation: a configurable transport, not a switch
 
-- **claude — don't switch.** No ACP surface exists. Nothing to evaluate.
-- **codex — don't switch.** No ACP surface exists; `app-server` is a different, codex-proprietary
-  protocol and building against it would mean reverse-engineering a second protocol from scratch, the
-  exact problem ACP exists to avoid. Revisit only if Codex ships real ACP support upstream.
-- **opencode — switch *conditionally*, not yet.** Real, verified fidelity gain (cost, a 200k context
-  window, and cross-process resume — all currently `null`/step-accumulated-only over stdout) with no
-  permission-tier granularity loss versus what ships today. Gated on exactly one more live run:
-  attempt a real edit under `build` mode and confirm it isn't silently swallowed by the ACP client's
-  defensive `session/request_permission` auto-decline. Effort: medium — a new `harnesses/opencode.ts`
-  ACP path (or a sibling file) shaped like `devin.ts`, close in size since the `session/update`
-  vocabulary (`tool_call`/`tool_call_update`/`agent_message_chunk`/`agent_thought_chunk`/
-  `usage_update`) and even field names (`size`/`used` for context window) already match Devin's.
-  Risk: medium, specifically because this **replaces a working, fixture-verified harness** rather
-  than adding a new one — higher bar than Devin's from-scratch addition, per the brief's own framing.
-- **amp/omp — don't switch.** Real fidelity gain would likely be similar in shape (cost, context
-  window, resume) but the ACP mode surface is *coarser* than the stdout CLI's own `--approval-mode`
-  (2 tiers vs. 3), and — separately from that granularity loss — no live run in this environment ever
-  got far enough to observe real tool-call correlation, real cost, or real write-blocking behavior for
-  omp specifically. Both problems need to close before this is safe to even prototype: the tier
-  collapse is a permanent property of the surface (not fixable by retrying), and the live-behavior gap
-  needs a working, non-rate-limited model in this account to close. Revisit when both are addressed.
-- **devin — no change.** Already the best-instrumented harness; this research incidentally
-  reinforces that `acp-runner.ts`'s general, harness-agnostic shape (mode id sourced from the
-  `Harness`'s own static `permissionMap`, not parsed out of `session/new`'s response — see §6) was the
-  right call, since two more real agents now use meaningfully different `session/new` dialects
-  (`modes` field vs. `configOptions` vs. both) that it already handles without modification.
+Per the reframe (top of this note): for a harness that has a working transport today, ACP is best
+treated as an **opt-in alternative selectable per harness in config**, not a replacement. That
+dissolves most of the "switching a working, fixture-verified harness" risk the original brief warned
+about — ACP becomes something a user turns on for one harness, with the verified stdout path staying
+the default and the fallback, so a future dialect quirk degrades to "set it back to stdout" rather
+than "the harness is broken." The permission-tier analysis in §4 still gates everything: **a harness
+whose ACP tiers can't be mapped faithfully should not even be offered as a config option**, let alone
+defaulted to — a configurable transport must not become a way to quietly opt into a weaker permission
+model.
 
-## 6. If we switch: what changes in the code
+- **claude — nothing to configure.** No ACP surface exists.
+- **codex — nothing to configure.** No ACP surface exists; `app-server` is a different,
+  codex-proprietary protocol and building against it would mean reverse-engineering a second protocol
+  from scratch, the exact problem ACP exists to avoid. Revisit only if Codex ships real ACP support
+  upstream.
+- **opencode — worth offering as an opt-in, not yet, not as default.**
+  - **Gains from ACP** (concrete, all `null` or absent over stdout today): real `cost` per turn
+    (structurally real even though `$0` was observed — see §2), a real 200k `contextWindow` (stdout
+    reports `null`), and resume independently proven to genuinely recall cross-process state (stdout's
+    `--session` flag has never been fixture-proven to actually recall anything — this is the first time
+    either mechanism was proven end-to-end for this harness). Bonus: the ACP usage accounting is
+    **simpler** to implement correctly, not just richer — it's a server-side running total keyed by
+    session (§2's cross-process evidence), so a translator only ever needs to latch the latest
+    `usage_update`, not sum a series the way `opencode.ts`'s `step_finish` accumulator does today.
+  - **Losses from ACP, stated plainly, not just gains:** the stdout harness's own step-by-step
+    accumulation (`hs.costAccum`, `hs.stepCount`, etc.) would become dead code, which is a
+    maintenance loss on paper but not a fidelity loss given the point above. More concretely: `model`
+    and `numTurns` are *weaker* over ACP — the final result never confirms what model actually ran
+    (only the *requested* `configOptions` value from `session/new`, no Devin-style confirmation
+    event), and `numTurns` was never observed populated at all, whereas stdout's `step_finish` count
+    gives a real (if differently-defined) turn count today.
+  - **Permission tiers: no loss versus what ships today**, but one open, closeable question — see §4
+    (`build`-mode write behavior under the ACP client's defensive permission-decline is untested).
+  - **Recommendation:** build the ACP path behind a per-harness config option, default `stdout`,
+    once that one question is closed with a single more live run. Do not default to `acp` even after
+    that — let it earn trust as an opt-in first, consistent with §6's default-selection reasoning.
+- **amp/omp — don't even offer it as a config option yet.** Two independent problems, not one:
+  - **Gains from ACP, if it worked:** likely a real `contextWindow` (1,000,000 was seen once, on a
+    failed turn) and possibly real `cost` (schema supports it, never observed populated). **Not** a
+    tool-call-id gain — the *current* stdout `amp.ts` already has real `toolCallId` correlation, so
+    ACP brings no improvement there even in principle.
+  - **Losses from ACP — structural, not just unverified:** the stdout CLI's `--approval-mode` gives
+    3 genuine tiers (`always-ask`/`write`/`yolo`); ACP's mode surface gives only 2
+    (`default`/`plan`). This is a permanent property of the ACP surface as it exists today, not a gap
+    that one more live run closes.
+  - **Recommendation:** because of §4's gate, `transport: 'acp'` should not even be a *legal* config
+    value for amp/omp yet — offering it, even opt-in, would let a user pick a config value that
+    silently drops the `edit` tier's distinct semantics. Revisit only if a future omp ACP version
+    exposes a third tier (e.g. an `approval-mode`-shaped `configOptions` category, the same slot
+    `thinking` already occupies today) — until then this is a `supportsTransports: ['stdout']`
+    harness in §6's terms, ACP capability notwithstanding.
+- **devin — no change.** ACP-only; no stdout mode exists to select between, so the "configurable
+  transport" question doesn't apply. This research incidentally reinforces that `acp-runner.ts`'s
+  general, harness-agnostic shape (mode id sourced from the `Harness`'s own static `permissionMap`,
+  not parsed out of `session/new`'s response — see §6) was the right call, since two more real agents
+  now use meaningfully different `session/new` dialects (`modes` field vs. `configOptions` vs. both)
+  that it already handles without modification.
 
-**The good news, source-verified:** `acp-runner.ts`'s handshake does **not** need to change for
-either opencode's or omp's dialect. The mode id it sends to `session/set_mode` is never parsed out of
-`session/new`'s response at all:
+## 6. Design sketch: per-harness transport selection
+
+Sketched against the real files, not abstractly. The goal is a config-driven choice per harness,
+gated by what that harness actually, verifiably supports (§4/§5) — never a silent default into a
+weaker permission model.
+
+### Config shape
+
+`HarnessConfig` (`extensions/config.ts`) already carries per-harness `model`/`timeoutMs`/
+`allowDangerous`/`maxBudgetUsd`. `transport` slots in the same way:
 
 ```ts
-// extensions/acp-runner.ts, the handshake IIFE
-const modeId = opts.nativePermission ?? opts.harness.permissionMap?.[opts.permission]?.[0] ?? opts.permission;
+export interface HarnessConfig {
+  model?: string;
+  timeoutMs?: number;
+  allowDangerous?: boolean;
+  maxBudgetUsd?: number;
+  transport?: 'stdout' | 'acp';   // new — overrides the harness's default transport
+}
 ```
 
-It comes straight from the `Harness` object's own static `permissionMap` — so opencode's
-`configOptions`-only response (no `modes` field) and omp's `modes`-field response are both already
-handled identically, for free, because the runner never looks at either. This is exactly the kind of
-dialect difference the brief asked to check for, and the answer is: `acp-runner.ts` already
-generalizes past it.
+```jsonc
+// ~/.pi/agent/settings.json
+{ "delegate": { "harnesses": { "opencode": { "transport": "acp" } } } }
+```
 
-What a real switch would touch:
+`loadConfig()` already has the parsing pattern for every other per-harness field (`cfg.harnesses[k] =
+{...}`); `transport` needs no new plumbing there beyond validating the two allowed string values.
 
-- **A new ACP-transport harness file** per agent (e.g. `harnesses/opencode.ts` gaining
-  `transport: 'acp'` and an ACP `buildArgs`/`parseLine`, or a sibling file if stdout and ACP paths
-  need to coexist during the transition — recommended, given §5's open question, so the existing
-  fixture-verified stdout path keeps working while the ACP path is proven out). Shape: near-identical
-  to `devin.ts`'s `translateUpdate` — same `session/update` kind vocabulary, same `toolCallId`
-  correlation pattern, same `size`/`used` field names for context window off `usage_update`. The one
-  addition over Devin's translator: reading `usage_update.cost.amount` into `totalCostUsd` (Devin
-  never reports cost; opencode/omp do, at least structurally).
-- **`permissionMap`**: `{readonly: ['plan'], edit: ['build'], danger: ['build']}` for opencode (same
-  collapse the stdout `AGENT_MAP` already has); `{readonly: ['plan'], edit: ['default'],
-  danger: ['default']}` for omp (a real narrowing from stdout's three distinct native tokens, and the
-  reason §5 says don't build this yet).
-- **`registry.ts`**: either replace the existing `opencode: opencodeHarness` entry outright (risky per
-  §5 — this is the "switching a working harness" case, not "adding a fifth") or introduce it under a
-  distinct name for side-by-side testing before flipping the default — recommended given the one open
-  behavioral question.
-- **Fixtures**: `tests/fixtures/opencode-acp.jsonl` (added this session, 40 lines) is a real starting
-  point; closing §4's open question needs a second fixture capturing a genuine `build`-mode edit.
-  `tests/fixtures/amp-acp.jsonl` (added this session, 14 lines) documents the protocol shape honestly
-  but contains no real tool-call/usage/cost data — not sufficient on its own to build a parser against;
-  needs a working, non-rate-limited omp model to recapture before any implementation work.
-- **Templates** (`templates/opencode/*.md`): unaffected structurally — normalized `permission`
-  frontmatter is unchanged; only the harness's own binary/args/parser change underneath it.
-- **`extensions/harnesses/amp.ts`**: no changes recommended at all right now — see §5.
+### The one call site — and why it doesn't need to grow much
+
+`harness.transport` is read in exactly one place today, `extensions/index.ts:603`:
+
+```ts
+result = harness.transport === 'acp' ? await runAcpHarness(baseRunOpts) : await runHarness(baseRunOpts);
+```
+
+For a dual-capable harness this becomes a resolved choice — config override, falling back to the
+harness's own default — checked against what the harness actually declares it can do:
+
+```ts
+const transport = config.harnesses[harnessName]?.transport ?? harness.transport ?? 'stdout';
+if (!(harness.supportsTransports ?? [harness.transport ?? 'stdout']).includes(transport)) {
+  throw new Error(
+    `delegate.harnesses.${harnessName}.transport is "${transport}", but ${harnessName} only supports: ` +
+    (harness.supportsTransports ?? ['stdout']).join(', '),
+  );
+}
+result = transport === 'acp' ? await runAcpHarness({...baseRunOpts, harness: acpView(harness)}) : await runHarness(baseRunOpts);
+```
+
+That validation must run **before** `acquireSlot()`/spawn (fail-fast, not at spawn time) — e.g.
+configuring `transport: 'acp'` for `claude` should error immediately with a clear message, not
+attempt to spawn `claude acp` and surface a cryptic "unknown subcommand" from the child process.
+`detect()` itself doesn't need to change — it already answers "is the binary there," a separate
+question from "does this transport exist for it"; `supportsTransports` is the new, static, per-harness
+fact `detect()` doesn't currently need to probe for, since §2 already established it by hand
+(`claude`/`codex`: `['stdout']` only; `opencode`/`omp`: `['stdout', 'acp']` once built; `devin`:
+`['acp']` only).
+
+### Two `buildArgs`, two parse paths — and a real `permissionMap` collision
+
+A dual-capable `Harness` can't reuse today's single-purpose fields, because the two transports don't
+just differ in shape, they differ in *vocabulary*:
+
+```ts
+interface Harness {
+  buildArgs(opts): string[];              // stdout CLI args (unchanged meaning)
+  buildAcpArgs?(opts): string[];          // new — spawns the ACP server, e.g. ['acp']
+  parseLine(line, state): ParseOutcome;   // stdout JSONL parser (unchanged meaning)
+  parseAcpLine?(line, state): ParseOutcome; // new — session/update -> ParseOutcome, devin.ts-shaped
+  permissionMap?: Record<NormalizedPermission, string[]>;    // stdout CLI-flag fragments
+  acpPermissionMap?: Record<NormalizedPermission, string[]>; // new — ACP mode ids
+  transport?: Transport;              // default transport when config doesn't override
+  supportsTransports?: Transport[];   // new — the ceiling config validation checks against
+}
+```
+
+`permissionMap` splitting into two is not theoretical — the two vocabularies are simply different
+strings for amp/omp:
+
+| tier | stdout `permissionMap` (`--approval-mode`) | ACP `acpPermissionMap` (`session/set_mode`) |
+| --- | --- | --- |
+| readonly | `always-ask` | `plan` |
+| edit | `write` | `default` |
+| danger | `yolo` | `default` |
+
+For opencode the two vocabularies happen to *coincide* (`plan`/`build` are both the CLI agent name
+and the ACP modeId) — but that's a coincidence of this one agent's naming, not something to design
+around; a single shared map would break the instant amp/omp (or a sixth harness) needs to be dual, so
+the two-field shape should exist even where day-one values happen to match.
+
+`acp-runner.ts` itself needs **no changes** for this — confirmed by reading it, not assumed. It
+already sources the mode id purely from the `Harness` object it's given
+(`opts.harness.permissionMap?.[opts.permission]?.[0]`, `acp-runner.ts`'s handshake IIFE), never from
+`session/new`'s response. So a small adapter that presents an ACP-shaped view of a dual harness
+(`buildArgs -> buildAcpArgs`, `parseLine -> parseAcpLine`, `permissionMap -> acpPermissionMap`) before
+handing it to `runAcpHarness` is enough — `acp-runner.ts` and `runner.ts` both stay exactly as they
+are, only `index.ts`'s one call site and the harness modules themselves change.
+
+One more thing `acp-runner.ts` should eventually change, flagged by parallel research and *not* fixed
+here (docs-only, belongs in its own PR): it currently calls `session/set_mode` unconditionally, but
+that RPC is spec-optional. A capability-aware handshake — check `agentCapabilities`/`session/new`'s
+response for mode/config-option support before calling it, per the ACP spec's additive-only growth
+since 1.0 — is the more correct general shape regardless of this specific bug, and would matter more
+as more ACP agents with differing optional-feature support get added (see §4's callout, §7).
+
+### Default: stdout, always — ACP opt-in only where §4 clears it
+
+**Recommendation: every harness defaults to `stdout`.** ACP becomes a legal, offerable config value
+only for a harness where §4's permission-tier analysis is clean (opencode, once its one open question
+closes) — never where the analysis found a structural gap (amp/omp, today). This is deliberately
+conservative: the fidelity gains (cost, context window, resume) are real but secondary to permission
+correctness, and a config knob that's easy to flip should never be the thing standing between a user
+and an accidentally-weaker sandbox. `supportsTransports` from the previous section is exactly the
+mechanism that keeps amp/omp's `transport: 'acp'` from being a legal value at all until that changes.
+
+### What's still real work, unchanged from the original brief
+
+- **Fixtures**: `tests/fixtures/opencode-acp.jsonl` (40 lines, this session) is a real starting point
+  for `parseAcpLine`; closing §4's open question needs a second fixture capturing a genuine
+  `build`-mode edit. `tests/fixtures/amp-acp.jsonl` (14 lines, this session) documents the protocol
+  shape honestly but has no real tool-call/usage/cost data — not sufficient to build a parser against;
+  needs a working, non-rate-limited omp model to recapture.
+- **Templates** (`templates/opencode/*.md`): unaffected — normalized `permission` frontmatter already
+  describes tiers abstractly; only the resolved harness's args/parser differ underneath per transport.
+- **`registry.ts`**: no change in shape — still one `Harness` object per name; it just gets richer per
+  the fields above for the harnesses that end up dual-capable.
 
 ## 7. Open questions / what could not be verified
 
@@ -383,3 +550,15 @@ What a real switch would touch:
 - **omp's model catalog and Anthropic routing are OpenRouter-only in this account's config** — worth
   independently confirming whether that's this account's specific setup or omp's general default,
   since it directly caused two of the three failed captures.
+- **`acp-runner.ts`'s unconditional `session/set_mode` call and unchecked `protocolVersion`** — real
+  bugs found by parallel research (not this session's captures), verified against `main`, not fixed
+  here (docs-only scope; belongs in its own PR). §4's callout covers why neither affected any finding
+  in this document — both opencode and omp were independently live-tested calling `session/set_mode`
+  directly and both accept it regardless of whether they advertise the spec's `modes` field. Still
+  unverified: what a *third* ACP agent that implements neither `modes` nor `session/set_mode` at all
+  (both spec-optional) would do against the current unconditional call — none of the two agents
+  reachable in this environment happens to be that case, so it couldn't be exercised here.
+- **Whether a genuinely no-permission-model ACP agent exists at all** — every agent seen here
+  (Devin, opencode, omp) has *some* mode/config-option mechanism. Whether an ACP agent with no
+  permission surface whatsoever is common enough to design `supportsTransports` around wasn't
+  checked against the spec or against any third implementation.
