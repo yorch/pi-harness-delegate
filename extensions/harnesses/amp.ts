@@ -159,14 +159,22 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
         ? (o.messages[o.messages.length - 1] as Record<string, unknown>)
         : null;
     const measured = (hs.turnCount ?? 0) > 0;
+    // real error shape: message.stopReason === 'error' + message.errorMessage — observed live on a
+    // 429 quota rejection, where message.content is an empty array, so the text-block extraction
+    // above never sets streamedText and this would otherwise silently report success with empty
+    // text (tests/fixtures/amp-error.jsonl).
+    const errorMessage = typeof msg?.errorMessage === 'string' ? (msg.errorMessage as string) : undefined;
+    const isErrorTurn = msg?.stopReason === 'error' || errorMessage !== undefined;
     const result: StreamedResult = {
       result:
         typeof o.result === 'string'
           ? o.result
-          : streamedText
-            ? state.streamedText + streamedText
-            : state.streamedText || (text ?? ''),
-      isError: o.is_error === true,
+          : errorMessage
+            ? errorMessage
+            : streamedText
+              ? state.streamedText + streamedText
+              : state.streamedText || (text ?? ''),
+      isError: o.is_error === true || isErrorTurn,
       numTurns: measured ? (hs.turnCount as number) : null,
       totalCostUsd: measured ? (hs.costAccum as number) : null,
       sessionId:
@@ -228,6 +236,9 @@ export const ampHarness: Harness = {
     const args = ['-p', '--mode', 'json', '--approval-mode', approvalMode];
     if (opts.model) args.push('--model', opts.model);
     if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
+    // `--add-dir=<value>` is real and repeatable per `omp --help` — confirmed live: a run with
+    // --add-dir echoed the directory back in the session line's `additionalDirectories`. (Earlier
+    // research had flagged this as possibly absent; that was wrong for omp 17.2.9.)
     for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
     args.push(opts.prompt);
     return args;

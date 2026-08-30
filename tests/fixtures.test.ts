@@ -133,6 +133,39 @@ test('codex.jsonl: real item.id correlates command_execution tool calls, real us
   assert.ok(toolLines.every(l => l.endsWith('✓')));
 });
 
+test('codex-resume.jsonl: a fresh process resuming a prior session genuinely recalls its context', () => {
+  // Real, live-captured two-process resume: turn 1 (codex exec) taught the model a fact and was
+  // killed; turn 2 is an independent `codex exec resume <id> <prompt>` process asking for it back.
+  // Split on the second thread.started line so each turn replays through its own fresh ParseState,
+  // matching how two separate spawned processes actually behave — resume must not depend on any
+  // in-memory state surviving between them.
+  const lines = loadFixture('codex-resume.jsonl');
+  const splitAt = lines.indexOf('{"type":"thread.started","thread_id":"01a052bb-0000-0000-0000-000000000001"}', 2);
+  assert.ok(splitAt > 0, 'expected a second thread.started line to split on');
+
+  const turn1 = replay(lines.slice(0, splitAt), parseCodexLine);
+  assert.ok(turn1.result);
+  assert.equal(turn1.result?.sessionId, '01a052bb-0000-0000-0000-000000000001');
+  assert.equal(turn1.result?.isError, false);
+  assert.ok(turn1.result?.result.includes('OK'));
+
+  // A leading non-JSON "Reading additional input from stdin..." line (real codex-cli output when
+  // stdin isn't a TTY) must not crash the parser — it's tolerated as plain text, per the
+  // tolerant-parsing convention (AGENTS.md scope notes).
+  assert.doesNotThrow(() => replay(lines.slice(0, splitAt), parseCodexLine));
+
+  const turn2 = replay(lines.slice(splitAt), parseCodexLine); // fresh state — a genuinely new process
+  assert.ok(turn2.result);
+  assert.equal(turn2.result?.sessionId, '01a052bb-0000-0000-0000-000000000001', 'resume reports the same session id');
+  assert.equal(turn2.result?.isError, false);
+  // The passphrase was only ever told to turn 1 — a fresh process recalling it proves resume
+  // genuinely restores prior context rather than just accepting/echoing the session id.
+  assert.ok(
+    turn2.result?.result.includes('quokka-nebula-77'),
+    `expected recalled passphrase, got: ${turn2.result?.result}`,
+  );
+});
+
 test('opencode.jsonl: parallel tool_use batch resolved by callID, cost/tokens summed across step_finish', () => {
   const lines = loadFixture('opencode.jsonl');
   const { activities, result } = replay(lines, parseOpencodeLine);
@@ -170,6 +203,19 @@ test('amp.jsonl: out-of-order parallel tool_execution_end attributes to the righ
   );
   assert.equal(result?.usage?.inputTokens, 87273 + 87632 + 115596);
   assert.equal(result?.usage?.outputTokens, 184 + 375 + 129);
+});
+
+test('amp-error.jsonl: a real 429 quota rejection is reported as isError, not a silent empty success', () => {
+  // Real, live-captured omp turn_end/agent_end where message.content is an empty array (the error
+  // never became assistant text) and the failure only shows up as message.stopReason === "error" +
+  // message.errorMessage. Found by the live integration suite (tests/live.test.ts) — before the
+  // fix, parseAmpLine only checked the top-level `is_error` field (never set here) and fell back to
+  // empty streamedText, so this surfaced as a "successful" run with an empty result.
+  const lines = loadFixture('amp-error.jsonl');
+  const { result } = replay(lines, parseAmpLine);
+  assert.ok(result);
+  assert.equal(result?.isError, true);
+  assert.ok(result?.result.includes('429 Monthly usage limit reached'), result?.result);
 });
 
 test('devin-acp.jsonl: real toolCallId correlates tool_call/tool_call_update across a genuine ACP session', () => {

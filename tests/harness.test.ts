@@ -142,6 +142,30 @@ test('harness buildArgs respect permission', () => {
   assert.ok(cArgsRo.includes('read-only'));
 });
 
+test('codex buildArgs: --add-dir only on a fresh turn, never on resume', () => {
+  // `codex exec resume --help` has no --add-dir at all (confirmed live: a hard CLI error,
+  // "unexpected argument '--add-dir' found") — only `codex exec` (no resume) supports it.
+  const codex = getHarness('codex');
+  assert.ok(codex);
+  const fresh = codex.buildArgs({ prompt: 'hi', cwd: '/tmp', permission: 'readonly', addDirs: ['/extra'] });
+  assert.ok(fresh.includes('--add-dir'));
+  const resumed = codex.buildArgs({
+    prompt: 'hi',
+    cwd: '/tmp',
+    permission: 'readonly',
+    resumeSessionId: 'abc',
+    addDirs: ['/extra'],
+  });
+  assert.ok(!resumed.includes('--add-dir'), `resume args should never include --add-dir, got: ${resumed}`);
+});
+
+test('amp buildArgs: --add-dir is included — confirmed live that omp accepts it', () => {
+  const amp = getHarness('amp');
+  assert.ok(amp);
+  const args = amp.buildArgs({ prompt: 'hi', cwd: '/tmp', permission: 'readonly', addDirs: ['/extra'] });
+  assert.ok(args.includes('--add-dir') && args.includes('/extra'));
+});
+
 test('isNativeDangerPermission: every harness danger mode is gated', () => {
   // The bug this closes: `yolo` (amp) and `bypass` (devin) are not legacy spellings, so the old
   // hardcoded trio let them through as an `unknown native` while the run was recorded as `edit`.
