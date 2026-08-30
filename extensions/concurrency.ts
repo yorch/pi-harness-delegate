@@ -11,7 +11,7 @@
  */
 
 import { type DelegateConfig, getMaxConcurrent } from './config.ts';
-import { acquireRun, countActiveRuns, releaseRun } from './run-registry.ts';
+import { acquireRunWithinLimits, countActiveRuns, releaseRun } from './run-registry.ts';
 
 const activeRuns = new Map<string, number>();
 let globalActiveRuns = 0;
@@ -70,7 +70,11 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * never throws) once a slot is held; the caller must call it exactly once when the run finishes.
  *
  * Checks the global limit before the per-harness limit — same precedence and error text as the
- * original inline guard, so single-run (`wait: false`) callers see unchanged behavior.
+ * original inline guard, so single-run (`wait: false`) callers see unchanged behavior. Those two
+ * checks are still a plain (racy) read, kept as a cheap fail-fast/error-message step; the actual
+ * grant is `acquireRunWithinLimits()` (run-registry.ts), which re-verifies after registering so a
+ * race lost between the check here and the write there is caught — see its doc comment. Losing
+ * that race is handled exactly like losing the check above: throw (wait:false) or poll (wait:true).
  */
 export async function acquireSlot(opts: AcquireSlotOptions): Promise<() => void> {
   const { harness, mode, config, wait, signal, pollIntervalMs = 200 } = opts;
@@ -91,9 +95,18 @@ export async function acquireSlot(opts: AcquireSlotOptions): Promise<() => void>
       continue;
     }
 
+    const claim = acquireRunWithinLimits(harness, mode, maxGlobal, perHarnessLimit);
+    if (claim.status === 'full') {
+      // the check above passed, but another racer's write landed first and used up the slot —
+      // handled exactly like hitting the cap on the check itself.
+      if (!wait) throw new ConcurrencyLimitError(`another delegate run claimed the last available slot for ${harness}`);
+      await sleep(pollIntervalMs, signal);
+      continue;
+    }
+
     activeRuns.set(harness, perHarnessCount + 1);
     globalActiveRuns++;
-    const runHandle = acquireRun(harness, mode);
+    const runHandle = claim.status === 'acquired' ? claim.handle : null;
     let released = false;
     return () => {
       if (released) return;
