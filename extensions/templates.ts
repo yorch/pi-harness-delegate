@@ -43,11 +43,11 @@ export function normalizePermission(
     const lower = raw.trim().toLowerCase();
     if (lower === 'readonly' || lower === 'read-only' || lower === 'read_only')
       return { permission: 'readonly', permissionMode: 'plan' };
-    if (lower === 'edit' || lower === 'acceptEdits' || lower === 'accept-edits')
+    if (lower === 'edit' || lower === 'acceptedits' || lower === 'accept-edits')
       return { permission: 'edit', permissionMode: 'acceptEdits' };
     if (
       lower === 'danger' ||
-      lower === 'bypassPermissions' ||
+      lower === 'bypasspermissions' ||
       lower === 'danger-full-access' ||
       lower === 'danger_full_access'
     )
@@ -183,4 +183,22 @@ export function loadTemplates(cwd: string, harnessName?: string): Map<string, De
 
 export function loadAllTemplates(cwd: string): Map<string, DelegateTemplate> {
   return loadTemplates(cwd);
+}
+
+/**
+ * Which native permission string (if any) to hand the harness for this run.
+ *
+ * A template's native escape hatch (`permissionMode`/`sandbox`) applies only while the effective
+ * permission is still the template's own. Every harness's `buildArgs` prefers `nativePermission`
+ * over the normalized map, so passing it unconditionally would let a template's native mode
+ * silently override an explicit `allowDangerous` escalation — a per-call escalation would be
+ * quietly downgraded back to whatever the template declared.
+ */
+export function resolveNativePermission(
+  templatePermission: NormalizedPermission,
+  effectivePermission: NormalizedPermission,
+  nativePermission: string | undefined,
+): string | undefined {
+  if (!nativePermission) return undefined;
+  return effectivePermission === templatePermission ? nativePermission : undefined;
 }

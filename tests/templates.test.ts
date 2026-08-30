@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { loadTemplates, parseTemplate } from '../extensions/templates.ts';
+import { loadTemplates, parseTemplate, resolveNativePermission } from '../extensions/templates.ts';
 import { mapClaudeUsage } from '../extensions/usage.ts';
 
 test('parseTemplate extracts frontmatter and body', () => {
@@ -147,4 +147,24 @@ test('a project-local template verify command inherits the same trust gate as th
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('resolveNativePermission: honours the escape hatch on the template tier', () => {
+  // No escalation — the template's native mode reaches buildArgs (the pre-existing gap: it never did).
+  assert.equal(resolveNativePermission('readonly', 'readonly', 'plan'), 'plan');
+  assert.equal(resolveNativePermission('edit', 'edit', 'workspace-write'), 'workspace-write');
+  // A native danger template still runs its native mode once allowDangerous let it through.
+  assert.equal(resolveNativePermission('danger', 'danger', 'bypassPermissions'), 'bypassPermissions');
+});
+
+test('resolveNativePermission: an explicit escalation wins over the template native mode', () => {
+  // allowDangerous escalated readonly -> danger. Passing `plan` here would silently downgrade the
+  // run back to plan mode, since every buildArgs prefers nativePermission over the normalized map.
+  assert.equal(resolveNativePermission('readonly', 'danger', 'plan'), undefined);
+  assert.equal(resolveNativePermission('edit', 'danger', 'acceptEdits'), undefined);
+});
+
+test('resolveNativePermission: no native mode declared stays undefined', () => {
+  assert.equal(resolveNativePermission('readonly', 'readonly', undefined), undefined);
+  assert.equal(resolveNativePermission('edit', 'danger', undefined), undefined);
 });
