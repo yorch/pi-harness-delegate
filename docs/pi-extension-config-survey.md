@@ -15,6 +15,13 @@ merge right, but is the *only* package surveyed that (a) is read-only — no cre
 and (b) fails completely silently on malformed JSON, with no log line. Both are gaps relative to every
 comparable extension found, not inventions of a new standard.
 
+**Separately, and more urgently:** §5 below documents that this project's project-local-template trust
+gate (`isTrusted()`, `extensions/templates.ts`) diverges from pi's real trust model in a way that looks
+exploitable, not just non-standard — pi's trust decision lives outside the project directory and cannot
+be self-declared by repo content; this project's currently can. That finding is independent of the
+config-placement question this survey was originally scoped to, but it came up answering the same "what
+does pi's host API actually offer" question, so it's reported here rather than opening a second doc.
+
 ## 1. Method
 
 **Host:** `@earendil-works/pi-coding-agent@0.84.2`, read from a real npm install
@@ -88,7 +95,7 @@ load) — never framed as a place for an extension's *own* settings.
 
 **Conclusion:** there is no sanctioned "put your config in pi's settings.json" pattern, and no
 sanctioned writer/schema helper for extensions at all. Every extension below rolled its own — which is
-exactly why §5 asks whether a de-facto convention formed anyway.
+exactly why §6 asks whether a de-facto convention formed anyway.
 
 ## 3. Per-extension findings
 
@@ -231,7 +238,85 @@ extension-docs pattern), not a config file.
 | `@vigolium/piolium` | none found (session-scoped state only) | n/a | n/a | n/a | n/a | n/a |
 | **`pi-harness-delegate` (this repo, today)** | key `delegate` in pi's `settings.json` | **hand-edit only — no writer, no command** | per-field `typeof`/range checks (decent) | **fully silent `catch {}`** → defaults | README only | `claudeDelegate` → `delegate` migration exists, but **returns early**, silently dropping newer fields for anyone still on the legacy key |
 
-## 5. The convention, if there is one
+## 5. Project trust: `ctx.isProjectTrusted()` vs. this project's hand-rolled gate
+
+Requested follow-up, and the single most consequential finding in this survey after §2 — this is a
+security-gate correctness question, not a style question, so the evidence is laid out in full rather
+than summarized.
+
+**This project's gate.** `extensions/templates.ts:143`, `isTrusted(cwd)`, guards whether project-local
+delegate templates (`.pi/delegate/templates/`) load at all — and those templates can set
+`permission: danger` and ship a `verify:` command that `resolveVerifyPlan` runs host-side after the
+harness exits (see AGENTS.md's "Verify" bullet). It resolves as:
+
+```ts
+function isTrusted(cwd: string): boolean {
+  if (process.env.PI_TRUSTED === '1' || process.env.PI_DELEGATE_TRUSTED === '1') return true;
+  try {
+    return readFileSync(join(cwd, '.pi', 'trusted'), 'utf8').trim() === '1';
+  } catch {
+    return false;
+  }
+}
+```
+
+The env-var path is fine — it's under the operator's own control. **The file path is not**: it reads
+`<cwd>/.pi/trusted`, a path *inside the project directory being evaluated for trust*. Nothing stops that
+file from being part of the repository's own committed content.
+
+**pi's real trust model** (`ctx.isProjectTrusted()`, `ExtensionContext`, confirmed reachable and real —
+`dist/core/extensions/types.d.ts:232`) is backed by `ProjectTrustStore`
+(`dist/core/trust-manager.js`, `dist/core/trust-manager.d.ts`), read from decompiled source:
+
+- The store file is `join(agentDir, "trust.json")` (`trust-manager.js:172`) — i.e.
+  `~/.pi/agent/trust.json` by default. **Outside any project directory**, in pi's own global config dir.
+- It's a flat JSON object keyed by **canonicalized absolute path** → `true`/`false`
+  (`normalizeCwd`/`canonicalizePath`, `trust-manager.js:16-17`).
+- Lookup walks **upward** from `cwd` through parent directories until it finds an explicit entry
+  (`findNearestTrustEntry`, `trust-manager.js:19-30`) — so trusting a parent folder cascades to
+  subdirectories, but there is no path by which a *descendant* (the project itself) can inject an entry.
+- A decision is only ever written by: an interactive "Trust" / "Trust parent folder" / "Do not trust"
+  prompt (`getProjectTrustOptions`, offering exactly those choices plus a session-only option), the
+  user's own `defaultProjectTrust` setting (`"ask" | "always" | "never"`, part of pi's own closed
+  `Settings` type — a global preference, not something a cloned repo can set for itself), or a
+  `project_trust` extension handler — and that event fires **only for user/global-scope or CLI `-e`
+  extensions**; `docs/extensions.md:354` states plainly that "project-local extensions are not loaded
+  until after trust is resolved," closing the obvious circularity (a project can't ship an extension
+  that grants itself trust). pi's own `hasTrustRequiringProjectResources` gate additionally treats a
+  project's own `settings.json` as itself trust-requiring content — so even pi's project-scoped
+  *settings* can't be read pre-trust, let alone used to grant it.
+- `ctx.isProjectTrusted()` layers in "temporary trust decisions and CLI trust overrides" on top of the
+  saved file (`docs/extensions.md:969`) — a strictly larger notion of trust than the saved store alone,
+  but every source that feeds it is still anchored outside the project's own repo content.
+
+**The divergence, stated plainly:** pi's trust decision cannot be self-declared by the thing being
+evaluated. This project's can — `<cwd>/.pi/trusted` is repo content, and a `git clone` of an untrusted
+or actively malicious repository can ship that file pre-committed with the byte `1`. If that repo is
+cloned and `/delegate` is run from inside it, `isTrusted()` returns `true` on the **first** invocation,
+with no prompt, no env var, and no prior human decision — at which point `loadTemplates()` (line 176)
+loads that same repo's `.pi/delegate/templates/`, which can define `permission: danger` and a `verify:`
+command that executes on the host. This reads as a real, low-effort-to-exploit gap in exactly the
+control this project's own `templates.ts` comment says it exists for ("untrusted clones must not
+override builtins") — not a style mismatch with pi's convention, but the convention pi uses specifically
+to prevent this class of bug.
+
+**Do any surveyed extensions use `ctx.isProjectTrusted()`?** No — zero hits for
+`isProjectTrusted`/`project_trust`/`ProjectTrust` across all eight surveyed extensions' source
+(`pi-subagents`, `pi-mcp-adapter`, `pi-simplify`, `pi-lens`, `pi-devin-auth`,
+`@juicesharp/rpiv-ask-user-question`, `@vigolium/piolium`, `@yorch/pi-statusbar`), including
+`pi-subagents`, the one package that also reads a project-local settings file
+(`.pi/settings.json`/`.agents/settings.json` for its `subagents.watchdog` key, §3 above) — it does not
+gate that read on trust at all, as far as this survey found. So this project is not alone in skipping
+the official trust hook; it's alone (among those surveyed) in having built a *replacement* gate whose
+trust anchor is inside the thing it's gating. Skipping the check entirely (pi-subagents' apparent
+approach for a lower-stakes settings key) and building a broken version of the check are different bugs
+— the second is worse here because this project's own gate exists specifically to block exactly the
+`permission: danger` / `verify:` escalation path its docstring names.
+
+This project was told **not** to change `isTrusted()` in the current PR — a security gate deserves its
+own change with its own tests, decided with this evidence in hand, not folded into a docs PR.
+
+## 6. The convention, if there is one
 
 **No convention on placement.** Three of the five extensions with a real config surface use their own
 dedicated file (`pi-mcp-adapter`, `pi-lens`, `@juicesharp/...`); one uses only a `settings.json` key
@@ -268,11 +353,44 @@ So: **pi itself has no opinion, but the ecosystem has an unwritten quality bar f
 narrow on write, don't make the user hand-edit JSON forever" that this project currently misses on two
 of three.**
 
-## 6. Recommendations for `pi-harness-delegate`
+## 7. Recommendations for `pi-harness-delegate`
+
+**Scope check requested: does anyone store genuinely global/user-level preferences, or does everyone
+piggyback on pi's `settings.json`?** This project's config is global by nature (harness models,
+concurrency caps, transport selection — none of it is naturally per-project), so the question is worth
+answering explicitly rather than folding into §6's placement verdict. Answer: **every single extension
+surveyed that has any config at all has a global/user-level tier** — "nobody else has global config" is
+false. But *how* they store that global tier splits along the same own-file-vs-settings.json-key line as
+§6, it doesn't resolve it:
+
+| Package | Global config location | Also has a project tier? |
+| --- | --- | --- |
+| `pi-mcp-adapter` | own file, `~/.pi/agent/mcp.json` ("Pi global override" source) | yes — `.mcp.json`/`.pi/mcp.json` |
+| `pi-subagents` | own file, `.../extensions/subagent/config.json`, for most settings | yes — `subagents.watchdog` in project `.pi/settings.json` too |
+| `pi-lens` | own file, `~/.pi-lens/config.json` (outside `~/.pi/` entirely) | yes — `.pi-lens.json` walked upward |
+| `@juicesharp/rpiv-ask-user-question` | own file, XDG `~/.config/rpiv-ask-user-question/config.json` | **no** — global-only, no project variant at all |
+| `@yorch/pi-statusbar` | key `statusbar` in pi's `~/.pi/agent/settings.json` | **no** — global-only, no project variant at all |
+
+So the honest verdict, not manufactured: three own-file packages layer project-level on top of a global
+base; two settings.json-key packages (including this project's closest precedent, `pi-statusbar`, same
+author) are global-only with no project tier and see no need for one. `pi-harness-delegate` today is
+also global-only, no project tier — that puts it in the same bucket as `pi-statusbar` and
+`@juicesharp/...`, not an outlier. Nothing here argues for adding project-scoped config (§7 item 5 below
+still frames it as optional, driven by actual need) or for moving off `settings.json` — if anything, the
+two global-only precedents both landed on "key in settings.json" or "own tiny file," and this project's
+existing choice matches one of those two exactly.
 
 Prioritized; each states what's already fine so the parallel `feat/config-ux` implementation doesn't
 redo settled ground.
 
+0. **(Security, out of this survey's original scope, escalated because §5 found it here) Fix the
+   project-template trust gate before it's relied on further.** `isTrusted()`'s file-based check reads
+   trust from inside the project it's evaluating — the opposite of pi's own model, which anchors every
+   decision in `~/.pi/agent/trust.json`, outside the project, unwritable by repo content. This is not a
+   convention mismatch, it's the specific bug pi's model is designed to prevent. Not this PR's job to
+   fix (see §5's close) — flagged at priority 0 because it's a correctness/security issue, not a UX
+   preference, and should be triaged and scheduled independently of the config-UX work, ideally before
+   any change that makes project-local templates more prominent or easier to reach.
 1. **Stop failing silently on a malformed/invalid `settings.json`.** Every comparable extension logs.
    Add a `console.error`/`console.warn` (matching `pi-subagents`'/`pi-mcp-adapter`'s style) inside the
    `catch` in `loadConfig()` (`extensions/config.ts:158`) naming the file path and the underlying error,
@@ -311,8 +429,18 @@ redo settled ground.
    `status`; a `/delegate config` (show, per #3) would fold into the same family rather than needing a
    new command.
 
-## 7. Open questions / could not verify
+## 8. Open questions / could not verify
 
+- **Whether `isTrusted()`'s divergence (§5) has already been exploited or discussed** was not
+  researched — no issue-tracker or commit-history search was performed for this survey; the finding is
+  purely from reading current code against pi's current trust model.
+- **Whether `hasTrustRequiringProjectResources` or any other pi-side gate incidentally blocks this
+  project's `.pi/delegate/templates/`** (e.g. because `.pi/` itself triggers something upstream before
+  this project's own `isTrusted()` ever runs) was not verified by an actual clone-and-run repro — the
+  finding is from reading `trust-manager.js`/`.d.ts` and this project's `templates.ts` side by side, not
+  from an end-to-end exploit demonstration. A real repro (clone a repo with a committed
+  `.pi/trusted` containing `1` and a `.pi/delegate/templates/` entry, run `/delegate` in it fresh) would
+  make this conclusive rather than source-level-confident.
 - **`pi-lens`'s `$schema` support** implies a real JSON Schema file ships for editor autocomplete, but the
   schema file itself was not located/read — only the doc's mention of tolerating the key.
 - **`pi-mcp-adapter`'s `/mcp` panel UI** (`mcp-panel.ts`, `mcp-setup-panel.ts`) was not read in full — the
@@ -325,7 +453,7 @@ redo settled ground.
 - **The long tail of low-adoption `pi-package` packages** from the `npm search` sweep (`pi-spark`,
   `@outlit/pi`, `pi-subagents-j0k3r`, `@eko24ive/pi-ask`, and others) were not read in source depth —
   skimmed by name/description only. Given their adoption is a fraction of a percent of the packages
-  actually surveyed, this is judged not to change the convention verdict in §5, but is explicitly not a
+  actually surveyed, this is judged not to change the convention verdict in §6, but is explicitly not a
   claim that every pi extension in existence was checked.
 - **pi's roadmap**: whether an official extension-config mechanism is planned upstream was not
   researched (no changelog/issue-tracker search performed) — this survey only establishes the *current*
