@@ -161,18 +161,7 @@ verified with real `devin 3000.6.7` runs (see the doc's §8 errata for what impl
   to set Devin's model over this version's ACP surface.
 - `all`/a comma-list fan-out picks up Devin automatically once `devin` is installed (`detectAll()`).
 
-## 14. Future
-
-- Codex runs contribute **no tokens** to pi's session totals — `mapHarnessUsage` returns `undefined` when cost is unknown, and codex reports no cost under ChatGPT-plan auth. Revisit if pi ever accepts tokens-without-cost.
-- Verify codex's resume path against a captured resume transcript (currently derived from `--help` only).
-- Verify whether `--add-dir` exists on omp (absent from its help; inert today since `addDirs` defaults empty).
-- Run registry is count-then-acquire, so the cap is best-effort, not a hard mutex. Only worth hardening if the cap becomes a spend control — this also bounds `acquireSlot`'s `wait: true` polling: two waiters can still both observe a just-freed slot and both proceed.
-- Devin's `model` isn't wired over ACP — no verified way to set it on this version's ACP surface (`session/new`'s request has no model field; `configOptions` only appears in responses). Revisit if a `session/set_config_option`-shaped request turns up.
-- `maxConcurrent` per-harness UI + tests for the object shape.
-- `/delegate list --harness=...` and `history` harness filter polish.
-- See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "clearly worth doing" display/inspection items shipped in §12 above. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions, per-child drill-in transcript viewer, steering) is blocked upstream on the harness CLIs, not on this repo.
-
-## 15. ACP support assessment (research, not shipped)
+## 14. ACP support assessment (research, not shipped)
 
 **Status:** done (research) — [`docs/acp-harness-assessment.md`](docs/acp-harness-assessment.md)
 
@@ -194,7 +183,7 @@ findings, but argues for a capability-aware handshake in any follow-up implement
 
 ---
 
-## 16. ACP protocol/ecosystem research
+## 15. ACP protocol/ecosystem research
 
 **Status:** done (research, [`docs/acp-protocol-research.md`](docs/acp-protocol-research.md))
 
@@ -207,10 +196,10 @@ schema releases stale. Key findings:
   drafted breaking revision, and its own maintainers say v1 support isn't going away.
 - **`acp-runner.ts` sends `session/set_mode` unconditionally**, but the method (and `session/new`'s
   `modes` field) is optional per spec. Invisible today because Devin implements modes; would fail the
-  whole handshake against a mode-less ACP agent. Fixed in §17 below (capability-aware, hard error on no
+  whole handshake against a mode-less ACP agent. Fixed in §16 below (capability-aware, hard error on no
   capability signal, not a silent downgrade).
 - `initialize`'s negotiated `protocolVersion` is never checked against what we sent — harmless while only
-  `1` exists, cheap insurance to add before a v2-speaking agent shows up. Fixed in §17 below.
+  `1` exists, cheap insurance to add before a v2-speaking agent shows up. Fixed in §16 below.
 - The `acp-runner.ts` (transport, tolerates unknown `_meta`/vendor methods) vs. `devin.ts` (interprets
   `cognition.ai/*`) split matches the spec's own extensibility model exactly — no seam change needed.
 - Governance moved to a joint Zed/JetBrains model with a real registry (~40 agents, dozens of clients);
@@ -218,15 +207,15 @@ schema releases stale. Key findings:
 
 ---
 
-## 17. Configurable per-harness transport (shipped)
+## 16. Configurable per-harness transport (shipped)
 
 **Status:** done — `HarnessConfig.transport`, `extensions/config.ts`'s `resolveTransport`, `Harness.supportsTransports`/`buildAcpArgs`/`parseAcpLine`/`acpPermissionMap`, `acp-runner.ts`'s `acpView`.
 
-Turned §15's recommendation (configurable transport, not a switch) and §16's two flagged `acp-runner.ts`
+Turned §14's recommendation (configurable transport, not a switch) and §15's two flagged `acp-runner.ts`
 bugs into shipped code, gated on a live run this PR itself ran:
 
 - **opencode ships dual-transport** (`supportsTransports: ['stdout', 'acp']`, defaults to `stdout`) —
-  closing §15's one open question with a real write prompt under `build` mode: it never calls
+  closing §14's one open question with a real write prompt under `build` mode: it never calls
   `session/request_permission` (`tests/fixtures/opencode-acp-build-write.jsonl`), so `edit`/`danger`
   genuinely execute over ACP rather than silently no-op behind this project's auto-decline.
 - **amp/omp stays `['stdout']` only** — its ACP mode surface has 2 tiers against the stdout CLI's
@@ -239,14 +228,14 @@ bugs into shipped code, gated on a live run this PR itself ran:
 - `acp-runner.ts`'s `session/set_mode` is now capability-checked (via `session/new`/`session/load`'s
   `modes` field or a `configOptions` entry with `category: "mode"`) before being called, and a mode that
   can't be confirmed is a hard error, not a downgrade — every real agent captured so far advertises one
-  of the two signals, so this never fires today, but it's the general, correct shape §16 called for.
+  of the two signals, so this never fires today, but it's the general, correct shape §15 called for.
   `protocolVersion` is checked against what was sent, same section.
 - Config validated before `acquireSlot()`/spawn — misconfiguring `transport: 'acp'` for `claude` fails
   immediately with a clear message.
 
 ---
 
-## 18. Extension config conventions research
+## 17. Extension config conventions research
 
 **Status:** done (research) — [`docs/pi-extension-config-survey.md`](docs/pi-extension-config-survey.md)
 
@@ -278,12 +267,61 @@ no prompt at all — something pi's model cannot do by construction; and `PI_TRU
 `PI_DELEGATE_TRUSTED=1`, once set in a shell for one reviewed repo, blanket-trusts every directory
 `cd`'d into afterward for the life of that session, a mechanism with zero analog in pi's own model. Either
 path lets a hostile repo's `permission: danger` / `verify:`-carrying template load in a case pi itself
-would have gated. Not changed here — a security gate needs its own change with its own tests — but
-tracked for a dedicated fix.
+would have gated. Not changed here — a security gate needs its own change with its own tests — 
+**fixed in §19 below**.
+
+## 18. Config load provenance and `/delegate config`
+
+**Status:** done ([#33](https://github.com/yorch/pi-harness-delegate/pull/33))
+
+`loadConfig()` used to wrap everything in a bare `catch {}`, so an absent file, an absent `delegate` key
+and an unparseable `settings.json` were indistinguishable — all silently yielded defaults. Every
+comparable pi extension surveyed in §17 logs or warns; this repo was the only one that didn't.
+
+- `loadConfigWithSource()` is now the single read/parse point, returning `{config, source}` with the file
+  path, whether it exists, which key won (`delegate` / `claudeDelegate` / neither), any parse error, and
+  the raw winning value. `loadConfig()` is a thin wrapper, so callers and the single-read behavior are
+  unchanged.
+- `/delegate status` leads with that provenance. `/delegate config` prints raw-vs-effective config as a
+  paste-ready block; `/delegate config init` writes it — read-whole-file, replace only the `delegate` key,
+  atomic `tmp` + `renameSync`, and **refuses** rather than clobbering an unparseable file.
+- Corrects an earlier, wrong claim about the legacy key: `harnesses.<name>.transport` **does** migrate
+  under `claudeDelegate`. Only `defaultHarness` and a top-level `model` are genuinely unreachable there.
+  `/delegate config init` is the one-command fix, and never touches `claudeDelegate` itself.
+
+## 19. Security: project-local templates could self-declare trust
+
+**Status:** done ([#34](https://github.com/yorch/pi-harness-delegate/pull/34))
+
+`templates.ts`'s `isTrusted(cwd)` read `<cwd>/.pi/trusted` — **the trust anchor lived inside the content
+it was gating** — and honored `PI_TRUSTED` / `PI_DELEGATE_TRUSTED`, which have no analog in pi's own trust
+model and blanket-trust every directory for a shell session.
+
+Confirmed by working repro: a repo committing `.pi/trusted` = `1` gets its `.pi/delegate/templates/`
+loaded, **overriding a builtin** — an override of `review` widened `permission: readonly` to `edit`, and
+`resolveVerifyPlan` only skips `verify` at `readonly`, so the template's `verify:` string executed
+host-side via `sh -c`. Net: cloning a hostile repo and running `/delegate review` — a command users
+reasonably read as read-only — gave arbitrary host command execution.
+
+- `loadTemplates(cwd, harness?, trusted = false)` now **receives** trust instead of deciding it, defaulting
+  to untrusted, so a call site that forgets to pass it fails closed. `isTrusted()` deleted; both env vars
+  removed.
+- `index.ts` resolves trust once via a defensive `ctx.isProjectTrusted()` wrapper (pi's own store lives in
+  `~/.pi/agent/trust.json`, outside any project, resolved by walking upward) and threads it through every
+  call site. `/delegate status` reports when project templates were skipped and how to grant trust.
+- Behavior break, deliberate: `.pi/trusted` and `PI_TRUSTED` no longer grant trust. Use pi's `/trust` or
+  `defaultProjectTrust`.
+- The regression test was verified to **fail against the pre-fix implementation**, not merely pass against
+  the fixed one.
+
+## Future
+
+- Devin's `model` isn't wired over ACP — no verified way to set it on this version's ACP surface (`session/new`'s request has no model field; `configOptions` only appears in responses). Revisit if a `session/set_config_option`-shaped request turns up.
+- See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "clearly worth doing" display/inspection items shipped in §12 above. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions, per-child drill-in transcript viewer, steering) is blocked upstream on the harness CLIs, not on this repo.
 
 ---
 
 ## In-flight / TODO
 
-- [ ] Live integration tests against real binaries (fixtures cover parsing; nothing exercises a real spawn end-to-end).
+- [x] Live integration tests against real binaries — `tests/live.test.ts`, opt-in via `PI_DELEGATE_LIVE=1`, never runs in CI (#30).
 - [ ] Re-capture fixtures on each harness CLI upgrade — the shipped binary is the contract, not its docs. Both broken-args bugs would have been caught by one real run per harness.
