@@ -65,7 +65,6 @@
   "pi": {
     "extensions": [
       "./extensions/index.ts"
-    ],
-    "image": "https://raw.githubusercontent.com/yorch/pi-harness-delegate/main/docs/assets/claude-delegate-preview.png"
+    ]
   }
 }
