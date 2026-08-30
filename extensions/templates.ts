@@ -139,16 +139,6 @@ export function projectTemplatesDir(cwd: string, harness?: string): string {
   return join(cwd, '.pi', 'delegate', 'templates');
 }
 
-/** Minimal trust gate for project-local templates — untrusted clones must not override builtins. */
-function isTrusted(cwd: string): boolean {
-  if (process.env.PI_TRUSTED === '1' || process.env.PI_DELEGATE_TRUSTED === '1') return true;
-  try {
-    return readFileSync(join(cwd, '.pi', 'trusted'), 'utf8').trim() === '1';
-  } catch {
-    return false;
-  }
-}
-
 /** Legacy dirs for compat */
 function legacyUserTemplatesDir(): string {
   const dir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent');
@@ -158,8 +148,17 @@ function legacyProjectTemplatesDir(cwd: string): string {
   return join(cwd, '.pi', 'claude-delegate', 'templates');
 }
 
-/** Legacy root < shared < harness builtins < legacyUser < user < user/harness < legacyProject < project < project/harness (later wins). */
-export function loadTemplates(cwd: string, harnessName?: string): Map<string, DelegateTemplate> {
+/**
+ * Legacy root < shared < harness builtins < legacyUser < user < user/harness < legacyProject <
+ * project < project/harness (later wins).
+ *
+ * `trusted` gates the project-local tiers only (global/user tiers always load — they're the
+ * operator's own files, not the project's). It must come from pi's own trust store
+ * (`ctx.isProjectTrusted()`), never from anything inside `cwd` itself: a trust anchor that lives
+ * in the content it's supposed to gate can simply declare itself trusted. Callers that fail to
+ * resolve trust should pass `false` — untrusted is the safe default.
+ */
+export function loadTemplates(cwd: string, harnessName?: string, trusted = false): Map<string, DelegateTemplate> {
   const out = new Map<string, DelegateTemplate>();
   const harness = harnessName ?? 'claude';
   // legacy root builtins (templates/*.md) lowest — for migration from pi-claude-delegate
@@ -173,7 +172,7 @@ export function loadTemplates(cwd: string, harnessName?: string): Map<string, De
   loadDir(userTemplatesDir(), out);
   loadDir(userTemplatesDir(harness), out);
   // project locals: legacy before new so new wins — only if trusted
-  if (isTrusted(cwd)) {
+  if (trusted) {
     loadDir(legacyProjectTemplatesDir(cwd), out);
     loadDir(projectTemplatesDir(cwd), out);
     loadDir(projectTemplatesDir(cwd, harness), out);
@@ -181,8 +180,8 @@ export function loadTemplates(cwd: string, harnessName?: string): Map<string, De
   return out;
 }
 
-export function loadAllTemplates(cwd: string): Map<string, DelegateTemplate> {
-  return loadTemplates(cwd);
+export function loadAllTemplates(cwd: string, trusted = false): Map<string, DelegateTemplate> {
+  return loadTemplates(cwd, undefined, trusted);
 }
 
 /**

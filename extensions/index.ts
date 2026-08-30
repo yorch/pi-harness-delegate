@@ -128,8 +128,9 @@ const FANOUT_LINGER_MS = 3000;
  * callers must not let this flip a run's `isError`.
  *
  * Trust model: a verify command can only come from two places — on-disk template frontmatter
- * (project-local templates are already behind `isTrusted()`) or a human typing `/delegate
- * --verify=<cmd>` at the CLI. It is deliberately **not** a `delegate` tool parameter: a tool
+ * (project-local templates are already gated by `isProjectTrusted(ctx)` — pi's own trust store,
+ * never anything inside the project itself) or a human typing `/delegate --verify=<cmd>` at the
+ * CLI. It is deliberately **not** a `delegate` tool parameter: a tool
  * param is set by the model, whose context includes repo content and delegated-harness output —
  * both attacker-influenceable, so a model-settable `verify` would be a prompt-injection ->
  * arbitrary-host-command path (e.g. injected text in a reviewed file steering the parent agent
@@ -177,6 +178,20 @@ function outputsDirFor(harness: string): string {
   return getOutputsDir(harness);
 }
 
+/**
+ * Whether pi's own trust store (`ctx.isProjectTrusted()`, backed by `~/.pi/agent/trust.json`,
+ * outside any project) considers `ctx.cwd` trusted. This is the sole source of truth for whether
+ * project-local delegate templates load — see the trust-tier comment on `loadTemplates`. Fails
+ * closed (untrusted) if the host is old enough not to expose the method, or if it throws.
+ */
+function isProjectTrusted(ctx: ExtensionContext): boolean {
+  try {
+    return typeof ctx.isProjectTrusted === 'function' && ctx.isProjectTrusted() === true;
+  } catch {
+    return false;
+  }
+}
+
 function formatTemplateRow(t: DelegateTemplate): string {
   const parts = [
     t.name,
@@ -190,15 +205,16 @@ function formatTemplateRow(t: DelegateTemplate): string {
 
 async function showModes(ctx: ExtensionContext, harnessFilter?: string): Promise<void> {
   const all = new Map<string, DelegateTemplate>();
+  const trusted = isProjectTrusted(ctx);
   // collect from all harnesses if no filter
   if (harnessFilter) {
-    for (const [k, v] of loadTemplates(ctx.cwd, harnessFilter)) all.set(k, v);
+    for (const [k, v] of loadTemplates(ctx.cwd, harnessFilter, trusted)) all.set(k, v);
   } else {
     for (const h of [...HARNESS_NAMES, 'shared']) {
-      for (const [k, v] of loadTemplates(ctx.cwd, h)) if (!all.has(k)) all.set(k, v);
+      for (const [k, v] of loadTemplates(ctx.cwd, h, trusted)) if (!all.has(k)) all.set(k, v);
     }
     // also load without harness param
-    for (const [k, v] of loadTemplates(ctx.cwd)) if (!all.has(k)) all.set(k, v);
+    for (const [k, v] of loadTemplates(ctx.cwd, undefined, trusted)) if (!all.has(k)) all.set(k, v);
   }
   const rows = [...all.values()].map(formatTemplateRow);
   if (!ctx.hasUI) {
@@ -406,12 +422,18 @@ async function showHistory(ctx: ExtensionContext, harnessFilter?: string): Promi
 async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promise<void> {
   const cfg = loadConfig();
   const detection = await detectAll();
+  const trusted = isProjectTrusted(ctx);
   const allHarnesses = harnessFilter ? [harnessFilter].filter(h => isKnownHarness(h)) : HARNESS_NAMES;
   const lines: string[] = [];
   lines.push(`delegate — status${harnessFilter ? ` (${harnessFilter})` : ''}`);
   lines.push(`defaultHarness: ${cfg.defaultHarness} · defaultMode: ${cfg.defaultMode} · model: ${cfg.model ?? '—'}`);
   lines.push(
     `maxConcurrent: ${typeof cfg.maxConcurrent === 'number' ? cfg.maxConcurrent : JSON.stringify(cfg.maxConcurrent)} · maxTranscripts: ${cfg.maxTranscripts}`,
+  );
+  lines.push(
+    trusted
+      ? 'project trust: trusted — project-local templates (.pi/delegate/templates/) are loaded'
+      : "project trust: untrusted — project-local templates skipped (trust this project via pi's trust prompt, or set defaultProjectTrust, to load them)",
   );
   lines.push('');
   lines.push('harness              binary   ok  version              outputs  templates  active');
@@ -428,7 +450,7 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
     } catch {}
     let templates = 0;
     try {
-      templates = loadTemplates(ctx.cwd, h).size;
+      templates = loadTemplates(ctx.cwd, h, trusted).size;
     } catch {}
     // cross-process count via the file registry, combined with the in-process counter as a fallback
     const active = activeCount(h);
@@ -529,7 +551,7 @@ async function delegate(
     throw new Error(
       `unknown harness "${harnessName}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
     );
-  const templates = loadTemplates(ctx.cwd, harnessName);
+  const templates = loadTemplates(ctx.cwd, harnessName, isProjectTrusted(ctx));
   const mode = opts.mode || config.defaultMode;
   const template = templates.get(mode);
   if (!template)
@@ -1541,8 +1563,9 @@ export default function (pi: ExtensionAPI) {
     // occupying a concurrency slot.
     const specs: FanoutSpec[] = [];
     const immediateFailures: FanoutRunSummary[] = [];
+    const trusted = isProjectTrusted(ctx);
     for (const h of resolved) {
-      const templates = loadTemplates(ctx.cwd, h);
+      const templates = loadTemplates(ctx.cwd, h, trusted);
       const resolvedTaskScope = resolveDefaults(parsed, templates);
       const template = parsed.mode ? templates.get(parsed.mode) : undefined;
       if (!resolvedTaskScope) {
@@ -1678,9 +1701,10 @@ export default function (pi: ExtensionAPI) {
     // combine forced harness + args for parsing
     const rawForParse = forcedHarness ? `${forcedHarness} ${args}`.trim() : args;
     // gather known modes across all harnesses for parsing
+    const trusted = isProjectTrusted(ctx);
     const allModes = new Set<string>();
-    for (const h of HARNESS_NAMES) for (const k of loadTemplates(ctx.cwd, h).keys()) allModes.add(k);
-    for (const k of loadTemplates(ctx.cwd).keys()) allModes.add(k);
+    for (const h of HARNESS_NAMES) for (const k of loadTemplates(ctx.cwd, h, trusted).keys()) allModes.add(k);
+    for (const k of loadTemplates(ctx.cwd, undefined, trusted).keys()) allModes.add(k);
     const knownHarnessesSet = new Set([...HARNESS_NAMES, ...Object.keys(ALIASES)]);
     const parsed = parseDelegateCommand(rawForParse, allModes, knownHarnessesSet);
     // if forcedHarness provided, it wins
@@ -1694,7 +1718,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     const harnessName = parsed.harness ?? loadConfig().defaultHarness ?? 'claude';
-    const templates = loadTemplates(ctx.cwd, harnessName);
+    const templates = loadTemplates(ctx.cwd, harnessName, trusted);
     const resolved = resolveDefaults(parsed, templates);
     const template = parsed.mode ? templates.get(parsed.mode) : undefined;
     const isDanger =
