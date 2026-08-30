@@ -194,6 +194,29 @@ findings, but argues for a capability-aware handshake in any follow-up implement
 
 ---
 
+## 15. ACP protocol/ecosystem research
+
+**Status:** done (research, [`docs/acp-protocol-research.md`](docs/acp-protocol-research.md))
+
+Read against schema `v1` release `1.21.0` (2026-08-20) and `@agentclientprotocol/sdk@1.4.0` — not the
+old, now-superseded `@zed-industries/agent-client-protocol` npm name, which is ~11 months / dozens of
+schema releases stale. Key findings:
+
+- Wire `protocolVersion: 1` (as pinned in `acp-runner.ts`) is correct and durable — the schema has grown
+  purely additively (1.0.0 → 1.21.0) without a wire bump; a v2 exists only as an unreleased, actively
+  drafted breaking revision, and its own maintainers say v1 support isn't going away.
+- **`acp-runner.ts` sends `session/set_mode` unconditionally**, but the method (and `session/new`'s
+  `modes` field) is optional per spec. Invisible today because Devin implements modes; would fail the
+  whole handshake against a mode-less ACP agent. Small fix, not yet applied — see the doc's §4/§8.
+- `initialize`'s negotiated `protocolVersion` is never checked against what we sent — harmless while only
+  `1` exists, cheap insurance to add before a v2-speaking agent shows up.
+- The `acp-runner.ts` (transport, tolerates unknown `_meta`/vendor methods) vs. `devin.ts` (interprets
+  `cognition.ai/*`) split matches the spec's own extensibility model exactly — no seam change needed.
+- Governance moved to a joint Zed/JetBrains model with a real registry (~40 agents, dozens of clients);
+  ACP reads as an actively-invested cross-vendor standard, not a single-vendor feature.
+
+---
+
 ## In-flight / TODO
 
 - [ ] Live integration tests against real binaries (fixtures cover parsing; nothing exercises a real spawn end-to-end).
