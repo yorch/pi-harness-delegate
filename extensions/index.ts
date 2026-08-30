@@ -69,6 +69,7 @@ import {
   loadConfigWithSource,
   resolveModelForHarness,
   resolveTransport,
+  writeDelegateConfig,
 } from './config.ts';
 import {
   ALIASES,
@@ -498,8 +499,8 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
  * `/delegate config` — the discoverability gap `/delegate status`'s provenance line only hints at:
  * shows exactly what was read from `settings.json` (or why it wasn't) plus the effective config
  * with defaults filled in, formatted as a paste-ready JSON block under the `delegate` key. Print-
- * only — never writes to `settings.json` itself (it's pi's file, holding pi's own keys too; a
- * read-modify-write there is a follow-up decision, not something to do speculatively).
+ * only — writing is a separate, explicit action (`/delegate config init`, below), never triggered
+ * from this default view.
  */
 async function showConfig(ctx: ExtensionContext): Promise<void> {
   const result = loadConfigWithSource();
@@ -529,6 +530,24 @@ async function showConfig(ctx: ExtensionContext): Promise<void> {
       invalidate() {},
     };
   });
+}
+
+/**
+ * `/delegate config init` — the one place this extension ever writes to `settings.json`, and only
+ * because a human explicitly typed this subcommand. Writes the current effective config (defaults
+ * merged with whatever was already on disk) into the `delegate` key via `writeDelegateConfig()`
+ * (read-modify-write, atomic, refuses on an unparseable file rather than clobbering it). This is
+ * also the practical fix for the legacy-`claudeDelegate`-only gap `describeConfigSource` warns
+ * about: writing an explicit `delegate` key (with the correctly-resolved values already folded
+ * in — the legacy migration already ran before this point) makes it win from then on, without
+ * this command ever touching or deleting the old `claudeDelegate` key itself.
+ */
+async function initConfig(ctx: ExtensionContext): Promise<void> {
+  const result = loadConfigWithSource();
+  const write = writeDelegateConfig(result.config);
+  const msg = write.ok ? `✓ ${write.message}` : `✗ ${write.message}`;
+  if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
+  else ctx.ui.notify?.(msg, write.ok ? 'info' : 'warning');
 }
 
 function buildPrompt(
@@ -1671,6 +1690,10 @@ export default function (pi: ExtensionAPI) {
         forcedHarness ??
         (flagMatch ? flagMatch[1].toLowerCase() : maybeH && isKnownHarness(maybeH) ? maybeH : undefined);
       await showStatus(ctx, h);
+      return;
+    }
+    if (subLower === 'config init') {
+      await initConfig(ctx);
       return;
     }
     if (subLower === 'config') {
