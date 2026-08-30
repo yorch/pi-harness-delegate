@@ -122,17 +122,19 @@ You are a senior engineer delegated by the pi coding agent.
 
 - **Sources, deliberately limited:** a verify command can only come from a template's `verify:` frontmatter, or a human typing `/delegate --verify="<cmd>"` (quotes needed for multi-word commands) — the call-level value wins over the template's. **It is not a parameter on the `delegate` tool** — that's on purpose, not an oversight: a tool param is set by the model, and the model's context includes repo content and delegated-harness output, both of which an attacker could influence, so a model-settable verify command would be a prompt-injection → arbitrary-host-command path. A model that wants verification simply picks a template that declares one.
 - **Never runs on a `readonly` template.** `readonly` (`review`/`plan`/`security-audit`) guarantees no execution or modification — a verify command riding along on one would quietly break that guarantee. If a `readonly` template (or override) has a `verify` configured, it's recorded as skipped (`### Verify: \`cmd\`` / `⊘ skipped (readonly run)`) rather than run, and never silently dropped.
-- A project-local template's `verify` command is gated by the same trust check (`PI_TRUSTED=1` / `.pi/trusted`) as the rest of the template.
+- A project-local template's `verify` command is gated by the same project-trust check as the rest of the template.
 
 **Template sources (later wins):**
 
 - `templates/shared/*.md` — portable prompt bodies
 - `templates/<harness>/*.md` — harness-specific frontmatter (built-ins)
 - `~/.pi/agent/delegate/templates/<harness>/<name>.md` (global)
-- `.pi/delegate/templates/<harness>/<name>.md` (project — when trusted)
+- `.pi/delegate/templates/<harness>/<name>.md` (project — only when the project is trusted, see below)
 - Legacy `~/.pi/agent/claude-delegate/templates/` and `.pi/claude-delegate/templates/` still loaded for migration
 
 Custom templates are just files dropped in the above dirs — any registered name becomes a valid `mode`.
+
+**Project trust:** project-local templates (`.pi/delegate/templates/`) load only when pi itself considers the current project trusted (`ctx.isProjectTrusted()`, backed by pi's own trust store outside the project — the same trust that gates other project-scoped behavior). Trust it via pi's own trust prompt (shown the first time you open an untrusted directory) or your `defaultProjectTrust` setting; `/delegate status` reports whether the current project is trusted and, if not, that project-local templates are being skipped. There is **no way to grant trust from inside the project** — no `.pi/trusted` file, no environment variable. Earlier versions supported both (`.pi/trusted` containing `1`, or `PI_TRUSTED=1`/`PI_DELEGATE_TRUSTED=1` in the environment); both were removed as a security fix — a repo could commit `.pi/trusted` and declare itself trusted, letting a cloned hostile repo's templates silently override a builtin (e.g. widening `review` from `readonly` to `edit` and attaching a `verify:` command that runs host-side). If you relied on either, switch to pi's trust prompt or `defaultProjectTrust`.
 
 ## How the main session consumes the output
 
