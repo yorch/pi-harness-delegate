@@ -6,11 +6,15 @@
  * registry I/O failures never break a delegation — callers should combine this with their own
  * in-process counters as a fallback.
  *
- * Concurrency cap is best-effort, not a hard mutex: `countActiveRuns()` (read) and
- * `acquireRun()` (write) are two separate steps with no lock between them, so two pi
- * processes starting at the same instant can both observe a count under the limit and both
- * proceed — `maxConcurrent` can be exceeded by a small margin under a tight race. This is a
- * deliberate simplicity tradeoff (see AGENTS.md); do not rely on it for a hard cap.
+ * `acquireRun()` + `countActiveRuns()` alone are a plain check-then-act pair: read the count,
+ * decide, write — with no lock between the read and the write, so two pi processes starting at
+ * the same instant can both observe a count under the limit and both proceed, over-admitting for
+ * the full lifetime of both runs. `acquireRunWithinLimits()` below closes that specific window by
+ * re-verifying *after* writing: a write that turns out to push either count over its limit is
+ * undone immediately, so the cap can never be permanently exceeded — see its own doc comment for
+ * exactly what guarantee that is (and isn't). Callers that don't need the cap enforced — `/delegate
+ * status`'s display, or a caller happy with the plain best-effort behavior — can still use
+ * `acquireRun`/`countActiveRuns` directly.
  */
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -87,4 +91,45 @@ export function countActiveRuns(harness?: string): number {
     }
   }
   return count;
+}
+
+export type AcquireWithinLimitsResult =
+  | { status: 'acquired'; handle: RunHandle }
+  /** Writing succeeded, but the run would push a limit over the top — undone, nothing held. */
+  | { status: 'full' }
+  /** Registry I/O failed — best-effort, same as `acquireRun` returning null: caller should fall
+   *  back to in-process-only accounting and proceed rather than block the run. */
+  | { status: 'unavailable' };
+
+/**
+ * Register an active run, then atomically-in-effect verify it's still within `maxGlobal` and
+ * `maxPerHarness` (either `<= 0` means "no limit" for that dimension) — undoing the registration
+ * if not. This turns the classic count-then-act race into a write-then-recheck one: because the
+ * recheck happens strictly *after* the write is committed to disk, whichever of two racing
+ * processes writes last is guaranteed to see both entries and correctly back off — over-admission
+ * (more than the limit standing at once) is impossible by construction, unlike plain
+ * `countActiveRuns()` + `acquireRun()`.
+ *
+ * This is not a perfect mutex, and doesn't try to be: in a tight enough multi-way race, more than
+ * one contender can each write, then each see the other's (or others') entry when it rechecks, and
+ * each concludes it's over the limit and backs off — even though exactly one of them could have
+ * fit. That's a transient *under*-admission (self-heals on the caller's next attempt, e.g. via
+ * `acquireSlot({wait: true})`'s poll loop) — the property this function actually guarantees is
+ * that the limit is never exceeded, not that it's always saturated.
+ */
+export function acquireRunWithinLimits(
+  harness: string,
+  mode: string,
+  maxGlobal: number,
+  maxPerHarness: number,
+): AcquireWithinLimitsResult {
+  const handle = acquireRun(harness, mode);
+  if (!handle) return { status: 'unavailable' };
+  const overGlobal = maxGlobal > 0 && countActiveRuns() > maxGlobal;
+  const overHarness = maxPerHarness > 0 && countActiveRuns(harness) > maxPerHarness;
+  if (overGlobal || overHarness) {
+    releaseRun(handle);
+    return { status: 'full' };
+  }
+  return { status: 'acquired', handle };
 }

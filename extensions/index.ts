@@ -50,10 +50,17 @@ import {
   ToolCallIndex,
   type VerifyResult,
 } from './activity.ts';
-import { isFanoutSpec, parseDelegateCommand, resolveDefaults, resolveHarnessList } from './command.ts';
+import {
+  isFanoutSpec,
+  parseDelegateCommand,
+  resolveDefaults,
+  resolveHarnessFilter,
+  resolveHarnessList,
+} from './command.ts';
 import { acquireSlot, activeCount } from './concurrency.ts';
 import {
   type DelegateConfig,
+  getMaxConcurrent,
   outputsDir as getOutputsDir,
   legacyOutputsDir,
   loadConfig,
@@ -358,6 +365,7 @@ async function showHistory(ctx: ExtensionContext, harnessFilter?: string): Promi
     return;
   }
   if (!ctx.hasUI) {
+    if (harnessFilter) process.stdout.write(`delegate — history (${harnessFilter})\n`);
     for (const e of entries)
       process.stdout.write(`${e.harness} ${e.mode} · ${formatCost(e.cost)} · ${e.sessionId ?? '-'}\n`);
     return;
@@ -378,7 +386,10 @@ async function showHistory(ctx: ExtensionContext, harnessFilter?: string): Promi
     list.onSelect = item => done(item.value);
     list.onCancel = () => done(undefined);
     return {
-      render: (w: number) => list.render(w),
+      render: (w: number) => {
+        const rows = list.render(w);
+        return harnessFilter ? [theme.fg('accent', `delegate — history (${harnessFilter})`), ...rows] : rows;
+      },
       invalidate: () => list.invalidate(),
       handleInput: (data: string) => {
         list.handleInput(data);
@@ -421,9 +432,11 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
     } catch {}
     // cross-process count via the file registry, combined with the in-process counter as a fallback
     const active = activeCount(h);
+    const cap = getMaxConcurrent(cfg, h);
+    const activeCol = `${active}/${cap > 0 ? cap : '∞'}`;
     const hint = !det.ok && det.hint ? `  ← ${det.hint}` : '';
     lines.push(
-      `${h.padEnd(20)} ${bin.padEnd(8)} ${ok.padEnd(3)} ${ver.padEnd(20)} ${String(outputs).padEnd(8)} ${String(templates).padEnd(10)} ${active}${hint}`,
+      `${h.padEnd(20)} ${bin.padEnd(8)} ${ok.padEnd(3)} ${ver.padEnd(20)} ${String(outputs).padEnd(8)} ${String(templates).padEnd(10)} ${activeCol}${hint}`,
     );
   }
   const historyEntries = harnessFilter ? readAllHistory().filter(e => e.harness === harnessFilter) : readAllHistory();
@@ -436,9 +449,10 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
   }
   if (!harnessFilter) lines.push(`  total: ${formatSpend(spend.total)}`);
   if (!harnessFilter) {
+    const globalCap = getMaxConcurrent(cfg);
     lines.push('');
     lines.push(
-      `global active: ${activeCount()} · aliases: ${
+      `global active: ${activeCount()}/${globalCap > 0 ? globalCap : '∞'} · aliases: ${
         Object.entries(ALIASES)
           .map(([k, v]) => `${k}→${v}`)
           .join(', ') || '—'
@@ -1619,7 +1633,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     // extract --harness flag for list/history subcommands
-    const harnessFlag = sub.match(/--harness=([^\s]+)/)?.[1]?.toLowerCase();
+    const harnessFlag = sub.match(/--harness=([^\s]+)/)?.[1];
     if (sub === 'watch' || sub === 'show') {
       if (activeOverlay) {
         activeOverlay.show();
@@ -1629,35 +1643,35 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
+    // Shared by list/history: resolve their (optional) harness filter to a canonical name via the
+    // same alias/case rules (`omp` -> `amp`, any case), and reject a word that matches nothing —
+    // rather than each falling back to silently showing an unfiltered or empty result.
+    const filterHarness = (bareWord: string | undefined): string | undefined | 'unknown' => {
+      if (forcedHarness) return forcedHarness;
+      const resolution = resolveHarnessFilter(harnessFlag ?? bareWord, {
+        isKnown: isKnownHarness,
+        aliasOf: resolveHarnessName,
+      });
+      if (resolution.kind === 'unknown') {
+        const msg = `unknown harness "${resolution.requested}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`;
+        if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
+        else ctx.ui.notify?.(msg, 'warning');
+        return 'unknown';
+      }
+      return resolution.kind === 'known' ? resolution.harness : undefined;
+    };
     if (sub === 'list' || subLower.startsWith('list ')) {
-      const h =
-        forcedHarness ??
-        harnessFlag ??
-        (subLower.startsWith('list ') ? sub.slice(5).trim().split(/\s+/)[0]?.toLowerCase() : undefined);
-      if (h && isKnownHarness(h)) {
-        await showModes(ctx, h);
-        return;
-      }
-      if (sub === 'list' || subLower === `list --harness=${h}`) {
-        await showModes(ctx, forcedHarness ?? h);
-        return;
-      }
-      // fallback: list without filter or with unknown word — show filtered if known, otherwise all
-      await showModes(ctx, forcedHarness);
+      const h = filterHarness(subLower.startsWith('list ') ? sub.split(/\s+/)[1] : undefined);
+      if (h === 'unknown') return;
+      await showModes(ctx, h);
       return;
     }
     if (sub === 'history' || sub === 'logs' || subLower.startsWith('history ') || subLower.startsWith('logs ')) {
-      const h =
-        forcedHarness ??
-        harnessFlag ??
-        (subLower.startsWith('history ') || subLower.startsWith('logs ')
-          ? sub.split(/\s+/)[1]?.toLowerCase()
-          : undefined);
-      if (h && isKnownHarness(h)) {
-        await showHistory(ctx, h);
-        return;
-      }
-      await showHistory(ctx, forcedHarness);
+      const h = filterHarness(
+        subLower.startsWith('history ') || subLower.startsWith('logs ') ? sub.split(/\s+/)[1] : undefined,
+      );
+      if (h === 'unknown') return;
+      await showHistory(ctx, h);
       return;
     }
 

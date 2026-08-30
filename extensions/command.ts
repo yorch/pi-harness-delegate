@@ -92,6 +92,27 @@ export function isFanoutSpec(harness: string | undefined): boolean {
   return lower === 'all' || lower.includes(',');
 }
 
+export type HarnessFilterResolution =
+  | { kind: 'none' } // no filter word given
+  | { kind: 'known'; harness: string } // resolved to its canonical name (aliases/case normalized)
+  | { kind: 'unknown'; requested: string }; // word given, but not a known harness or alias
+
+/**
+ * Resolve a single optional harness-filter word — as used by `/delegate list`/`history`'s bare
+ * word or `--harness=` flag — to its canonical name via `aliasOf`, case-insensitively, so `omp`,
+ * `OMP`, and `amp` all filter identically. Pure and shared by both subcommands so they can't drift
+ * on alias/case handling the way they once did.
+ */
+export function resolveHarnessFilter(
+  word: string | undefined,
+  opts: { isKnown: (name: string) => boolean; aliasOf: (name: string) => string },
+): HarnessFilterResolution {
+  if (!word) return { kind: 'none' };
+  const lower = word.toLowerCase();
+  if (!opts.isKnown(lower)) return { kind: 'unknown', requested: word };
+  return { kind: 'known', harness: opts.aliasOf(lower) };
+}
+
 export interface HarnessListResolution {
   /** Canonical harness names to run, in request order, deduped. */
   resolved: string[];

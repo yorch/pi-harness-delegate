@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isFanoutSpec, parseDelegateCommand, resolveHarnessList } from '../extensions/command.ts';
+import { isFanoutSpec, parseDelegateCommand, resolveHarnessFilter, resolveHarnessList } from '../extensions/command.ts';
 
 const MODES = new Set(['review', 'plan', 'implement', 'general']);
 const HARNESSES = new Set(['claude', 'codex', 'opencode', 'amp', 'omp']);
@@ -112,4 +112,39 @@ test('resolveHarnessList reports uninstalled harnesses as skipped, not failed', 
   assert.deepEqual(r.resolved, ['claude']);
   assert.deepEqual(r.skipped, ['codex']);
   assert.deepEqual(r.unknown, []);
+});
+
+const filterOpts = {
+  isKnown: (name: string) => ['claude', 'codex', 'opencode', 'amp', 'omp'].includes(name),
+  aliasOf: (name: string) => (name === 'omp' ? 'amp' : name),
+};
+
+test('resolveHarnessFilter: no word given -> no filter', () => {
+  assert.deepEqual(resolveHarnessFilter(undefined, filterOpts), { kind: 'none' });
+});
+
+test('resolveHarnessFilter: a known harness resolves to itself', () => {
+  assert.deepEqual(resolveHarnessFilter('claude', filterOpts), { kind: 'known', harness: 'claude' });
+});
+
+test('resolveHarnessFilter: an alias resolves to its canonical name', () => {
+  assert.deepEqual(resolveHarnessFilter('omp', filterOpts), { kind: 'known', harness: 'amp' });
+});
+
+test('resolveHarnessFilter: is case-insensitive for both known names and aliases', () => {
+  assert.deepEqual(resolveHarnessFilter('CLAUDE', filterOpts), { kind: 'known', harness: 'claude' });
+  assert.deepEqual(resolveHarnessFilter('OMP', filterOpts), { kind: 'known', harness: 'amp' });
+});
+
+test('resolveHarnessFilter: an unrecognized word is reported, not silently dropped', () => {
+  assert.deepEqual(resolveHarnessFilter('bogus', filterOpts), { kind: 'unknown', requested: 'bogus' });
+});
+
+test('resolveHarnessFilter: against the real registry, list and history-style lookups agree on omp -> amp', async () => {
+  const { isKnownHarness, resolveHarnessName } = await import('../extensions/harnesses/registry.ts');
+  const real = { isKnown: isKnownHarness, aliasOf: resolveHarnessName };
+  assert.deepEqual(resolveHarnessFilter('omp', real), { kind: 'known', harness: 'amp' });
+  assert.deepEqual(resolveHarnessFilter('OMP', real), { kind: 'known', harness: 'amp' });
+  assert.deepEqual(resolveHarnessFilter('amp', real), { kind: 'known', harness: 'amp' });
+  assert.deepEqual(resolveHarnessFilter('not-a-harness', real), { kind: 'unknown', requested: 'not-a-harness' });
 });
