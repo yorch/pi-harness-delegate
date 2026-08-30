@@ -4,7 +4,12 @@ import { parseAmpLine, resolveAmpBinary } from '../extensions/harnesses/amp.ts';
 import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
 import { parseCodexLine } from '../extensions/harnesses/codex.ts';
 import { parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
-import { getHarness, HARNESS_NAMES, resolveHarnessName } from '../extensions/harnesses/registry.ts';
+import {
+  getHarness,
+  HARNESS_NAMES,
+  isNativeDangerPermission,
+  resolveHarnessName,
+} from '../extensions/harnesses/registry.ts';
 
 test('claude harness parses stream deltas and result', () => {
   const state = { streamedText: '', activities: [], result: null };
@@ -111,4 +116,26 @@ test('harness buildArgs respect permission', () => {
   assert.ok(codex);
   const cArgsRo = codex.buildArgs({ prompt: 'hi', cwd: '/tmp', permission: 'readonly' });
   assert.ok(cArgsRo.includes('read-only'));
+});
+
+test('isNativeDangerPermission: every harness danger mode is gated', () => {
+  // The bug this closes: `yolo` (amp) and `bypass` (devin) are not legacy spellings, so the old
+  // hardcoded trio let them through as an `unknown native` while the run was recorded as `edit`.
+  assert.equal(isNativeDangerPermission(getHarness('amp'), 'yolo'), true);
+  assert.equal(isNativeDangerPermission(getHarness('devin'), 'bypass'), true);
+  assert.equal(isNativeDangerPermission(getHarness('claude'), 'bypassPermissions'), true);
+  assert.equal(isNativeDangerPermission(getHarness('codex'), 'danger-full-access'), true);
+  // Multi-token danger is compared joined, not per token.
+  assert.equal(isNativeDangerPermission(getHarness('opencode'), 'build --auto'), true);
+});
+
+test('isNativeDangerPermission: non-danger natives are not gated', () => {
+  // `build` alone is opencode's EDIT token; gating it would block legitimate edit templates.
+  assert.equal(isNativeDangerPermission(getHarness('opencode'), 'build'), false);
+  assert.equal(isNativeDangerPermission(getHarness('devin'), 'ask'), false);
+  assert.equal(isNativeDangerPermission(getHarness('devin'), 'smart'), false);
+  assert.equal(isNativeDangerPermission(getHarness('claude'), 'plan'), false);
+  assert.equal(isNativeDangerPermission(getHarness('amp'), undefined), false);
+  // Legacy spellings stay gated regardless of which harness is selected.
+  assert.equal(isNativeDangerPermission(getHarness('opencode'), 'bypassPermissions'), true);
 });

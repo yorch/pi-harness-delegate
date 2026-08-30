@@ -65,6 +65,7 @@ import {
   getHarness,
   HARNESS_NAMES,
   isKnownHarness,
+  isNativeDangerPermission,
   resolveHarnessName,
 } from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
@@ -73,7 +74,7 @@ import { NotifyBatcher } from './notify.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
 import { runHarness } from './runner.ts';
-import { type DelegateTemplate, loadTemplates } from './templates.ts';
+import { type DelegateTemplate, loadTemplates, resolveNativePermission } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
 
 /** Render a possibly-unknown cost — `null` means the harness didn't report one, not a measured $0. */
@@ -551,7 +552,7 @@ async function delegate(
   // permission: normalized, danger requires explicit per-call allowDangerous:true
   let permission: NormalizedPermission = template.permission;
   const nativePerm = template.nativePermission;
-  const isNativeDanger = !!nativePerm && ['bypassPermissions', 'danger-full-access', 'danger'].includes(nativePerm);
+  const isNativeDanger = isNativeDangerPermission(harness, nativePerm);
   if (template.permission === 'danger' || isNativeDanger) {
     if (opts.allowDangerous !== true) {
       throw new Error(
@@ -564,6 +565,9 @@ async function delegate(
     permission = 'danger';
   }
   const permissionForDisplay = nativePerm ?? permission;
+  // Dropped when an explicit escalation moved us off the template's own tier — see
+  // resolveNativePermission(). Applies to both transports.
+  const nativePermissionForRun = resolveNativePermission(template.permission, permission, nativePerm);
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
   const prompt = buildPrompt(template, task, scopeText, ctx.cwd, harnessName);
@@ -594,14 +598,9 @@ async function delegate(
         activityEvents.push(ev);
         opts.onActivity?.(ev);
       },
+      nativePermission: nativePermissionForRun,
     };
-    // ACP harnesses (Devin) negotiate permission mode over the wire via `session/set_mode`, so
-    // — unlike the stdout harnesses' runHarness() call above, which never passed nativePermission
-    // through (a pre-existing gap, left as-is here) — the escape hatch is wired for the acp path.
-    result =
-      harness.transport === 'acp'
-        ? await runAcpHarness({ ...baseRunOpts, nativePermission: nativePerm ?? undefined })
-        : await runHarness(baseRunOpts);
+    result = harness.transport === 'acp' ? await runAcpHarness(baseRunOpts) : await runHarness(baseRunOpts);
   } catch (err) {
     release();
     if (streamedFull.length > 0) {
