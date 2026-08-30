@@ -221,3 +221,13 @@ have — devin genuinely rejects this with a JSON-RPC error `"Session not found"
 `session/set_mode` modeId, which devin accepted silently rather than rejecting): on the pre-fix code the
 spawned `devin acp` process was still alive half a second after `runAcpHarness` rejected; with the fix
 (`proc.kill('SIGKILL')` added to the `.catch`) it was gone by the same check, every time.
+
+**Resume really did replay the whole prior turn into the new run — confirmed live, and now fixed.** A
+first process created a session and got back one short acknowledgement; a second, fresh process resumed
+that session's id with a new, unrelated prompt. Pre-fix, the replayed `agent_message_chunk`/`tool_call`
+notifications from `session/load` landed in `state.streamedText`/activities exactly as the design
+predicted. The fix (`acp-runner.ts` gates streamedText/activity forwarding on a `promptSent` flag, set
+only once `session/prompt` is actually sent) was verified against a real resume: the second run's
+`result.result` was exactly the new turn's answer (and nothing from the first turn's reply), while still
+correctly recalling information only given in the first turn — proving both that the replay is now
+discarded *and* that resume's actual context-carrying behavior is unaffected by discarding it.

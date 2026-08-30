@@ -54,6 +54,10 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     let stderr = '';
     let settled = false;
     let firstTokenAt: number | null = null;
+    // Resumed sessions replay every prior turn as session/update notifications before the new
+    // prompt's — set once session/prompt is actually sent, so replayed text/activities (and a
+    // replay-skewed TTFT) never reach the caller. See the handshake IIFE below.
+    let promptSent = false;
     const startAt = Date.now();
     const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
     const MAX_ACTIVITIES = 5000;
@@ -175,7 +179,9 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       }
 
       const outcome = opts.harness.parseLine(line, state);
-      if (outcome.streamedText) {
+      // Discard streamed text/activities from anything that arrives before the new session/prompt
+      // is sent — on a resume that's the replayed prior conversation, not the new turn's own output.
+      if (promptSent && outcome.streamedText) {
         if (firstTokenAt === null) firstTokenAt = Date.now();
         if (state.streamedText.length < MAX_STREAMED) {
           const remaining = MAX_STREAMED - state.streamedText.length;
@@ -187,7 +193,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
           opts.onStream?.(chunk);
         }
       }
-      if (outcome.activities) {
+      if (promptSent && outcome.activities) {
         for (const a of outcome.activities) {
           if (state.activities.length < MAX_ACTIVITIES) {
             state.activities.push(a);
@@ -278,6 +284,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       }
       await sendRequest('session/set_mode', { sessionId, modeId }, HANDSHAKE_TIMEOUT_MS);
       if (settled) return;
+      promptSent = true;
       await sendRequest('session/prompt', { sessionId, prompt: [{ type: 'text', text: opts.prompt }] });
       if (settled) return;
       // The agent doesn't exit on its own once the turn is done — an ACP session can outlive a

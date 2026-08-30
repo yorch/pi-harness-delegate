@@ -35,6 +35,26 @@ rl.on('line', (line) => {
     }
     return;
   }
+  if (msg.method === 'session/load') {
+    // Replay a whole prior turn as notifications before responding — the real Devin behavior
+    // that Finding 3 fixes the runner against.
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'OLD REPLAYED ANSWER' } } } });
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call', toolCallId: 'replay-1', kind: 'read', rawInput: {} } } });
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call_update', toolCallId: 'replay-1', status: 'completed' } } });
+    send({ jsonrpc: '2.0', id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === 'session/set_mode') {
+    send({ jsonrpc: '2.0', id: msg.id, result: {} });
+    return;
+  }
+  if (msg.method === 'session/prompt') {
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call', toolCallId: 'real-1', kind: 'read', rawInput: {} } } });
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call_update', toolCallId: 'real-1', status: 'completed' } } });
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'NEW ANSWER' } } } });
+    send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1, cachedReadTokens: 0 } } });
+    return;
+  }
 });
 `;
 
@@ -79,4 +99,33 @@ test('runAcpHarness: a rejected handshake step kills the child process (Finding 
   assert.ok(Number.isInteger(pid) && pid > 0, `expected a real pid, got ${pid}`);
   const exited = await waitForProcessExit(pid);
   assert.ok(exited, `child process ${pid} was not killed after a rejected handshake step`);
+});
+
+test('runAcpHarness: resume discards replayed text/activity before the new prompt (Finding 3)', async () => {
+  const harness = fakeHarness('replay');
+  let streamed = '';
+  const activityIds: string[] = [];
+
+  const result = await runAcpHarness({
+    harness,
+    prompt: 'continue',
+    cwd: process.cwd(),
+    permission: 'readonly',
+    timeoutMs: 10_000,
+    resumeSessionId: 'fake-session',
+    onStream: t => {
+      streamed += t;
+    },
+    onActivity: ev => {
+      if ((ev.kind === 'tool_input' || ev.kind === 'tool_result') && ev.id) activityIds.push(ev.id);
+    },
+  });
+
+  assert.equal(result.streamedText, 'NEW ANSWER');
+  assert.ok(!result.streamedText.includes('OLD REPLAYED'), result.streamedText);
+  assert.equal(streamed, 'NEW ANSWER');
+  assert.ok(!streamed.includes('OLD REPLAYED'), streamed);
+  assert.deepEqual(activityIds, ['real-1', 'real-1']); // tool_input + tool_result for the real turn only
+  assert.ok(result.result.includes('NEW ANSWER'));
+  assert.ok(!result.result.includes('OLD REPLAYED'));
 });
