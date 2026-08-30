@@ -201,3 +201,56 @@ export function resolveNativePermission(
   if (!nativePermission) return undefined;
   return effectivePermission === templatePermission ? nativePermission : undefined;
 }
+
+/**
+ * What a project has on disk that only loads when the project is trusted.
+ *
+ * Used to warn a user whose project-local templates stopped loading after the 0.6.0 security fix
+ * (§19 of ROADMAP) — before it, a committed `.pi/trusted` file or `PI_TRUSTED=1` granted trust, and
+ * both were removed. The failure is otherwise invisible: an override shares its name with the
+ * builtin it replaces, so the run silently uses the builtin and produces plausible output.
+ *
+ * Pure filesystem inspection — no trust logic. The caller supplies the trust decision.
+ */
+export function projectTemplatePresence(cwd: string): {
+  /** Template dirs that exist and would load if the project were trusted. */
+  dirs: string[];
+  /** A leftover `.pi/trusted` file — strong evidence the user relied on the removed mechanism. */
+  staleTrustFile: boolean;
+} {
+  const candidates = [projectTemplatesDir(cwd), legacyProjectTemplatesDir(cwd)];
+  const dirs: string[] = [];
+  for (const dir of candidates) {
+    try {
+      if (readdirSync(dir).some(f => f.endsWith('.md'))) dirs.push(dir);
+    } catch {
+      // absent or unreadable — nothing to warn about
+    }
+  }
+  let staleTrustFile = false;
+  try {
+    staleTrustFile = existsSync(join(cwd, '.pi', 'trusted'));
+  } catch {
+    staleTrustFile = false;
+  }
+  return { dirs, staleTrustFile };
+}
+
+/** One-line notices for a project whose trusted-only content was skipped. Empty when nothing applies. */
+export function describeSkippedProjectTemplates(presence: { dirs: string[]; staleTrustFile: boolean }): string[] {
+  if (presence.dirs.length === 0 && !presence.staleTrustFile) return [];
+  const out: string[] = [];
+  if (presence.dirs.length > 0) {
+    out.push(
+      `⚠ project-local templates were NOT loaded — this project is untrusted (${presence.dirs.join(', ')})`,
+      "  trust it via pi's trust prompt or defaultProjectTrust; /delegate status shows trust state",
+    );
+  }
+  if (presence.staleTrustFile) {
+    out.push(
+      '  a leftover .pi/trusted file was found — it no longer grants trust (removed in 0.6.0 as a',
+      '  security fix, since a repo could use it to trust itself) and can be deleted',
+    );
+  }
+  return out;
+}

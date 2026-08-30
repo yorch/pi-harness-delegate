@@ -3,7 +3,13 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { loadTemplates, parseTemplate, resolveNativePermission } from '../extensions/templates.ts';
+import {
+  describeSkippedProjectTemplates,
+  loadTemplates,
+  parseTemplate,
+  projectTemplatePresence,
+  resolveNativePermission,
+} from '../extensions/templates.ts';
 import { mapClaudeUsage } from '../extensions/usage.ts';
 
 test('parseTemplate extracts frontmatter and body', () => {
@@ -203,4 +209,36 @@ test('resolveNativePermission: an explicit escalation wins over the template nat
 test('resolveNativePermission: no native mode declared stays undefined', () => {
   assert.equal(resolveNativePermission('readonly', 'readonly', undefined), undefined);
   assert.equal(resolveNativePermission('edit', 'danger', undefined), undefined);
+});
+
+test('projectTemplatePresence: finds trusted-only content that would be skipped', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-presence-'));
+  try {
+    // Nothing there yet — an unaffected user must never be warned.
+    assert.deepEqual(projectTemplatePresence(dir), { dirs: [], staleTrustFile: false });
+
+    // A project that actually has templates, plus the leftover file from the removed mechanism.
+    const proj = join(dir, '.pi', 'delegate', 'templates');
+    mkdirSync(proj, { recursive: true });
+    writeFileSync(join(proj, 'review.md'), '---\nname: review\ndescription: d\npermission: readonly\n---\nx');
+    writeFileSync(join(dir, '.pi', 'trusted'), '1');
+
+    const p = projectTemplatePresence(dir);
+    assert.deepEqual(p.dirs, [proj]);
+    assert.equal(p.staleTrustFile, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('describeSkippedProjectTemplates: silent when nothing applies, explains when it does', () => {
+  assert.deepEqual(describeSkippedProjectTemplates({ dirs: [], staleTrustFile: false }), []);
+
+  const onlyTemplates = describeSkippedProjectTemplates({ dirs: ['/p/.pi/delegate/templates'], staleTrustFile: false });
+  assert.ok(onlyTemplates.join('\n').includes('were NOT loaded'));
+  assert.ok(!onlyTemplates.join('\n').includes('.pi/trusted file was found'));
+
+  // A leftover trust file alone is still worth reporting — it's evidence of the removed mechanism.
+  const onlyStale = describeSkippedProjectTemplates({ dirs: [], staleTrustFile: true });
+  assert.ok(onlyStale.join('\n').includes('no longer grants trust'));
 });
