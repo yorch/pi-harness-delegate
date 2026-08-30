@@ -29,7 +29,7 @@ import {
   truncateToWidth,
 } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
-import { runAcpHarness } from './acp-runner.ts';
+import { acpView, runAcpHarness } from './acp-runner.ts';
 import {
   aggregateSpend,
   buildFanoutReport,
@@ -58,6 +58,7 @@ import {
   legacyOutputsDir,
   loadConfig,
   resolveModelForHarness,
+  resolveTransport,
 } from './config.ts';
 import {
   ALIASES,
@@ -524,6 +525,11 @@ async function delegate(
   const task = opts.task || template.defaultTask;
   if (!task) throw new Error(`delegate mode "${mode}" requires a task`);
 
+  // Fail-fast, before acquireSlot()/spawn — configuring e.g. transport:'acp' for a harness with no
+  // ACP surface (or 'stdout' for an ACP-only one) should error immediately with a clear message,
+  // not spawn the process and surface a cryptic native failure. See config.ts's resolveTransport.
+  const transport = resolveTransport(config, harnessName, harness);
+
   // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
   // exactly as before; fan-out passes waitForSlot:true to queue instead.
   const release = await acquireSlot({
@@ -600,7 +606,10 @@ async function delegate(
       },
       nativePermission: nativePermissionForRun,
     };
-    result = harness.transport === 'acp' ? await runAcpHarness(baseRunOpts) : await runHarness(baseRunOpts);
+    result =
+      transport === 'acp'
+        ? await runAcpHarness({ ...baseRunOpts, harness: acpView(harness) })
+        : await runHarness(baseRunOpts);
   } catch (err) {
     release();
     if (streamedFull.length > 0) {

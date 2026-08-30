@@ -156,4 +156,7 @@ export const claudeHarness: Harness = {
     edit: ['acceptEdits'],
     danger: ['bypassPermissions'],
   },
+  // No `acp` subcommand exists (docs/acp-harness-assessment.md §2) — confirmed against the full
+  // `claude --help` output, not just an earlier probe.
+  supportsTransports: ['stdout'],
 };

@@ -7,7 +7,7 @@ import { parseAmpLine } from '../extensions/harnesses/amp.ts';
 import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
 import { parseCodexLine } from '../extensions/harnesses/codex.ts';
 import { parseDevinLine } from '../extensions/harnesses/devin.ts';
-import { parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
+import { parseOpencodeAcpLine, parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
 import type { ActivityEvent, ParseState, StreamedResult } from '../extensions/harnesses/types.ts';
 
 function loadFixture(name: string): string[] {
@@ -232,4 +232,75 @@ test('devin-acp.jsonl: unrecognized session/update kinds (config_option_update, 
   for (const l of lines) {
     assert.doesNotThrow(() => parseDevinLine(l, state));
   }
+});
+
+test('opencode-acp.jsonl: real toolCallId correlates tool_call/tool_call_update, genuine cost/contextWindow/usage extracted', () => {
+  // First 29 lines: the fresh session/prompt turn, before the session/load resume replay below —
+  // isolating it here keeps this test's counts unambiguous; the resume replay (same toolCallIds,
+  // by design) is covered separately below.
+  const lines = loadFixture('opencode-acp.jsonl').slice(0, 29);
+  const { activities, result } = replay(lines, parseOpencodeAcpLine);
+  assert.ok(result);
+  assert.equal(result?.sessionId, 'ses_REDACTEDsessionid0001');
+  assert.equal(result?.stopReason, 'end_turn');
+  assert.equal(result?.isError, false);
+  // Real over ACP, unlike stdout's always-null contextWindow and only-sometimes-real cost — $0
+  // here because the captured run happened to be on a $0-cost promotional model, not because the
+  // field is absent (docs/acp-harness-assessment.md §2).
+  assert.equal(result?.contextWindow, 200000);
+  assert.equal(result?.totalCostUsd, 0);
+  // never observed populated over ACP for opencode — honest null, not a guess.
+  assert.equal(result?.numTurns, null);
+  assert.equal(result?.model, null);
+  // opencode's inputTokens already excludes cachedReadTokens (unlike Devin's) — no adjustment.
+  assert.equal(result?.usage?.inputTokens, 326);
+  assert.equal(result?.usage?.outputTokens, 31);
+  assert.equal(result?.usage?.cacheReadInputTokens, 71424);
+  assert.equal(result?.usage?.cacheCreationInputTokens, 0);
+  assert.ok(result?.result.includes('README.md') && result.result.includes('scratch repo for ACP probing'));
+
+  // 3 real tool calls (read dir, glob, read file), each a genuine `call_...` toolCallId, each
+  // firing an `in_progress` update before its terminal `completed` — only the terminal one should
+  // produce a tool_result.
+  const log = collectActivityLog(activities);
+  const toolLines = log.filter(l => l.startsWith('▶'));
+  assert.equal(toolLines.length, 3);
+  assert.ok(
+    toolLines.every(l => l.endsWith('✓')),
+    `every tool call should resolve, got: ${toolLines}`,
+  );
+  assert.equal(activities.filter(a => a.kind === 'thinking').length, 5);
+});
+
+test("opencode-acp.jsonl: the session/load resume replay (no stopReason of its own) never clobbers the real turn's result", () => {
+  const lines = loadFixture('opencode-acp.jsonl'); // full 40 lines, including the session/load replay
+  const state: ParseState = { streamedText: '', activities: [], result: null };
+  let result: StreamedResult | null = null;
+  for (const l of lines) {
+    assert.doesNotThrow(() => {
+      const out = parseOpencodeAcpLine(l, state);
+      if (out.result) result = out.result;
+    });
+  }
+  // session/load's own response has `configOptions` but no `stopReason` — parseOpencodeAcpLine
+  // correctly produces no `result` for it, so the real turn's result (from the earlier
+  // session/prompt response) is still what a caller sees.
+  assert.ok(result);
+  assert.equal((result as unknown as StreamedResult).stopReason, 'end_turn');
+});
+
+test('opencode-acp-build-write.jsonl: a live-verified write under `build` mode — real `edit`-kind tool_call, no session/request_permission anywhere', () => {
+  const lines = loadFixture('opencode-acp-build-write.jsonl');
+  // The single blocking unknown docs/acp-harness-assessment.md §4/§7 left open for opencode ACP:
+  // does `build` mode ever call back session/request_permission (which this project's ACP client
+  // auto-declines)? This fixture is that second live run's answer — it never does.
+  assert.ok(!lines.some(l => l.includes('request_permission')), 'expected no session/request_permission call');
+
+  const { activities, result } = replay(lines, parseOpencodeAcpLine);
+  assert.ok(result);
+  assert.equal(result?.stopReason, 'end_turn');
+  assert.equal(result?.isError, false);
+  const log = collectActivityLog(activities);
+  const writeRow = log.find(l => l.includes('write'));
+  assert.ok(writeRow?.endsWith('✓'), `expected the write tool_call to resolve, got: ${writeRow}`);
 });

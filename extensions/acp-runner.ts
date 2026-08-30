@@ -8,15 +8,19 @@
  * doesn't hang, since we run non-interactively with a permission mode already negotiated.
  *
  * Exposes the exact `RunHarnessOptions`/`HarnessResult` shape as runner.ts, so `delegate()`
- * can pick either runner from `harness.transport` and everything downstream (transcripts,
- * `ToolCallIndex`, progress overlays, fan-out, spend rollup) is unchanged.
+ * can pick either runner from the resolved `transport` (see config.ts's `resolveTransport`) and
+ * everything downstream (transcripts, `ToolCallIndex`, progress overlays, fan-out, spend rollup)
+ * is unchanged.
  *
- * Deliberately general: an agent's mode ids and result shape live in its `Harness` (`buildArgs`,
- * `permissionMap`, `parseLine`, `extractResult`) — this file only knows the ACP wire protocol.
+ * Deliberately general: an agent's mode ids and result shape live in its `Harness` (`buildArgs`/
+ * `buildAcpArgs`, `permissionMap`/`acpPermissionMap`, `parseLine`/`parseAcpLine`, `extractResult`)
+ * — this file only knows the ACP wire protocol. Callers driving a dual-transport harness over ACP
+ * pass it through `acpView()` (below) first, so this file always reads the stdout-shaped field
+ * names regardless of which harness it's given.
  */
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { DEFAULT_TIMEOUT_MS, type ParseState, type StreamedResult } from './harnesses/types.ts';
+import { DEFAULT_TIMEOUT_MS, type Harness, type ParseState, type StreamedResult } from './harnesses/types.ts';
 import type { HarnessResult, RunHarnessOptions } from './runner.ts';
 
 /** Bound on the initial handshake (initialize / session/new / session/set_mode) so a hung agent
@@ -27,6 +31,33 @@ const PROTOCOL_VERSION = 1;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Presents the ACP-shaped view of a dual-transport `Harness` (buildAcpArgs/parseAcpLine/
+ *  acpPermissionMap) to this file, falling back to the stdout-shaped fields for an ACP-only
+ *  harness like Devin that never declares the Acp-prefixed ones. Devin needs zero changes for
+ *  this — every field below already exists on it under the stdout-shaped name. */
+export function acpView(harness: Harness): Harness {
+  return {
+    ...harness,
+    buildArgs: harness.buildAcpArgs ?? harness.buildArgs,
+    parseLine: harness.parseAcpLine ?? harness.parseLine,
+    permissionMap: harness.acpPermissionMap ?? harness.permissionMap,
+  };
+}
+
+/** Does this `session/new`/`session/load` result advertise support for switching session modes?
+ *  Two independently-real dialects, both live-verified (docs/acp-harness-assessment.md §2/§4):
+ *  the spec-standard `modes` field (Devin, omp), or a `configOptions` entry with `category: "mode"`
+ *  (opencode, which never populates `modes` at all but implements `session/set_mode` anyway). Either
+ *  signal is enough to trust the upcoming `session/set_mode` call. */
+function supportsSessionModes(sessionResult: unknown): boolean {
+  if (!isRecord(sessionResult)) return false;
+  if (isRecord(sessionResult.modes)) return true;
+  if (Array.isArray(sessionResult.configOptions)) {
+    return sessionResult.configOptions.some(o => isRecord(o) && o.category === 'mode');
+  }
+  return false;
 }
 
 interface PendingRequest {
@@ -247,7 +278,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     // bounded by the overall `timer` above like everything else.
     (async () => {
       const modeId = opts.nativePermission ?? opts.harness.permissionMap?.[opts.permission]?.[0] ?? opts.permission;
-      await sendRequest(
+      const initResult = await sendRequest(
         'initialize',
         {
           protocolVersion: PROTOCOL_VERSION,
@@ -256,6 +287,15 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
         HANDSHAKE_TIMEOUT_MS,
       );
       if (settled) return;
+      // The client "should disconnect" (spec text) if the agent didn't echo back the version we
+      // asked for — only `1` has ever shipped, so this is cheap insurance against a future
+      // version-mismatched agent producing a confusing mid-handshake failure instead of a clear one.
+      const negotiatedVersion = isRecord(initResult) ? initResult.protocolVersion : undefined;
+      if (negotiatedVersion !== PROTOCOL_VERSION) {
+        throw new Error(
+          `${opts.harness.binary} negotiated ACP protocolVersion ${JSON.stringify(negotiatedVersion)}, expected ${PROTOCOL_VERSION}`,
+        );
+      }
       const sessionParams = {
         cwd: opts.cwd,
         mcpServers: [],
@@ -267,12 +307,18 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       // advertised in agentCapabilities and a real session/load + follow-up prompt round-trips
       // cleanly, replaying history and continuing the same token-usage accounting.
       let sessionId: string | null;
+      let sessionResult: unknown;
       if (opts.resumeSessionId) {
-        await sendRequest('session/load', { sessionId: opts.resumeSessionId, ...sessionParams }, HANDSHAKE_TIMEOUT_MS);
+        sessionResult = await sendRequest(
+          'session/load',
+          { sessionId: opts.resumeSessionId, ...sessionParams },
+          HANDSHAKE_TIMEOUT_MS,
+        );
         sessionId = opts.resumeSessionId;
       } else {
-        const newSession = await sendRequest('session/new', sessionParams, HANDSHAKE_TIMEOUT_MS);
-        sessionId = isRecord(newSession) && typeof newSession.sessionId === 'string' ? newSession.sessionId : null;
+        sessionResult = await sendRequest('session/new', sessionParams, HANDSHAKE_TIMEOUT_MS);
+        sessionId =
+          isRecord(sessionResult) && typeof sessionResult.sessionId === 'string' ? sessionResult.sessionId : null;
       }
       if (settled) return;
       if (!sessionId) throw new Error('session/new did not return a sessionId');
@@ -281,6 +327,20 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       if (opts.resumeSessionId) {
         state._harness ??= {};
         state._harness.sessionId = sessionId;
+      }
+      // `session/set_mode` (and `NewSessionResponse.modes`) are spec-optional — calling it
+      // unconditionally against a mode-less agent would fail the whole handshake with a raw
+      // "method not found" instead of a clear message. Every agent this project has captured
+      // (Devin, opencode, omp) does support it, so this never fires for a real run today — but per
+      // the brief, a mode we can't confirm is a hard error, not a silent downgrade to whatever the
+      // agent's default permissiveness happens to be: we already promised the caller a specific
+      // permission tier.
+      if (!supportsSessionModes(sessionResult)) {
+        throw new Error(
+          `${opts.harness.binary} does not advertise session-mode support (no "modes" field or ` +
+            `configOptions "mode" category on session/${opts.resumeSessionId ? 'load' : 'new'}) — ` +
+            `cannot verify the "${opts.permission}" permission tier would be honored over ACP`,
+        );
       }
       await sendRequest('session/set_mode', { sessionId, modeId }, HANDSHAKE_TIMEOUT_MS);
       if (settled) return;

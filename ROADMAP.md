@@ -194,7 +194,7 @@ findings, but argues for a capability-aware handshake in any follow-up implement
 
 ---
 
-## 15. ACP protocol/ecosystem research
+## 16. ACP protocol/ecosystem research
 
 **Status:** done (research, [`docs/acp-protocol-research.md`](docs/acp-protocol-research.md))
 
@@ -207,13 +207,42 @@ schema releases stale. Key findings:
   drafted breaking revision, and its own maintainers say v1 support isn't going away.
 - **`acp-runner.ts` sends `session/set_mode` unconditionally**, but the method (and `session/new`'s
   `modes` field) is optional per spec. Invisible today because Devin implements modes; would fail the
-  whole handshake against a mode-less ACP agent. Small fix, not yet applied — see the doc's §4/§8.
+  whole handshake against a mode-less ACP agent. Fixed in §17 below (capability-aware, hard error on no
+  capability signal, not a silent downgrade).
 - `initialize`'s negotiated `protocolVersion` is never checked against what we sent — harmless while only
-  `1` exists, cheap insurance to add before a v2-speaking agent shows up.
+  `1` exists, cheap insurance to add before a v2-speaking agent shows up. Fixed in §17 below.
 - The `acp-runner.ts` (transport, tolerates unknown `_meta`/vendor methods) vs. `devin.ts` (interprets
   `cognition.ai/*`) split matches the spec's own extensibility model exactly — no seam change needed.
 - Governance moved to a joint Zed/JetBrains model with a real registry (~40 agents, dozens of clients);
   ACP reads as an actively-invested cross-vendor standard, not a single-vendor feature.
+
+---
+
+## 17. Configurable per-harness transport (shipped)
+
+**Status:** done — `HarnessConfig.transport`, `extensions/config.ts`'s `resolveTransport`, `Harness.supportsTransports`/`buildAcpArgs`/`parseAcpLine`/`acpPermissionMap`, `acp-runner.ts`'s `acpView`.
+
+Turned §15's recommendation (configurable transport, not a switch) and §16's two flagged `acp-runner.ts`
+bugs into shipped code, gated on a live run this PR itself ran:
+
+- **opencode ships dual-transport** (`supportsTransports: ['stdout', 'acp']`, defaults to `stdout`) —
+  closing §15's one open question with a real write prompt under `build` mode: it never calls
+  `session/request_permission` (`tests/fixtures/opencode-acp-build-write.jsonl`), so `edit`/`danger`
+  genuinely execute over ACP rather than silently no-op behind this project's auto-decline.
+- **amp/omp stays `['stdout']` only** — its ACP mode surface has 2 tiers against the stdout CLI's
+  genuine 3; not a legal `transport` value, by design, until a future omp ACP version exposes a third
+  tier. **claude/codex stay `['stdout']`** — no ACP surface exists.
+- `permissionMap` split into `permissionMap` (stdout CLI-flag fragments) and `acpPermissionMap` (ACP
+  `session/set_mode` mode ids) — kept as two fields even where a harness's values coincide (opencode),
+  since they're different vocabularies that would silently drift apart the moment a harness like omp
+  needs both.
+- `acp-runner.ts`'s `session/set_mode` is now capability-checked (via `session/new`/`session/load`'s
+  `modes` field or a `configOptions` entry with `category: "mode"`) before being called, and a mode that
+  can't be confirmed is a hard error, not a downgrade — every real agent captured so far advertises one
+  of the two signals, so this never fires today, but it's the general, correct shape §16 called for.
+  `protocolVersion` is checked against what was sent, same section.
+- Config validated before `acquireSlot()`/spawn — misconfiguring `transport: 'acp'` for `claude` fails
+  immediately with a clear message.
 
 ---
 

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type {
+  ActivityEvent,
   BuildArgsOpts,
   Harness,
   NormalizedPermission,
@@ -13,12 +14,29 @@ import type {
 // `opencode run` in this version has no `--permission` or `--add-dir` flag at all (confirmed via
 // `opencode run --help`) — permission tiers map onto built-in agents instead (`opencode agent
 // list`: "plan" is the read-only-oriented primary agent, "build" is the full-access one).
+//
+// This harness also supports the ACP transport (`opencode acp`) — see the `parseOpencodeAcpLine`/
+// `buildAcpArgs`/`ACP_MODE_MAP` block below and tests/fixtures/opencode-acp*.jsonl. Live-verified
+// (docs/acp-harness-assessment.md §2/§4, closed by a second live run — see
+// tests/fixtures/opencode-acp-build-write.jsonl): a real write prompt under `build` mode produced
+// a `tool_call`/`tool_call_update` pair with `kind: "edit"` and no `session/request_permission`
+// request at all — this project's ACP client auto-declines that request when it arrives (see
+// acp-runner.ts's `handleServerRequest`), so its absence here means `edit`/`danger` genuinely
+// execute over ACP rather than silently no-op.
 
 const execFileAsync = promisify(execFile);
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 const AGENT_MAP: Record<NormalizedPermission, string> = {
+  readonly: 'plan',
+  edit: 'build',
+  danger: 'build',
+};
+// A distinct vocabulary from AGENT_MAP even though the values happen to coincide today (`plan`/
+// `build` are both the CLI agent name and the ACP `session/set_mode` modeId) — kept separate on
+// purpose, per docs/acp-harness-assessment.md §6, so the two never silently drift together.
+const ACP_MODE_MAP: Record<NormalizedPermission, string> = {
   readonly: 'plan',
   edit: 'build',
   danger: 'build',
@@ -165,6 +183,136 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
   }
   return { activities, streamedText };
 }
+
+interface OpencodeAcpHarnessState {
+  sessionId?: string;
+  contextWindow?: number;
+  costUsd?: number;
+}
+
+function acpHarnessState(state: ParseState): OpencodeAcpHarnessState {
+  const s = (state._harness ?? {}) as OpencodeAcpHarnessState;
+  state._harness = s as unknown as Record<string, unknown>;
+  return s;
+}
+
+/** Translate one `session/update` notification's `params.update` payload into ParseOutcome deltas.
+ *  Same wire dialect as devin.ts's `translateUpdate` (both are real ACP `session/update` payloads —
+ *  see docs/acp-harness-assessment.md §2's evidence that opencode/omp share an ACP implementation),
+ *  kept as an independent function rather than a shared import so devin.ts needs zero changes here. */
+function translateOpencodeAcpUpdate(update: Record<string, unknown>, state: ParseState): ParseOutcome {
+  const activities: ActivityEvent[] = [];
+  let streamedText: string | undefined;
+  const content = isRecord(update.content) ? update.content : undefined;
+  const text = content?.type === 'text' && typeof content.text === 'string' ? content.text : undefined;
+  const hs = acpHarnessState(state);
+
+  switch (update.sessionUpdate) {
+    case 'agent_message_chunk':
+      if (text !== undefined) streamedText = text;
+      break;
+    case 'agent_thought_chunk':
+      if (text !== undefined) activities.push({ kind: 'thinking', chars: text.length });
+      break;
+    case 'tool_call': {
+      if (typeof update.toolCallId !== 'string') break;
+      // real fixture: `title` is the tool name ("read", "glob", "write"), matching the stdout
+      // parser's `part.tool` convention — fall back to `kind` (the coarser category) if absent.
+      const name =
+        typeof update.title === 'string' ? update.title : typeof update.kind === 'string' ? update.kind : 'tool';
+      activities.push({
+        kind: 'tool_input',
+        name,
+        input: isRecord(update.rawInput) ? update.rawInput : {},
+        id: update.toolCallId,
+      });
+      break;
+    }
+    case 'tool_call_update': {
+      // Only a terminal status produces a tool_result — same reasoning as devin.ts: a call fires
+      // multiple `in_progress` updates before its `completed`/`failed`, and ToolCallIndex.resolve()
+      // consumes the pending entry on first match.
+      if (typeof update.toolCallId !== 'string') break;
+      if (update.status === 'completed' || update.status === 'failed') {
+        activities.push({ kind: 'tool_result', isError: update.status === 'failed', id: update.toolCallId });
+      }
+      break;
+    }
+    case 'usage_update':
+      // Both fields are genuinely real over ACP (unlike stdout's `null`s) — see
+      // docs/acp-harness-assessment.md §2 — and, per the same section, this is a running session
+      // total already, latched from the *last* usage_update seen, never summed across a series.
+      if (typeof update.size === 'number') hs.contextWindow = update.size;
+      if (isRecord(update.cost) && typeof update.cost.amount === 'number') hs.costUsd = update.cost.amount;
+      break;
+    default:
+      break;
+  }
+  return { streamedText, activities };
+}
+
+export function parseOpencodeAcpLine(line: string, state: ParseState): ParseOutcome {
+  let o: unknown;
+  try {
+    o = JSON.parse(line);
+  } catch {
+    return {};
+  }
+  if (!isRecord(o)) return {};
+
+  if (o.method === 'session/update' && isRecord(o.params) && isRecord(o.params.update)) {
+    return translateOpencodeAcpUpdate(o.params.update, state);
+  }
+
+  if (isRecord(o.result)) {
+    const r = o.result;
+    if (typeof r.stopReason === 'string') {
+      // session/prompt response — the turn is over, build the final result.
+      const u = isRecord(r.usage) ? r.usage : null;
+      const hs = acpHarnessState(state);
+      const result: StreamedResult = {
+        result: state.streamedText,
+        // opencode's ACP prompt response carries no error flag of its own — a genuine failure
+        // surfaces via acp-runner.ts's process-level fail() path, same as every other harness.
+        isError: false,
+        numTurns: null, // never observed populated over ACP (docs/acp-harness-assessment.md §2)
+        totalCostUsd: typeof hs.costUsd === 'number' ? hs.costUsd : null,
+        sessionId: typeof hs.sessionId === 'string' ? hs.sessionId : null,
+        stopReason: r.stopReason,
+        permissionDenials: [],
+        durationMs: null,
+        durationApiMs: null,
+        ttftMs: null,
+        // Only ever the *requested* configOptions value from session/new, never confirmed back
+        // the way Devin's agent_stopped event confirms what actually ran — null is the honest
+        // value, not a guess.
+        model: null,
+        contextWindow: typeof hs.contextWindow === 'number' ? hs.contextWindow : null,
+        maxOutputTokens: null,
+        usage: u
+          ? {
+              // Unlike Devin's inputTokens (which includes cachedReadTokens as a subset and needs
+              // subtracting), opencode's inputTokens already EXCLUDES it — verified against the
+              // real capture: inputTokens + cachedReadTokens === totalTokens - outputTokens exactly
+              // in both tests/fixtures/opencode-acp.jsonl and opencode-acp-build-write.jsonl.
+              inputTokens: typeof u.inputTokens === 'number' ? u.inputTokens : 0,
+              outputTokens: typeof u.outputTokens === 'number' ? u.outputTokens : 0,
+              cacheCreationInputTokens: 0, // not reported over ACP
+              cacheReadInputTokens: typeof u.cachedReadTokens === 'number' ? u.cachedReadTokens : 0,
+            }
+          : null,
+      };
+      return { result };
+    }
+    if (typeof r.sessionId === 'string') {
+      // session/new response — stash the id; session/load's response has none of its own
+      // (acp-runner.ts stashes it into state._harness.sessionId itself on a resume).
+      acpHarnessState(state).sessionId = r.sessionId;
+    }
+  }
+  return {};
+}
+
 export const opencodeHarness: Harness = {
   name: 'opencode',
   displayName: 'OpenCode',
@@ -212,4 +360,16 @@ export const opencodeHarness: Harness = {
     return null;
   },
   permissionMap: { readonly: ['plan'], edit: ['build'], danger: ['build', '--auto'] },
+  // ACP path — opt-in only (transport defaults to 'stdout'; see config.ts's resolveTransport).
+  // `--model` isn't wired here: `opencode acp --help` has no such flag, unlike `devin acp
+  // --model`; the ACP handshake's own `configOptions` "model" category is the real mechanism
+  // (session/set_config_option, unverified live — see ROADMAP.md), out of scope for this change.
+  buildAcpArgs(): string[] {
+    return ['acp'];
+  },
+  parseAcpLine(line: string, state: ParseState): ParseOutcome {
+    return parseOpencodeAcpLine(line, state);
+  },
+  acpPermissionMap: { readonly: [ACP_MODE_MAP.readonly], edit: [ACP_MODE_MAP.edit], danger: [ACP_MODE_MAP.danger] },
+  supportsTransports: ['stdout', 'acp'],
 };

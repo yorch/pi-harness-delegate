@@ -259,4 +259,13 @@ export const ampHarness: Harness = {
     return null;
   },
   permissionMap: { readonly: ['always-ask'], edit: ['write'], danger: ['yolo'] },
+  // `omp acp` is real and live-verified (docs/acp-harness-assessment.md §2/§4) — but deliberately
+  // NOT offered as a config value yet: its ACP mode surface only has 2 tiers (`default`/`plan`),
+  // while the stdout `--approval-mode` above has 3 genuine ones. Adding 'acp' here would let a
+  // user configure `edit`, expecting "ask before every write", and silently collapse it onto the
+  // same `default` mode as `danger` — a real permission-tier regression, not a cosmetic one. Only
+  // revisit if a future omp ACP version exposes a third tier (e.g. an `approval-mode`-shaped
+  // `configOptions` category, the same slot `thinking` already occupies today) — redo the §4-style
+  // live permission-tier analysis before changing this, don't just add 'acp' to the list.
+  supportsTransports: ['stdout'],
 };
