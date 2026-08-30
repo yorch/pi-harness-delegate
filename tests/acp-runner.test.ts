@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { runAcpHarness } from '../extensions/acp-runner.ts';
+import { acpView, runAcpHarness } from '../extensions/acp-runner.ts';
 import { devinHarness } from '../extensions/harnesses/devin.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
 
@@ -24,14 +24,19 @@ rl.on('line', (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
   if (msg.method === 'initialize') {
-    send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+    const protocolVersion = mode === 'protocol-mismatch' ? 2 : 1;
+    send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion, agentCapabilities: {} } });
     return;
   }
   if (msg.method === 'session/new') {
     if (mode === 'fail-handshake') {
       send({ jsonrpc: '2.0', id: msg.id, error: { code: -1, message: 'boom' } });
-    } else {
+    } else if (mode === 'no-modes') {
       send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fake-session' } });
+    } else {
+      // Real Devin/opencode/omp all advertise mode support one way or another on session/new —
+      // see supportsSessionModes()'s two dialects (docs/acp-harness-assessment.md §4).
+      send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fake-session', modes: {} } });
     }
     return;
   }
@@ -41,7 +46,7 @@ rl.on('line', (line) => {
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'OLD REPLAYED ANSWER' } } } });
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call', toolCallId: 'replay-1', kind: 'read', rawInput: {} } } });
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call_update', toolCallId: 'replay-1', status: 'completed' } } });
-    send({ jsonrpc: '2.0', id: msg.id, result: {} });
+    send({ jsonrpc: '2.0', id: msg.id, result: { modes: {} } });
     return;
   }
   if (msg.method === 'session/set_mode') {
@@ -82,6 +87,24 @@ async function waitForProcessExit(pid: number, timeoutMs = 1000): Promise<boolea
   }
   return false;
 }
+
+test('acpView: falls back to stdout-shaped fields for an ACP-only harness (Devin needs zero changes)', () => {
+  const view = acpView(devinHarness);
+  assert.equal(view.buildArgs, devinHarness.buildArgs);
+  assert.equal(view.parseLine, devinHarness.parseLine);
+  assert.equal(view.permissionMap, devinHarness.permissionMap);
+});
+
+test('acpView: prefers the Acp-prefixed fields for a dual-transport harness', () => {
+  const buildAcpArgs = () => ['acp'];
+  const parseAcpLine = () => ({});
+  const acpPermissionMap = { readonly: ['plan'], edit: ['build'], danger: ['build'] };
+  const dual: Harness = { ...devinHarness, buildAcpArgs, parseAcpLine, acpPermissionMap };
+  const view = acpView(dual);
+  assert.equal(view.buildArgs, buildAcpArgs);
+  assert.equal(view.parseLine, parseAcpLine);
+  assert.equal(view.permissionMap, acpPermissionMap);
+});
 
 test('runAcpHarness: a rejected handshake step kills the child process (Finding 1)', async () => {
   const pidFile = tmpPidFile('fail-handshake');
@@ -128,4 +151,20 @@ test('runAcpHarness: resume discards replayed text/activity before the new promp
   assert.deepEqual(activityIds, ['real-1', 'real-1']); // tool_input + tool_result for the real turn only
   assert.ok(result.result.includes('NEW ANSWER'));
   assert.ok(!result.result.includes('OLD REPLAYED'));
+});
+
+test('runAcpHarness: a protocolVersion mismatch on initialize fails clearly (docs/acp-protocol-research.md §4/§8)', async () => {
+  const harness = fakeHarness('protocol-mismatch');
+  await assert.rejects(
+    runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
+    /protocolVersion/,
+  );
+});
+
+test('runAcpHarness: an agent that never advertises session-mode support fails instead of running unconstrained', async () => {
+  const harness = fakeHarness('no-modes');
+  await assert.rejects(
+    runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
+    /session-mode support/,
+  );
 });
