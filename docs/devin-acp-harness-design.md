@@ -210,3 +210,46 @@ session creation. Confirmed by fetching the real `NewSessionRequest`/`SetSession
 resolving correctly while the process kept idling afterward, so a runner that waits for the process to
 exit on its own (the stdout harnesses' pattern) hangs until the outer timeout fires. `acp-runner.ts`
 finishes and kills the process itself as soon as the response resolves.
+
+**A rejected handshake step leaked the child process.** Every exit path except the handshake IIFE's
+`.catch` killed the child; that one only called `fail(err)`, which clears the timeout — the one other
+thing that would have killed it — without a `proc.kill()`. Since ACP agents exit only on stdin EOF
+(never sent) and the runner never closes stdin on this path, every failed handshake step left `devin
+acp` running indefinitely, its open stdio pipes keeping the host process's event loop referenced.
+Confirmed live, both ways, with the same repro (`session/load` against a `sessionId` devin doesn't
+have — devin genuinely rejects this with a JSON-RPC error `"Session not found"`, unlike an unrecognized
+`session/set_mode` modeId, which devin accepted silently rather than rejecting): on the pre-fix code the
+spawned `devin acp` process was still alive half a second after `runAcpHarness` rejected; with the fix
+(`proc.kill('SIGKILL')` added to the `.catch`) it was gone by the same check, every time.
+
+**Resume really did replay the whole prior turn into the new run — confirmed live, and now fixed.** A
+first process created a session and got back one short acknowledgement; a second, fresh process resumed
+that session's id with a new, unrelated prompt. Pre-fix, the replayed `agent_message_chunk`/`tool_call`
+notifications from `session/load` landed in `state.streamedText`/activities exactly as the design
+predicted. The fix (`acp-runner.ts` gates streamedText/activity forwarding on a `promptSent` flag, set
+only once `session/prompt` is actually sent) was verified against a real resume: the second run's
+`result.result` was exactly the new turn's answer (and nothing from the first turn's reply), while still
+correctly recalling information only given in the first turn — proving both that the replay is now
+discarded *and* that resume's actual context-carrying behavior is unaffected by discarding it.
+
+**Devin's `inputTokens` already includes `cachedReadTokens` as a subset, not an addend.** The captured
+fixture proves it exactly: every `usage_update` and the final prompt-result `usage` satisfy
+`used == inputTokens + outputTokens`, while `cachedReadTokens < inputTokens`. `StreamedUsage` follows
+Claude's convention where `inputTokens` *excludes* cache reads (`index.ts` sums
+`inputTokens + cacheCreationInputTokens + cacheReadInputTokens` into `promptTokens`), so mapping Devin's
+`inputTokens` straight across double-counted the cached-read portion — inflating `promptTokens` and
+therefore `contextPercent` by roughly 2x on this fixture (a reported ~66% against Devin's own ~33%).
+`devin.ts` now maps `inputTokens: devinInputTokens - devinCachedReadTokens` (floored at 0) and keeps
+`cacheReadInputTokens` as-is, so `promptTokens` reconstructs Devin's real `inputTokens` figure exactly.
+
+**`devin acp --model <MODEL>` is real and changes what runs — confirmed live, and now wired.** The
+harness previously never passed a requested model through, yet echoed it into the transcript as if it
+had (`result.model` stayed `null`, so `index.ts` fell back to reporting the *requested* model as the one
+that ran). `devin acp --help` documents `--model <MODEL>` as accepting fuzzy names (family slug, alias,
+partial name) and overriding the enterprise-configured default for every new session on that server.
+Verified live: the same prompt against the same repo, no `--model` set, ran on `GLM-5.2 High` (per
+`_cognition.ai/agent_stopped`'s `stats.modelLabel`); with `--model opus`, it ran on `Claude Opus 5
+Medium`. `devin.ts` now wires `opts.model` into `buildArgs` (matching the `--model`-flag pattern already
+used by `claude.ts`/`codex.ts`) and reads the *actual* model back from `stats.modelLabel` on that same
+notification rather than echoing the request — so `result.model` reflects what really ran even if a
+requested `--model` were fuzzy-matched to something else, or unset entirely.

@@ -108,12 +108,31 @@ export function parseDevinLine(line: string, state: ParseState): ParseOutcome {
     return translateUpdate(o.params.update, state);
   }
 
+  if (o.method === '_cognition.ai/agent_stopped' && isRecord(o.params) && isRecord(o.params.stats)) {
+    // The real model Devin ran, independent of whatever --model was requested — the honest
+    // value to report, since `--model` accepts fuzzy names and enterprise config can override it.
+    const label = o.params.stats.modelLabel;
+    if (typeof label === 'string') {
+      state._harness ??= {};
+      state._harness.model = label;
+    }
+    return {};
+  }
+
   if (isRecord(o.result)) {
     const r = o.result;
     if (typeof r.stopReason === 'string') {
       // session/prompt response — the turn is over, build the final result.
       const u = isRecord(r.usage) ? r.usage : null;
       const harnessState = isRecord(state._harness) ? state._harness : {};
+      // Devin's inputTokens already includes cachedReadTokens as a subset (fixture: on every
+      // usage_update/prompt result, used === inputTokens + outputTokens exactly, and
+      // cachedReadTokens < inputTokens). StreamedUsage follows Claude's convention where
+      // inputTokens EXCLUDES cache reads (index.ts sums inputTokens + cacheReadInputTokens into
+      // promptTokens) — so subtract the cache-read subset back out here, or promptTokens/context%
+      // double-counts it. Math.max guards against a negative if that invariant ever breaks.
+      const cacheReadInputTokens = typeof u?.cachedReadTokens === 'number' ? u.cachedReadTokens : 0;
+      const rawInputTokens = typeof u?.inputTokens === 'number' ? u.inputTokens : 0;
       const result: StreamedResult = {
         result: state.streamedText,
         // Devin's ACP prompt response carries no error flag of its own — a genuine failure
@@ -128,15 +147,15 @@ export function parseDevinLine(line: string, state: ParseState): ParseOutcome {
         durationMs: null,
         durationApiMs: null,
         ttftMs: null,
-        model: null,
+        model: typeof harnessState.model === 'string' ? harnessState.model : null,
         contextWindow: typeof harnessState.contextWindow === 'number' ? harnessState.contextWindow : null,
         maxOutputTokens: null,
         usage: u
           ? {
-              inputTokens: typeof u.inputTokens === 'number' ? u.inputTokens : 0,
+              inputTokens: Math.max(0, rawInputTokens - cacheReadInputTokens),
               outputTokens: typeof u.outputTokens === 'number' ? u.outputTokens : 0,
               cacheCreationInputTokens: 0, // not reported over ACP
-              cacheReadInputTokens: typeof u.cachedReadTokens === 'number' ? u.cachedReadTokens : 0,
+              cacheReadInputTokens,
             }
           : null,
       };
@@ -164,10 +183,14 @@ export const devinHarness: Harness = {
       return { ok: false, hint: 'Install the Devin CLI: https://docs.devin.ai/' };
     }
   },
-  buildArgs(_opts: BuildArgsOpts): string[] {
+  buildArgs(opts: BuildArgsOpts): string[] {
     // The prompt, permission mode, and session lifecycle are all negotiated over the ACP wire
-    // (see acp-runner.ts) — this just launches the ACP server.
-    return ['acp'];
+    // (see acp-runner.ts) — this just launches the ACP server. `--model` is the one real CLI flag
+    // `devin acp` accepts (verified: `devin acp --help`); it sets the default model for every new
+    // ACP session on this server, and accepts fuzzy names (family slug, alias, or partial name).
+    const args = ['acp'];
+    if (opts.model) args.push('--model', opts.model);
+    return args;
   },
   parseLine(line: string, state: ParseState): ParseOutcome {
     return parseDevinLine(line, state);

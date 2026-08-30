@@ -178,14 +178,31 @@ test('devin-acp.jsonl: real toolCallId correlates tool_call/tool_call_update acr
   assert.ok(result);
   assert.equal(result?.sessionId, 'cactus-iberis');
   assert.equal(result?.stopReason, 'end_turn');
+  // The real model Devin ran, read back from _cognition.ai/agent_stopped's stats.modelLabel —
+  // independent of whatever --model was requested, since --model accepts fuzzy names.
+  assert.equal(result?.model, 'GLM-5.2 High');
   // Devin's ACP payload reports no $ cost and no turn count — honest-metrics convention (#11).
   assert.equal(result?.totalCostUsd, null);
   assert.equal(result?.numTurns, null);
   assert.equal(result?.contextWindow, 200000); // from usage_update's `size`
-  assert.equal(result?.usage?.inputTokens, 66446);
+  // Devin's inputTokens (66446) already includes cachedReadTokens (66124) as a subset — our
+  // StreamedUsage.inputTokens must exclude cache reads (index.ts adds them back in separately
+  // to compute promptTokens), so the real "new" input is 66446 - 66124 = 322.
+  assert.equal(result?.usage?.inputTokens, 322);
   assert.equal(result?.usage?.outputTokens, 45);
   assert.equal(result?.usage?.cacheReadInputTokens, 66124);
   assert.equal(result?.usage?.cacheCreationInputTokens, 0); // not reported over ACP
+  // promptTokens (index.ts: inputTokens + cacheCreationInputTokens + cacheReadInputTokens) must
+  // reconstruct Devin's own real inputTokens figure exactly, and the context % must match Devin's
+  // own used/size (66491/200000 ≈ 33%), not a double-counted ~66%.
+  const promptTokens =
+    (result?.usage?.inputTokens ?? 0) +
+    (result?.usage?.cacheCreationInputTokens ?? 0) +
+    (result?.usage?.cacheReadInputTokens ?? 0);
+  assert.equal(promptTokens, 66446);
+  assert.ok(result?.contextWindow);
+  const contextPercent = (promptTokens / (result?.contextWindow ?? 1)) * 100;
+  assert.ok(Math.abs(contextPercent - 33.223) < 0.01, `expected ~33.2%, got ${contextPercent}`);
   // the prompt response carries no text of its own — falls back to accumulated agent_message_chunk text.
   assert.ok(result?.result.includes('math.js') && result.result.includes('greet.js'), result?.result);
 
