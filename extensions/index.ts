@@ -3,7 +3,7 @@
  *
  * Registers:
  *   - `delegate` tool (primary) + `claude_delegate` alias
- *   - `/delegate` command (primary) + `/claude`, `/codex`, `/opencode`, `/amp`, `/omp` aliases
+ *   - `/delegate` command (primary) + `/claude`, `/codex`, `/opencode`, `/amp`, `/omp`, `/devin` aliases
  *
  * Templates ship in ../templates/shared + ../templates/<harness>; users add custom ones in
  *   ~/.pi/agent/delegate/templates/<harness>/  (global)
@@ -29,6 +29,7 @@ import {
   truncateToWidth,
 } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
+import { runAcpHarness } from './acp-runner.ts';
 import {
   aggregateSpend,
   buildFanoutReport,
@@ -67,7 +68,6 @@ import {
   resolveHarnessName,
 } from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
-
 import { delegationHint, stripMarker } from './hint.ts';
 import { NotifyBatcher } from './notify.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
@@ -572,7 +572,7 @@ async function delegate(
   let streamedFull = '';
   let result: import('./runner.ts').HarnessResult;
   try {
-    result = await runHarness({
+    const baseRunOpts = {
       harness,
       prompt,
       cwd: ctx.cwd,
@@ -586,15 +586,22 @@ async function delegate(
       signal: opts.signal,
       timeoutMs: config.harnesses[harnessName]?.timeoutMs ?? config.timeoutMs,
       resumeSessionId: opts.sessionId,
-      onStream: t => {
+      onStream: (t: string) => {
         streamedFull += t;
         opts.onStream?.(t);
       },
-      onActivity: ev => {
+      onActivity: (ev: ActivityEvent) => {
         activityEvents.push(ev);
         opts.onActivity?.(ev);
       },
-    });
+    };
+    // ACP harnesses (Devin) negotiate permission mode over the wire via `session/set_mode`, so
+    // — unlike the stdout harnesses' runHarness() call above, which never passed nativePermission
+    // through (a pre-existing gap, left as-is here) — the escape hatch is wired for the acp path.
+    result =
+      harness.transport === 'acp'
+        ? await runAcpHarness({ ...baseRunOpts, nativePermission: nativePerm ?? undefined })
+        : await runHarness(baseRunOpts);
   } catch (err) {
     release();
     if (streamedFull.length > 0) {
@@ -960,11 +967,11 @@ export default function (pi: ExtensionAPI) {
     name: 'delegate',
     label: 'Delegate',
     description:
-      'Delegate a task to any harness (claude, codex, opencode, amp) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude) — pass "all" or a comma list (e.g. "claude,codex") to fan out the same task to several harnesses and get back one comparison report. mode selects a template: review, plan, implement, security-audit, docs, general, or custom — some templates run a host-side check (e.g. "bun test") after the harness exits and report pass/fail as separate evidence; that is configured on the template, not a parameter here. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session.',
+      'Delegate a task to any harness (claude, codex, opencode, amp, devin) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude) — pass "all" or a comma list (e.g. "claude,codex") to fan out the same task to several harnesses and get back one comparison report. mode selects a template: review, plan, implement, security-audit, docs, general, or custom — some templates run a host-side check (e.g. "bun test") after the harness exits and report pass/fail as separate evidence; that is configured on the template, not a parameter here. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session.',
     promptSnippet: 'Delegate a subtask to a harness and return its report',
     promptGuidelines: [
       'delegate runs a harness headless in the working directory and returns a streamed report with cost, token usage, and a session id for follow-ups.',
-      'Pass harness (claude|codex|opencode|amp) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
+      'Pass harness (claude|codex|opencode|amp|devin) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
       'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
       'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
       'sessionId resumes a previous delegated session instead of starting fresh.',
@@ -974,7 +981,7 @@ export default function (pi: ExtensionAPI) {
       harness: Type.Optional(
         Type.String({
           description:
-            'Harness to use: claude, codex, opencode, amp (aliases: omp). "all" or a comma list (e.g. "claude,codex") fans out to each detected harness. Defaults to config defaultHarness.',
+            'Harness to use: claude, codex, opencode, amp (aliases: omp), devin. "all" or a comma list (e.g. "claude,codex") fans out to each detected harness. Defaults to config defaultHarness.',
         }),
       ),
       task: Type.String({ description: 'The task/intent to delegate. Be specific.' }),
@@ -1682,7 +1689,7 @@ export default function (pi: ExtensionAPI) {
         );
       else
         ctx.ui.notify?.(
-          'Usage: /delegate [--harness=claude|codex|opencode|amp|all] [--mode=…] [--model=…] [--scope=…] [--verify=…] <prompt>',
+          'Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=…] [--model=…] [--scope=…] [--verify=…] <prompt>',
           'warning',
         );
       return;
@@ -1752,7 +1759,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand('delegate', {
     description:
-      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--verify=<cmd>] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report.',
+      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--verify=<cmd>] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report.',
     handler: makeHandler(),
   });
   pi.registerCommand('claude', {
@@ -1774,6 +1781,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand('omp', {
     description: 'Alias for /delegate --harness=amp (omp compat). Usage: /omp [--mode=...] <prompt>',
     handler: makeHandler('amp'),
+  });
+  pi.registerCommand('devin', {
+    description: 'Alias for /delegate --harness=devin. Usage: /devin [--mode=...] <prompt>',
+    handler: makeHandler('devin'),
   });
 
   pi.on('input', async (event, _ctx) => {

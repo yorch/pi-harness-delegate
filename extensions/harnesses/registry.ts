@@ -1,6 +1,7 @@
 import { ampHarness } from './amp.ts';
 import { claudeHarness } from './claude.ts';
 import { codexHarness } from './codex.ts';
+import { devinHarness } from './devin.ts';
 import { opencodeHarness } from './opencode.ts';
 import type { Harness } from './types.ts';
 
@@ -9,6 +10,7 @@ export const HARNESSES: Record<string, Harness> = {
   codex: codexHarness,
   opencode: opencodeHarness,
   amp: ampHarness,
+  devin: devinHarness,
 };
 
 export const ALIASES: Record<string, string> = {

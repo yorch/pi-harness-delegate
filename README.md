@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/pi-harness-delegate?logo=npm&color=CB3837)](https://www.npmjs.com/package/pi-harness-delegate) [![CI](https://github.com/yorch/pi-harness-delegate/actions/workflows/ci.yml/badge.svg)](https://github.com/yorch/pi-harness-delegate/actions/workflows/ci.yml) [![Release](https://github.com/yorch/pi-harness-delegate/actions/workflows/release.yml/badge.svg)](https://github.com/yorch/pi-harness-delegate/actions/workflows/release.yml) [![Node](https://img.shields.io/badge/node-26.x-brightgreen?logo=node.js)](https://nodejs.org) [![Bun](https://img.shields.io/badge/bun-1.3.14-black?logo=bun)](https://bun.sh) [![Biome](https://img.shields.io/badge/Biome-2.5.10-60a5fa)](https://biomejs.dev) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Delegate work to **any harness** ([Claude Code](https://github.com/anthropics/claude-code), [Muse](https://github.com/openai/codex), [OpenCode](https://opencode.ai), [Amp](https://ampcode.com)) from the [pi coding agent](https://github.com/badlogic/pi-mono): code reviews, detailed plans, implementation, security audits, docs — or your own custom templates.
+Delegate work to **any harness** ([Claude Code](https://github.com/anthropics/claude-code), [Muse](https://github.com/openai/codex), [OpenCode](https://opencode.ai), [Amp](https://ampcode.com), [Devin](https://devin.ai)) from the [pi coding agent](https://github.com/badlogic/pi-mono): code reviews, detailed plans, implementation, security audits, docs — or your own custom templates.
 
 Each harness runs headless in your repo with a normalized permission (`readonly` / `edit` / `danger`). Results stream back live, and token/cost usage feeds into pi's footer stats. Templates are portable — prompt bodies live in `templates/shared/`, harness-specific frontmatter selects the native permission.
 
@@ -16,7 +16,9 @@ pi install npm:pi-harness-delegate
 pi install git:github.com/yorch/pi-harness-delegate
 ```
 
-Requires at least one harness binary on PATH (`claude --version`, `codex --version`, `opencode --version`, `amp --version`). Restart pi (or `/reload`) to activate.
+Requires at least one harness binary on PATH (`claude --version`, `codex --version`, `opencode --version`, `amp --version`, `devin --version`). Restart pi (or `/reload`) to activate.
+
+**Devin setup note:** `devin` refuses to run interactively (`devin`, `devin -p`) in a directory you haven't trusted yet — but this extension runs Devin over `devin acp` (see below), and live testing found that transport is **not** gated by workspace trust in the tested version (`3000.6.7`): a fresh, never-touched directory worked over ACP with no refusal and no prompt. This extension never sets Devin's `skip_workspace_trust` config key on your behalf either way — that stays a decision you make interactively, if you ever need it for `devin` itself.
 
 ## Usage
 
@@ -32,6 +34,7 @@ Manual delegation:
 /claude --mode=security-audit --scope=auth/ …          # alias → delegate --harness=claude
 /opencode plan the cache migration
 /amp implement the caching layer
+/devin review the new auth flow
 ```
 
 Only the prompt is required. A **harness as first word** and/or **mode as next word** selects them; every `--flag` is optional (harness defaults to `delegate.defaultHarness`, mode to `delegate.defaultMode`, scope to whole repo).
@@ -52,6 +55,8 @@ The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff
 /delegate claude,codex plan the migration          # just these two
 delegate({ harness: "all", mode: "review", scope: "diff" })   # tool call form
 ```
+
+- `all` resolves against *detected* harnesses, so Devin joins a fan-out automatically once `devin` is installed — a 5-harness fan-out costs more (and runs one more concurrent process) than the 4-harness one did, budget accordingly.
 
 - `all` resolves to whatever's actually installed (`detectAll()`) — an uninstalled harness is skipped and named in the report, it doesn't fail the run. An explicit list is validated the same way; an unknown name is also reported rather than aborting the rest.
 - Each harness's run goes through the same `delegate()` engine as a single-harness call and writes its own transcript to its own `~/.pi/agent/delegate/outputs/<harness>/`. Runs are launched together and execute in parallel, bounded by `maxConcurrent` (default `4`, one slot per supported harness) — a run beyond the cap queues for a free slot instead of failing, and the cap is enforced across pi processes, not just this one. **This means fan-out spend is genuinely simultaneous**: with the default cap, a 4-harness fan-out can bill all four at once instead of one after another — budget accordingly (`maxBudgetUsd` still applies per run).
@@ -78,6 +83,7 @@ delegate({ harness: "all", mode: "review", scope: "diff" })   # tool call form
 | `codex` | `codex` | `readonly→read-only`, `edit→workspace-write`, `danger→danger-full-access` | `codex exec --json`. Schema-verified against codex-cli 0.149.1; cost is always unmeasured (`null`) on ChatGPT-plan auth. |
 | `opencode` | `opencode` | `readonly→read-only`, `edit→allow-edit`, `danger→danger` | `opencode run --format json`. Schema-verified against opencode 1.18.16. |
 | `amp` | `amp` (`omp` alias) | `readonly→read-only`, `edit→workspace`, `danger→danger` | `<binary> -p --mode json`, resolves whichever of `amp`/`omp` is actually on `PATH`. Schema-verified against omp 17.2.9 (Sourcegraph's real Amp CLI is unverified). |
+| `devin` | `devin` | `readonly→plan`, `edit→accept-edits`, `danger→bypass` | Runs `devin acp` — [Agent Client Protocol](https://agentclientprotocol.com) over stdio, not stdout JSONL (see `acp-runner.ts`). Real tool-call ids, a genuine context-window %, and a working `sessionId`/resume via `session/load`. Reports no `$` cost (stays `null`) and no turn count. `model` isn't wired — no verified way to set it over this version's ACP surface, so devin templates omit `model:` frontmatter. Schema-verified against `devin 3000.6.7 (260a97c8)`. |
 
 Detect availability: `delegate` checks `harness --version` at startup; missing harnesses hint install instructions.
 

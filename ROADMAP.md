@@ -130,12 +130,44 @@ not just its docs — see the doc's §4).
   reason instead), and it has no bulk stop-all (this repo's double-Esc cancels every in-flight and queued
   run in a fan-out with one gesture).
 
-## 13. Future
+## 13. Devin as a fifth harness, general ACP transport
+
+**Status:** done ([supersedes #20](docs/devin-acp-harness-design.md))
+
+Scoped in [`docs/devin-acp-harness-design.md`](docs/devin-acp-harness-design.md), then built and
+verified with real `devin 3000.6.7` runs (see the doc's §8 errata for what implementation corrected).
+
+- **`extensions/acp-runner.ts`** — a sibling to `runner.ts` for harnesses whose `transport` is `'acp'`
+  (Agent Client Protocol, https://agentclientprotocol.com — JSON-RPC 2.0 over stdio, bidirectional and
+  stateful, unlike the stdout harnesses' one-way JSONL stream). Exposes the exact same
+  `RunHarnessOptions`/`HarnessResult` shape as `runHarness`, so `delegate()` picks the runner from
+  `harness.transport` and everything downstream (transcripts, `ToolCallIndex`, overlays, fan-out, spend)
+  is unchanged. Drives `initialize` → `session/new`/`session/load` → `session/set_mode` →
+  `session/prompt`, holds `stdin` open for the run's lifetime, mirrors `runner.ts`'s caps/timeout/abort
+  handling, and answers server-initiated requests (permission prompts) defensively rather than
+  auto-approving. Deliberately general — Devin is its first consumer, not a special case baked into it.
+- **`extensions/harnesses/devin.ts`** — `transport: 'acp'`, maps `readonly→plan`, `edit→accept-edits`,
+  `danger→bypass` (exact structural match to Claude's tiers), translates ACP `session/update` events
+  into `ParseOutcome` with real `toolCallId` correlation. `totalCostUsd`/`numTurns` stay `null` — Devin
+  reports neither over ACP. Schema-verified against `devin 3000.6.7 (260a97c8)`.
+- **The four existing harnesses are untouched** — `transport` is optional on `Harness`, defaulting to
+  the pre-existing `'stdout'` behavior; their 139 pre-existing tests pass unmodified.
+- **Real-run findings that corrected the design note:** workspace trust does not gate `devin acp` (only
+  `devin -p`/interactive `devin` — confirmed against directories `devin` had never seen), so no trust
+  hint or bypass ships; resume via `session/load` works and is wired (`opts.resumeSessionId`); an ACP
+  session doesn't exit on its own once a prompt turn completes, so the runner finishes and kills the
+  process itself rather than waiting on it.
+- `templates/devin/*.md` mirror `templates/claude/*.md` without `model:` frontmatter — no verified way
+  to set Devin's model over this version's ACP surface.
+- `all`/a comma-list fan-out picks up Devin automatically once `devin` is installed (`detectAll()`).
+
+## 14. Future
 
 - Codex runs contribute **no tokens** to pi's session totals — `mapHarnessUsage` returns `undefined` when cost is unknown, and codex reports no cost under ChatGPT-plan auth. Revisit if pi ever accepts tokens-without-cost.
 - Verify codex's resume path against a captured resume transcript (currently derived from `--help` only).
 - Verify whether `--add-dir` exists on omp (absent from its help; inert today since `addDirs` defaults empty).
 - Run registry is count-then-acquire, so the cap is best-effort, not a hard mutex. Only worth hardening if the cap becomes a spend control — this also bounds `acquireSlot`'s `wait: true` polling: two waiters can still both observe a just-freed slot and both proceed.
+- Devin's `model` isn't wired over ACP — no verified way to set it on this version's ACP surface (`session/new`'s request has no model field; `configOptions` only appears in responses). Revisit if a `session/set_config_option`-shaped request turns up.
 - `maxConcurrent` per-harness UI + tests for the object shape.
 - `/delegate list --harness=...` and `history` harness filter polish.
 - See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "clearly worth doing" display/inspection items shipped in §12 above. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions, per-child drill-in transcript viewer, steering) is blocked upstream on the harness CLIs, not on this repo.

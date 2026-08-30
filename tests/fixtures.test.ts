@@ -6,6 +6,7 @@ import { collectActivityLog } from '../extensions/activity.ts';
 import { parseAmpLine } from '../extensions/harnesses/amp.ts';
 import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
 import { parseCodexLine } from '../extensions/harnesses/codex.ts';
+import { parseDevinLine } from '../extensions/harnesses/devin.ts';
 import { parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
 import type { ActivityEvent, ParseState, StreamedResult } from '../extensions/harnesses/types.ts';
 
@@ -14,16 +15,22 @@ function loadFixture(name: string): string[] {
   return readFileSync(p, 'utf8').split('\n').filter(Boolean);
 }
 
-/** Feed every line of a fixture through a parser, returning the accumulated activities and final result. */
+/** Feed every line of a fixture through a parser, returning the accumulated activities and final result.
+ *  Accumulates streamedText into state.streamedText the same way runner.ts/acp-runner.ts do — needed for
+ *  harnesses (like devin's) whose final result has no text field of its own and falls back to it. */
 function replay(
   lines: string[],
-  parseLine: (line: string, state: ParseState) => { activities?: ActivityEvent[]; result?: StreamedResult | null },
+  parseLine: (
+    line: string,
+    state: ParseState,
+  ) => { streamedText?: string; activities?: ActivityEvent[]; result?: StreamedResult | null },
 ): { activities: ActivityEvent[]; result: StreamedResult | null } {
   const state: ParseState = { streamedText: '', activities: [], result: null };
   const activities: ActivityEvent[] = [];
   let result: StreamedResult | null = null;
   for (const l of lines) {
     const out = parseLine(l, state);
+    if (out.streamedText) state.streamedText += out.streamedText;
     if (out.activities) activities.push(...out.activities);
     if (out.result) result = out.result;
   }
@@ -163,4 +170,49 @@ test('amp.jsonl: out-of-order parallel tool_execution_end attributes to the righ
   );
   assert.equal(result?.usage?.inputTokens, 87273 + 87632 + 115596);
   assert.equal(result?.usage?.outputTokens, 184 + 375 + 129);
+});
+
+test('devin-acp.jsonl: real toolCallId correlates tool_call/tool_call_update across a genuine ACP session', () => {
+  const lines = loadFixture('devin-acp.jsonl');
+  const { activities, result } = replay(lines, parseDevinLine);
+  assert.ok(result);
+  assert.equal(result?.sessionId, 'cactus-iberis');
+  assert.equal(result?.stopReason, 'end_turn');
+  // Devin's ACP payload reports no $ cost and no turn count — honest-metrics convention (#11).
+  assert.equal(result?.totalCostUsd, null);
+  assert.equal(result?.numTurns, null);
+  assert.equal(result?.contextWindow, 200000); // from usage_update's `size`
+  assert.equal(result?.usage?.inputTokens, 66446);
+  assert.equal(result?.usage?.outputTokens, 45);
+  assert.equal(result?.usage?.cacheReadInputTokens, 66124);
+  assert.equal(result?.usage?.cacheCreationInputTokens, 0); // not reported over ACP
+  // the prompt response carries no text of its own — falls back to accumulated agent_message_chunk text.
+  assert.ok(result?.result.includes('math.js') && result.result.includes('greet.js'), result?.result);
+
+  // 4 real tool calls (2x find_file_by_name, 2x read), each a genuine `chatcmpl-tool-...` toolCallId.
+  // Each fires 2-3 `tool_call_update` events (in_progress, sometimes twice) before its terminal
+  // completed/failed — only the terminal one should produce a tool_result, or a naive "every
+  // update produces a result" parser would exhaust ToolCallIndex's pending entry on the first
+  // in_progress update and strand the real completion unattributed.
+  const log = collectActivityLog(activities);
+  const toolLines = log.filter(l => l.startsWith('▶'));
+  assert.equal(toolLines.length, 4);
+  assert.ok(
+    toolLines.every(l => l.endsWith('✓')),
+    `every tool call should resolve, got: ${toolLines}`,
+  );
+  assert.ok(log.some(l => l.includes('find_file_by_name') && l.includes('math.js')));
+  assert.ok(log.some(l => l.includes('find_file_by_name') && l.includes('greet.js')));
+  assert.ok(log.some(l => l.includes('read') && l.includes('math.js')));
+  assert.ok(log.some(l => l.includes('read') && l.includes('greet.js')));
+  // 8 agent_thought_chunk events -> 8 thinking activities, distinct from the 4 tool_input + 4 tool_result.
+  assert.equal(activities.filter(a => a.kind === 'thinking').length, 8);
+});
+
+test('devin-acp.jsonl: unrecognized session/update kinds (config_option_update, available_commands_update, etc.) are ignored, not thrown', () => {
+  const lines = loadFixture('devin-acp.jsonl');
+  const state: ParseState = { streamedText: '', activities: [], result: null };
+  for (const l of lines) {
+    assert.doesNotThrow(() => parseDevinLine(l, state));
+  }
 });

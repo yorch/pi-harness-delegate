@@ -75,12 +75,26 @@ test('resolveAmpBinary prefers amp, falls back to omp, then defaults to amp', ()
 test('registry returns harnesses and normalizes aliases', () => {
   assert.ok(HARNESS_NAMES.includes('claude'));
   assert.ok(HARNESS_NAMES.includes('codex'));
+  assert.ok(HARNESS_NAMES.includes('devin'));
   assert.equal(resolveHarnessName('OMP'), 'amp');
   assert.equal(resolveHarnessName('claude'), 'claude');
   assert.ok(getHarness('claude'));
   assert.ok(getHarness('amp'));
   assert.ok(getHarness('omp'));
+  assert.ok(getHarness('devin'));
   assert.equal(getHarness('unknown'), undefined);
+});
+
+test('devin harness declares acp transport, spawns `devin acp` regardless of permission, and maps modes', () => {
+  const devin = getHarness('devin');
+  assert.ok(devin);
+  assert.equal(devin.transport, 'acp');
+  // buildArgs only launches the ACP server — the prompt/permission/session lifecycle are all
+  // negotiated over the wire by acp-runner.ts, not passed as CLI flags.
+  for (const permission of ['readonly', 'edit', 'danger'] as const) {
+    assert.deepEqual(devin.buildArgs({ prompt: 'hi', cwd: '/tmp', permission }), ['acp']);
+  }
+  assert.deepEqual(devin.permissionMap, { readonly: ['plan'], edit: ['accept-edits'], danger: ['bypass'] });
 });
 
 test('harness buildArgs respect permission', () => {
