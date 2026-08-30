@@ -86,7 +86,13 @@ import { NotifyBatcher } from './notify.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
 import { runHarness } from './runner.ts';
-import { type DelegateTemplate, loadTemplates, resolveNativePermission } from './templates.ts';
+import {
+  type DelegateTemplate,
+  describeSkippedProjectTemplates,
+  loadTemplates,
+  projectTemplatePresence,
+  resolveNativePermission,
+} from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
 
 /** Render a possibly-unknown cost — `null` means the harness didn't report one, not a measured $0. */
@@ -188,6 +194,28 @@ function outputsDirFor(harness: string): string {
  * project-local delegate templates load — see the trust-tier comment on `loadTemplates`. Fails
  * closed (untrusted) if the host is old enough not to expose the method, or if it throws.
  */
+/**
+ * Warn once per project when trusted-only content was silently skipped.
+ *
+ * Before 0.6.0 a committed `.pi/trusted` file (or `PI_TRUSTED=1`) granted trust; both were removed as
+ * a security fix. A user who relied on either loses their project-local templates on upgrade with no
+ * visible signal — an override shares its name with the builtin it replaces, so the run just uses the
+ * builtin and looks fine. `/delegate status` reports trust state, but nobody runs it unless something
+ * already looks wrong, so this fires on an actual delegation instead — and only when the project
+ * demonstrably has the content being skipped, so it never nags anyone unaffected.
+ */
+const warnedUntrustedProjects = new Set<string>();
+
+function warnIfProjectTemplatesSkipped(ctx: ExtensionContext, trusted: boolean): void {
+  if (trusted || warnedUntrustedProjects.has(ctx.cwd)) return;
+  const lines = describeSkippedProjectTemplates(projectTemplatePresence(ctx.cwd));
+  if (lines.length === 0) return;
+  warnedUntrustedProjects.add(ctx.cwd);
+  const msg = lines.join('\n');
+  if (ctx.hasUI) ctx.ui.notify?.(msg, 'warning');
+  else process.stderr.write(`${msg}\n`);
+}
+
 function isProjectTrusted(ctx: ExtensionContext): boolean {
   try {
     return typeof ctx.isProjectTrusted === 'function' && ctx.isProjectTrusted() === true;
@@ -611,7 +639,9 @@ async function delegate(
     throw new Error(
       `unknown harness "${harnessName}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
     );
-  const templates = loadTemplates(ctx.cwd, harnessName, isProjectTrusted(ctx));
+  const projectTrusted = isProjectTrusted(ctx);
+  warnIfProjectTemplatesSkipped(ctx, projectTrusted);
+  const templates = loadTemplates(ctx.cwd, harnessName, projectTrusted);
   const mode = opts.mode || config.defaultMode;
   const template = templates.get(mode);
   if (!template)
