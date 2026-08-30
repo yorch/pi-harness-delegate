@@ -180,7 +180,9 @@ In `~/.pi/agent/settings.json`:
 }
 ```
 
-Legacy `claudeDelegate` is auto-migrated into `delegate.harnesses.claude` (deprecated).
+Run `/delegate config` to see exactly what was read from `settings.json` (or why nothing was — no file, no `delegate` key, or a parse error), plus the effective config with defaults filled in, as a paste-ready JSON block for the `delegate` key. `/delegate status` shows the same provenance as one summary line.
+
+Legacy `claudeDelegate` is auto-migrated into `delegate.harnesses.claude` (deprecated) — most fields migrate, including per-harness settings like `harnesses.<name>.transport`. Two things never migrate, though, and stay silently unreachable as long as `claudeDelegate` is your *only* key (no `delegate` key at all): `defaultHarness` (stays pinned to `claude`) and a top-level default `model` (only `claudeDelegate.model` → `harnesses.claude.model` migrates — there's no global fallback). Both `/delegate status` and `/delegate config` call this out when it's happening; the fix is renaming `claudeDelegate` to `delegate`.
 
 - `harnesses.<name>.transport` — `"stdout"` (default for every harness except `devin`, which is ACP-only) or `"acp"`. Only legal where the harness actually supports it — see [Transport](#transport) above; an unsupported value fails the run immediately with a clear message rather than being silently ignored or failing at spawn time.
 
