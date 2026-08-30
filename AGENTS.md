@@ -11,7 +11,7 @@ Guidance for AI coding agents working in this repository.
 | Command | What it does |
 | --- | --- |
 | `bun run typecheck` | `tsc --noEmit` over `extensions/` (strict, `allowImportingTsExtensions`) |
-| `bun test` | `bun test` (168 tests, bun:test — node:test compatible) |
+| `bun test` | `bun test` (169 tests, bun:test — node:test compatible; `tests/live.test.ts` is opt-in, see below, and counts as 1 here) |
 | `bun run lint` | `biome check .` (2 spaces, 120 cols, single quotes) |
 | `bun run lint:fix` | `biome check --write .` |
 | `bun run verify` | `lint + typecheck + test` — CI and release both run this |
@@ -87,6 +87,35 @@ Load-test a local change: `pi -e <repo path> -p "Reply with exactly: OK" --no-to
 
 Load-test the release guard: `node scripts/check-packables.mjs` — must pass; fails on `0.0.0` or empty `extensions/`.
 
+### Live integration suite
+
+`tests/live.test.ts` is the guard against the class of bug that motivated it: every other test only
+replays a fixture through `parseLine`/`extractResult`, which can never catch a `buildArgs` the real
+CLI now rejects outright — exactly what happened twice before this suite existed (`codex exec
+--ask-for-approval`/`--thread-id`, `opencode run --permission`/`--add-dir`, see the Gotchas entry
+below). It spawns each *detected* harness's binary for real, once, with a tiny read-only prompt in a
+scratch git repo, and asserts the basics a fixture can't: the process actually runs, a real result
+comes back, `sessionId` is populated, and the metrics that harness is known to genuinely report
+(per `docs/acp-harness-assessment.md`'s comparison table) are present.
+
+Opt-in only — `PI_DELEGATE_LIVE=1 bun test tests/live.test.ts` (needs real installed binaries, real
+auth, and for most harnesses real API spend). Never runs in CI or plain `bun run verify`; without the
+env var it registers one test that logs how to run it and otherwise does nothing. A harness whose
+binary isn't on `PATH` is skipped (logged, not failed) via each harness's own `detect()`. Use
+`--timeout <ms>` (bun's own per-test timeout, default 5000ms) generously — e.g. `--timeout 90000` —
+since it's independent of the `timeoutMs` passed into `runHarness`/`runAcpHarness`; a mismatch there
+doesn't just fail cleanly, it lets an abandoned child process's late `close` event fire after bun has
+already moved on to the next test and get misattributed to whatever test happens to be running then.
+
+A harness's own account state is a legitimate, real reason for this suite to fail, not a suite bug —
+e.g. this session's `omp`/`opencode` account had exhausted its default free-tier model's monthly
+quota (`docs/acp-harness-assessment.md` §2's omp findings — confirmed here to extend to opencode's
+stdout default model too, since both share the same `opencode-go` credential), so `live: amp` and
+`live: opencode` failed for account reasons, not code ones, the one time this session ran it for real
+(claude/codex/devin passed). Don't special-case such failures into skips — a heuristic on error text
+is more likely to mask a real regression than correctly identify a billing one; an honest failure with
+the real error message is the correct signal.
+
 ## Gotchas (each cost real time — don't rediscover them)
 
 - Unscoped `pi-harness-delegate` — no `--access public` dance for scoped name; but keep `files: ["extensions","templates"]` so subdirs ship.
@@ -95,6 +124,7 @@ Load-test the release guard: `node scripts/check-packables.mjs` — must pass; f
 - Peer deps `"*"` (`pi-ai`, `pi-coding-agent`, `pi-tui`, `typebox`) — pi bundles them; never add to `dependencies`.
 - Harness CLIs change args often — version-gate `detect()` and snapshot one real JSONL transcript before locking parser. Confirmed the hard way: as of codex-cli 0.149.1 and opencode 1.18.16, the flags this repo previously assumed (`codex exec --ask-for-approval`, `codex exec --thread-id`, `opencode run --permission`, `opencode run --add-dir`) are all rejected outright by those CLIs — every codex/opencode delegation would fail before emitting a single JSONL line. Re-verify flags against `<binary> <subcommand> --help` whenever bumping a pinned harness version, not just the JSONL schema.
 - `amp`/`omp` isn't one CLI with two names — `omp` ("Oh My Pi") has a completely different flag surface from the real Sourcegraph Amp CLI it's aliased to. Its `resolveAmpBinary()` PATH probe (in `amp.ts`) only picks whichever binary is actually present; it doesn't validate that binary's schema matches what's wired.
+- `opencode run` does not exit cleanly after its default model's stream errors out (confirmed live via `--print-logs --log-level DEBUG`: an `AI_RetryError` after 3 retry attempts is logged, then the process just hangs with no further output and no exit) — it relies entirely on the caller's own `timeoutMs` to bound it, same as a genuine hang would. Don't read a `runHarness` timeout against `opencode` as proof of a bug in this repo's code without checking `--print-logs` first; it may be `opencode` itself failing to exit on its own error.
 - **Bun for dev, npm for publish.** CI/release use `bun install`/`bun run` everywhere, but `bun run release` calls `changeset publish` which runs `npm publish --provenance` via npm (OIDC). No npm token in repo — `id-token: write` mints it. First publish of a new package must be local with 2FA (`bun run release`).
 - `devin`'s interactive workspace-trust gate (`devin -p`/interactive `devin` refuse in an untrusted directory) does **not** apply to `devin acp` — confirmed live: the raw ACP `initialize`/`session/new` handshake against a directory `devin` had never seen succeeded with no refusal, in the same test where `devin -p` in that exact directory refused. Don't add a trust-check hint or a `skip_workspace_trust` bypass on the strength of the design note's `-p`-based finding without re-verifying against the actual `acp` subcommand — it's not the same gate.
 - An ACP agent does not exit once `session/prompt`'s response arrives — the session can outlive one turn. `acp-runner.ts` must explicitly finish and kill the process itself the moment that response resolves; waiting on `proc.on('close')` (the stdout harnesses' pattern) hangs until the process's own timeout, because `stdin` is deliberately held open for the run.
