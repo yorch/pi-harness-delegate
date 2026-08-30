@@ -1,5 +1,32 @@
 # pi-harness-delegate
 
+## 0.5.0
+
+### Minor Changes
+
+- [#21](https://github.com/yorch/pi-harness-delegate/pull/21) [`11bd713`](https://github.com/yorch/pi-harness-delegate/commit/11bd713592c2ccf8c5b55a3eb2bf3c41c7601f3a) Thanks [@yorch](https://github.com/yorch)! - Add Devin as a fifth harness, over a new general Agent Client Protocol (ACP) transport.
+  
+  - `extensions/acp-runner.ts` — a sibling to `runner.ts` for harnesses whose `transport` is `'acp'` (bidirectional JSON-RPC over stdio, https://agentclientprotocol.com), exposing the same `RunHarnessOptions`/`HarnessResult` shape so `delegate()` and everything downstream (transcripts, `ToolCallIndex`, progress overlays, fan-out, spend rollup) is unchanged. Devin is its first consumer, not a special case baked into it.
+  - `extensions/harnesses/devin.ts` — runs `devin acp`, maps `readonly→plan`, `edit→accept-edits`, `danger→bypass`, real `toolCallId` tool-call correlation, a genuine context-window %, and working resume via `session/load`. Reports no `$` cost (`null`) and no turn count — honest, not invented.
+  - `templates/devin/*.md` mirror the other harnesses' templates.
+  - The four existing harnesses (claude, codex, opencode, amp) are untouched — `transport` is optional and defaults to their existing behavior.
+  - `harness: "all"` / a comma-list fan-out picks up Devin automatically once `devin` is installed.
+
+### Patch Changes
+
+- [#24](https://github.com/yorch/pi-harness-delegate/pull/24) [`ac87037`](https://github.com/yorch/pi-harness-delegate/commit/ac87037a76d91b6d8635727db4bd5e35d5d1fbf4) Thanks [@yorch](https://github.com/yorch)! - Fix four issues found in code review of the Devin ACP harness (`extensions/acp-runner.ts`, `extensions/harnesses/devin.ts`):
+  
+  - **Process leak**: a rejected handshake step (bad `session/set_mode` modeId, a JSON-RPC error, a handshake timeout) left the spawned `devin acp` process running indefinitely — every other exit path already killed it, only the handshake's `.catch` didn't. Confirmed live, both ways.
+  - **Inflated context %**: Devin's `inputTokens` already includes `cachedReadTokens` as a subset, but `StreamedUsage.inputTokens` is supposed to exclude cache reads (Claude's convention) — the mismatch roughly doubled the reported context-window percentage. Fixed and covered by a fixture-driven test asserting the real percentage.
+  - **Resume replayed the whole prior conversation**: `session/load` replays every prior turn as notifications before the new prompt's; nothing discarded them, so a resumed run's result had the entire previous session prepended. Fixed by gating streamed text/activity forwarding until the new `session/prompt` is actually sent. Verified live: a resumed run now returns only the new turn's answer, while still correctly recalling prior context.
+  - **`model` echoed as used but silently dropped**: a requested model was written into the transcript as what ran, but was never passed to `devin acp`. `--model` is real (`devin acp --help`) and genuinely changes what runs — now wired, with the reported `model` read back from Devin's own `_cognition.ai/agent_stopped` event rather than echoed from the request, so it reflects what actually ran.
+
+- [#23](https://github.com/yorch/pi-harness-delegate/pull/23) [`c731a90`](https://github.com/yorch/pi-harness-delegate/commit/c731a90a1690f689e14b091b4f3b266b6e19029e) Thanks [@yorch](https://github.com/yorch)! - Wire the `nativePermission` escape hatch through to stdout harnesses, and gate every harness's danger mode behind `allowDangerous`.
+  
+  - `permissionMode`/`sandbox` template frontmatter was parsed and documented but never passed to `runHarness()`, so the native escape hatch has silently never worked for claude/codex/opencode/amp.
+  - Passing it revealed that the danger gate only recognised three hardcoded spellings. A template declaring `yolo` (amp) or `bypass` (devin) was filed as an unknown native with a normalized tier of `edit`, skipping the `allowDangerous` gate while running the harness unsandboxed. The gate now asks each harness for its own danger tokens.
+  - An explicit `allowDangerous` escalation now wins over a template's native mode, which would otherwise silently downgrade the run.
+
 ## 0.4.1
 
 ### Patch Changes
