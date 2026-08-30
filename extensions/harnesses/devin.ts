@@ -114,6 +114,14 @@ export function parseDevinLine(line: string, state: ParseState): ParseOutcome {
       // session/prompt response — the turn is over, build the final result.
       const u = isRecord(r.usage) ? r.usage : null;
       const harnessState = isRecord(state._harness) ? state._harness : {};
+      // Devin's inputTokens already includes cachedReadTokens as a subset (fixture: on every
+      // usage_update/prompt result, used === inputTokens + outputTokens exactly, and
+      // cachedReadTokens < inputTokens). StreamedUsage follows Claude's convention where
+      // inputTokens EXCLUDES cache reads (index.ts sums inputTokens + cacheReadInputTokens into
+      // promptTokens) — so subtract the cache-read subset back out here, or promptTokens/context%
+      // double-counts it. Math.max guards against a negative if that invariant ever breaks.
+      const cacheReadInputTokens = typeof u?.cachedReadTokens === 'number' ? u.cachedReadTokens : 0;
+      const rawInputTokens = typeof u?.inputTokens === 'number' ? u.inputTokens : 0;
       const result: StreamedResult = {
         result: state.streamedText,
         // Devin's ACP prompt response carries no error flag of its own — a genuine failure
@@ -133,10 +141,10 @@ export function parseDevinLine(line: string, state: ParseState): ParseOutcome {
         maxOutputTokens: null,
         usage: u
           ? {
-              inputTokens: typeof u.inputTokens === 'number' ? u.inputTokens : 0,
+              inputTokens: Math.max(0, rawInputTokens - cacheReadInputTokens),
               outputTokens: typeof u.outputTokens === 'number' ? u.outputTokens : 0,
               cacheCreationInputTokens: 0, // not reported over ACP
-              cacheReadInputTokens: typeof u.cachedReadTokens === 'number' ? u.cachedReadTokens : 0,
+              cacheReadInputTokens,
             }
           : null,
       };

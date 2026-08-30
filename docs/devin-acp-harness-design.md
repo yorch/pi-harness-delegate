@@ -231,3 +231,13 @@ only once `session/prompt` is actually sent) was verified against a real resume:
 `result.result` was exactly the new turn's answer (and nothing from the first turn's reply), while still
 correctly recalling information only given in the first turn — proving both that the replay is now
 discarded *and* that resume's actual context-carrying behavior is unaffected by discarding it.
+
+**Devin's `inputTokens` already includes `cachedReadTokens` as a subset, not an addend.** The captured
+fixture proves it exactly: every `usage_update` and the final prompt-result `usage` satisfy
+`used == inputTokens + outputTokens`, while `cachedReadTokens < inputTokens`. `StreamedUsage` follows
+Claude's convention where `inputTokens` *excludes* cache reads (`index.ts` sums
+`inputTokens + cacheCreationInputTokens + cacheReadInputTokens` into `promptTokens`), so mapping Devin's
+`inputTokens` straight across double-counted the cached-read portion — inflating `promptTokens` and
+therefore `contextPercent` by roughly 2x on this fixture (a reported ~66% against Devin's own ~33%).
+`devin.ts` now maps `inputTokens: devinInputTokens - devinCachedReadTokens` (floored at 0) and keeps
+`cacheReadInputTokens` as-is, so `promptTokens` reconstructs Devin's real `inputTokens` figure exactly.
