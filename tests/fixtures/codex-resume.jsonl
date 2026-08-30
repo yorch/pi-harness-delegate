@@ -1,0 +1,9 @@
+Reading additional input from stdin...
+{"type":"thread.started","thread_id":"01a052bb-0000-0000-0000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":22866,"cached_input_tokens":11008,"cache_write_input_tokens":0,"output_tokens":85,"reasoning_output_tokens":78}}
+{"type":"thread.started","thread_id":"01a052bb-0000-0000-0000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"quokka-nebula-77"}}
+{"type":"turn.completed","usage":{"input_tokens":33049,"cached_input_tokens":27392,"cache_write_input_tokens":0,"output_tokens":51,"reasoning_output_tokens":38}}

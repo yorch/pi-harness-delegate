@@ -14,6 +14,11 @@ import type {
 // non-interactive; sandbox alone governs what's allowed) and resume is a subcommand
 // (`exec resume <id> <prompt>`), not a `--thread-id` flag — both confirmed via `codex exec
 // --help` / `codex exec resume --help`, not just the JSONL capture.
+//
+// Resume itself live-verified end-to-end against codex-cli 0.150.1 — see
+// tests/fixtures/codex-resume.jsonl: a first `codex exec` turn was taught a fact, then a second,
+// independent process ran `codex exec resume <id> <prompt>` and correctly recalled it, proving
+// resume genuinely restores prior context rather than just replaying/echoing the session id.
 
 const execFileAsync = promisify(execFile);
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -245,7 +250,10 @@ export const codexHarness: Harness = {
       ? ['exec', 'resume', opts.resumeSessionId, opts.prompt, '--json']
       : ['exec', '--json', opts.prompt, '--sandbox', sandbox];
     if (opts.model) args.push('--model', opts.model);
-    for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
+    // `codex exec resume --help` has no `--sandbox`/`--add-dir` at all (confirmed live: passing
+    // --add-dir to resume is a hard CLI error, "unexpected argument '--add-dir' found") — only the
+    // fresh-turn branch above supports either flag.
+    if (!opts.resumeSessionId) for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
     return args;
   },
   parseLine(line: string, state: ParseState): ParseOutcome {
