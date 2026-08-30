@@ -196,3 +196,164 @@ test('resolveTransport: rejects a transport outside supportsTransports with a cl
   const ampCfg = await loadConfigFromSettings({ delegate: { harnesses: { amp: { transport: 'acp' } } } });
   assert.throws(() => resolveTransport(ampCfg, 'amp', ampHarness), /amp only supports: stdout/);
 });
+
+// --- Provenance: loadConfigWithSource / describeConfigSource / buildConfigReport ---
+
+async function withSettingsDir<T>(write: ((dir: string) => void) | undefined, fn: () => Promise<T> | T): Promise<T> {
+  const dir = join(tmpdir(), `cfg-source-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    write?.(dir);
+    return await fn();
+  } finally {
+    process.env.PI_CODING_AGENT_DIR = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('loadConfigWithSource: absent file reports fileExists:false, usedKey:none, no error', async () => {
+  const { loadConfigWithSource } = await import('../extensions/config.ts');
+  await withSettingsDir(undefined, () => {
+    const { config, source } = loadConfigWithSource();
+    assert.equal(source.fileExists, false);
+    assert.equal(source.usedKey, 'none');
+    assert.equal(source.legacyKeyPresent, false);
+    assert.equal(source.parseError, undefined);
+    assert.equal(config.defaultHarness, 'claude'); // unchanged defaults
+  });
+});
+
+test('loadConfigWithSource: valid delegate key reports usedKey:delegate and the raw value', async () => {
+  const { loadConfigWithSource } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), JSON.stringify({ delegate: { defaultHarness: 'codex' } })),
+    () => {
+      const { config, source } = loadConfigWithSource();
+      assert.equal(source.fileExists, true);
+      assert.equal(source.usedKey, 'delegate');
+      assert.equal(source.legacyKeyPresent, false);
+      assert.equal(source.parseError, undefined);
+      assert.deepEqual(source.raw, { defaultHarness: 'codex' });
+      assert.equal(config.defaultHarness, 'codex');
+    },
+  );
+});
+
+test('loadConfigWithSource: legacy claudeDelegate only reports usedKey:claudeDelegate, legacyKeyPresent:true', async () => {
+  const { loadConfigWithSource } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), JSON.stringify({ claudeDelegate: { defaultMode: 'review' } })),
+    () => {
+      const { source } = loadConfigWithSource();
+      assert.equal(source.fileExists, true);
+      assert.equal(source.usedKey, 'claudeDelegate');
+      assert.equal(source.legacyKeyPresent, true);
+      assert.deepEqual(source.raw, { defaultMode: 'review' });
+    },
+  );
+});
+
+test('loadConfigWithSource: both keys present — delegate wins usedKey but legacyKeyPresent stays true', async () => {
+  const { loadConfigWithSource } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir =>
+      writeFileSync(
+        join(dir, 'settings.json'),
+        JSON.stringify({ delegate: { defaultHarness: 'codex' }, claudeDelegate: { defaultMode: 'review' } }),
+      ),
+    () => {
+      const { config, source } = loadConfigWithSource();
+      assert.equal(source.usedKey, 'delegate');
+      assert.equal(source.legacyKeyPresent, true);
+      assert.deepEqual(source.raw, { defaultHarness: 'codex' });
+      assert.equal(config.defaultHarness, 'codex');
+    },
+  );
+});
+
+test('loadConfigWithSource: malformed JSON reports parseError, never throws, falls back to defaults', async () => {
+  const { loadConfigWithSource } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), '{ not valid json'),
+    () => {
+      const { config, source } = loadConfigWithSource();
+      assert.equal(source.fileExists, true);
+      assert.ok(source.parseError);
+      assert.equal(source.usedKey, 'none');
+      assert.equal(config.defaultHarness, 'claude');
+    },
+  );
+});
+
+test('loadConfigWithSource: a file that parses but is not an object reports parseError', async () => {
+  const { loadConfigWithSource } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), JSON.stringify(['not', 'an', 'object'])),
+    () => {
+      const { config, source } = loadConfigWithSource();
+      assert.equal(source.fileExists, true);
+      assert.ok(source.parseError);
+      assert.equal(source.usedKey, 'none');
+      assert.equal(config.defaultHarness, 'claude');
+    },
+  );
+});
+
+test('describeConfigSource: legacy-only case names the cost and how to fix it', async () => {
+  const { describeConfigSource } = await import('../extensions/config.ts');
+  const lines = describeConfigSource({
+    file: '/x/settings.json',
+    fileExists: true,
+    usedKey: 'claudeDelegate',
+    legacyKeyPresent: true,
+  });
+  const text = lines.join('\n');
+  assert.match(text, /legacy "claudeDelegate"/);
+  assert.match(text, /defaultHarness.*stays pinned to "claude"/);
+  assert.match(text, /no\s+top-level default "model"/);
+  assert.match(text, /rename "claudeDelegate" to "delegate"/);
+});
+
+test('describeConfigSource: parse error is reported distinctly from "no file"/"no key"', async () => {
+  const { describeConfigSource } = await import('../extensions/config.ts');
+  const parseErrLines = describeConfigSource({
+    file: '/x/settings.json',
+    fileExists: true,
+    usedKey: 'none',
+    legacyKeyPresent: false,
+    parseError: 'Unexpected token',
+  });
+  assert.match(parseErrLines.join('\n'), /failed to parse: Unexpected token/);
+
+  const noFileLines = describeConfigSource({
+    file: '/x/settings.json',
+    fileExists: false,
+    usedKey: 'none',
+    legacyKeyPresent: false,
+  });
+  assert.match(noFileLines.join('\n'), /not found/);
+
+  const noKeyLines = describeConfigSource({
+    file: '/x/settings.json',
+    fileExists: true,
+    usedKey: 'none',
+    legacyKeyPresent: false,
+  });
+  assert.match(noKeyLines.join('\n'), /has no "delegate" key/);
+});
+
+test('buildConfigReport: shows both the raw file contents and the effective merged config', async () => {
+  const { loadConfigWithSource, buildConfigReport } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), JSON.stringify({ delegate: { defaultHarness: 'codex' } })),
+    () => {
+      const result = loadConfigWithSource();
+      const lines = buildConfigReport(result);
+      const text = lines.join('\n');
+      assert.match(text, /"defaultHarness": "codex"/); // raw, as written
+      assert.match(text, /"defaultMode": "general"/); // effective, default-filled
+    },
+  );
+});
