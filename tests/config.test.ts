@@ -118,6 +118,72 @@ test('resolveTransport: config override wins, falling back to the harness defaul
   assert.equal(resolveTransport(overridden, 'opencode', opencodeHarness), 'acp');
 });
 
+test('getMaxConcurrent: plain number applies to both global and every harness', async () => {
+  const { getMaxConcurrent } = await import('../extensions/config.ts');
+  const cfg = await loadConfigFromSettings({ delegate: { maxConcurrent: 3 } });
+  assert.equal(cfg.maxConcurrent, 3);
+  assert.equal(getMaxConcurrent(cfg), 3);
+  assert.equal(getMaxConcurrent(cfg, 'claude'), 3);
+});
+
+test('getMaxConcurrent: object shape with global only — every harness falls back to it', async () => {
+  const { getMaxConcurrent } = await import('../extensions/config.ts');
+  const cfg = await loadConfigFromSettings({ delegate: { maxConcurrent: { global: 5 } } });
+  assert.deepEqual(cfg.maxConcurrent, { global: 5 });
+  assert.equal(getMaxConcurrent(cfg), 5);
+  assert.equal(getMaxConcurrent(cfg, 'claude'), 5);
+  assert.equal(getMaxConcurrent(cfg, 'codex'), 5);
+});
+
+test('getMaxConcurrent: object shape with perHarness only — unlisted harnesses fall back to the default of 1, global is also 1', async () => {
+  const { getMaxConcurrent } = await import('../extensions/config.ts');
+  const cfg = await loadConfigFromSettings({ delegate: { maxConcurrent: { perHarness: { claude: 2 } } } });
+  assert.deepEqual(cfg.maxConcurrent, { perHarness: { claude: 2 } });
+  assert.equal(getMaxConcurrent(cfg, 'claude'), 2);
+  // no global set on the object shape, and no matching perHarness entry -> getMaxConcurrent's own default of 1
+  assert.equal(getMaxConcurrent(cfg, 'codex'), 1);
+  assert.equal(getMaxConcurrent(cfg), 1);
+});
+
+test('getMaxConcurrent: object shape with both global and perHarness — perHarness wins for its harness, global is the fallback for the rest', async () => {
+  const { getMaxConcurrent } = await import('../extensions/config.ts');
+  const cfg = await loadConfigFromSettings({
+    delegate: { maxConcurrent: { global: 4, perHarness: { claude: 1, codex: 2 } } },
+  });
+  assert.equal(getMaxConcurrent(cfg), 4);
+  assert.equal(getMaxConcurrent(cfg, 'claude'), 1);
+  assert.equal(getMaxConcurrent(cfg, 'codex'), 2);
+  assert.equal(getMaxConcurrent(cfg, 'opencode'), 4);
+});
+
+test('getMaxConcurrent: malformed values are dropped, not passed through', async () => {
+  const cfg = await loadConfigFromSettings({
+    delegate: {
+      maxConcurrent: {
+        global: 'four', // wrong type
+        perHarness: { claude: -1, codex: 'two', opencode: 3 }, // negative, wrong type, valid
+      },
+    },
+  });
+  // global dropped entirely (wrong type); only the valid perHarness entry survives
+  assert.deepEqual(cfg.maxConcurrent, { perHarness: { opencode: 3 } });
+});
+
+test('getMaxConcurrent: a maxConcurrent that is neither a number nor an object is ignored, default (4) stands', async () => {
+  const cfg = await loadConfigFromSettings({ delegate: { maxConcurrent: 'unlimited' } });
+  assert.equal(cfg.maxConcurrent, 4);
+});
+
+test('config: legacy claudeDelegate migrates the object maxConcurrent shape too', async () => {
+  const cfg = await loadConfigFromSettings({
+    claudeDelegate: { maxConcurrent: { global: 6, perHarness: { amp: 1 } } },
+  });
+  assert.deepEqual(cfg.maxConcurrent, { global: 6, perHarness: { amp: 1 } });
+  const { getMaxConcurrent } = await import('../extensions/config.ts');
+  assert.equal(getMaxConcurrent(cfg, 'amp'), 1);
+  assert.equal(getMaxConcurrent(cfg, 'claude'), 6);
+});
+
 test('resolveTransport: rejects a transport outside supportsTransports with a clear message', async () => {
   const { resolveTransport } = await import('../extensions/config.ts');
   const { claudeHarness } = await import('../extensions/harnesses/claude.ts');

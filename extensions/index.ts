@@ -54,6 +54,7 @@ import { isFanoutSpec, parseDelegateCommand, resolveDefaults, resolveHarnessList
 import { acquireSlot, activeCount } from './concurrency.ts';
 import {
   type DelegateConfig,
+  getMaxConcurrent,
   outputsDir as getOutputsDir,
   legacyOutputsDir,
   loadConfig,
@@ -421,9 +422,11 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
     } catch {}
     // cross-process count via the file registry, combined with the in-process counter as a fallback
     const active = activeCount(h);
+    const cap = getMaxConcurrent(cfg, h);
+    const activeCol = `${active}/${cap > 0 ? cap : '∞'}`;
     const hint = !det.ok && det.hint ? `  ← ${det.hint}` : '';
     lines.push(
-      `${h.padEnd(20)} ${bin.padEnd(8)} ${ok.padEnd(3)} ${ver.padEnd(20)} ${String(outputs).padEnd(8)} ${String(templates).padEnd(10)} ${active}${hint}`,
+      `${h.padEnd(20)} ${bin.padEnd(8)} ${ok.padEnd(3)} ${ver.padEnd(20)} ${String(outputs).padEnd(8)} ${String(templates).padEnd(10)} ${activeCol}${hint}`,
     );
   }
   const historyEntries = harnessFilter ? readAllHistory().filter(e => e.harness === harnessFilter) : readAllHistory();
@@ -436,9 +439,10 @@ async function showStatus(ctx: ExtensionContext, harnessFilter?: string): Promis
   }
   if (!harnessFilter) lines.push(`  total: ${formatSpend(spend.total)}`);
   if (!harnessFilter) {
+    const globalCap = getMaxConcurrent(cfg);
     lines.push('');
     lines.push(
-      `global active: ${activeCount()} · aliases: ${
+      `global active: ${activeCount()}/${globalCap > 0 ? globalCap : '∞'} · aliases: ${
         Object.entries(ALIASES)
           .map(([k, v]) => `${k}→${v}`)
           .join(', ') || '—'
