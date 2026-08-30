@@ -203,4 +203,6 @@ export const devinHarness: Harness = {
     edit: [PERMISSION_MAP.edit],
     danger: [PERMISSION_MAP.danger],
   },
+  // ACP-only — no stdout mode exists to select between, so there's nothing to configure.
+  supportsTransports: ['acp'],
 };

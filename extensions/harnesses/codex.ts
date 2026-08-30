@@ -275,4 +275,8 @@ export const codexHarness: Harness = {
     return null;
   },
   permissionMap: { readonly: ['read-only'], edit: ['workspace-write'], danger: ['danger-full-access'] },
+  // No `acp` subcommand exists; `app-server` is a different, codex-proprietary JSON-RPC protocol,
+  // not ACP (docs/acp-harness-assessment.md §2) — confirmed against the full `--help` output of
+  // `codex`, `codex mcp-server`, `codex app-server`, and `codex exec`.
+  supportsTransports: ['stdout'],
 };
