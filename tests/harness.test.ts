@@ -102,6 +102,30 @@ test('devin harness declares acp transport, spawns `devin acp` regardless of per
   assert.deepEqual(devin.permissionMap, { readonly: ['plan'], edit: ['accept-edits'], danger: ['bypass'] });
 });
 
+test('supportsTransports: the ceiling per harness, per docs/acp-harness-assessment.md §5', () => {
+  // No ACP surface exists for either — confirmed against full --help output.
+  assert.deepEqual(getHarness('claude')?.supportsTransports, ['stdout']);
+  assert.deepEqual(getHarness('codex')?.supportsTransports, ['stdout']);
+  // Real ACP, permission-tier-clean (readonly->plan live-verified, edit/danger no worse than
+  // stdout's own collapse) — legal to configure, not defaulted.
+  assert.deepEqual(getHarness('opencode')?.supportsTransports, ['stdout', 'acp']);
+  // Real ACP too, but its mode surface is only 2 tiers against stdout's 3 genuine ones — not a
+  // legal config value until that changes.
+  assert.deepEqual(getHarness('amp')?.supportsTransports, ['stdout']);
+  // ACP-only — no stdout mode exists to select between.
+  assert.deepEqual(getHarness('devin')?.supportsTransports, ['acp']);
+});
+
+test('opencode harness: buildAcpArgs/acpPermissionMap are a distinct vocabulary from the stdout ones', () => {
+  const opencode = getHarness('opencode');
+  assert.ok(opencode);
+  assert.deepEqual(opencode.buildAcpArgs?.({ prompt: 'hi', cwd: '/tmp', permission: 'readonly' }), ['acp']);
+  assert.deepEqual(opencode.acpPermissionMap, { readonly: ['plan'], edit: ['build'], danger: ['build'] });
+  // Values happen to coincide with the stdout map today, but the fields themselves are distinct —
+  // opencode.danger's stdout token carries an extra `--auto` CLI flag the ACP modeId never would.
+  assert.notDeepEqual(opencode.acpPermissionMap, opencode.permissionMap);
+});
+
 test('harness buildArgs respect permission', () => {
   const claude = getHarness('claude');
   assert.ok(claude);
