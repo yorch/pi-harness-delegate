@@ -172,6 +172,26 @@ verified with real `devin 3000.6.7` runs (see the doc's §8 errata for what impl
 - `/delegate list --harness=...` and `history` harness filter polish.
 - See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "clearly worth doing" display/inspection items shipped in §12 above. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions, per-child drill-in transcript viewer, steering) is blocked upstream on the harness CLIs, not on this repo.
 
+## 15. ACP support assessment (research, not shipped)
+
+**Status:** done (research) — [`docs/acp-harness-assessment.md`](docs/acp-harness-assessment.md)
+
+Real-run assessment of ACP support across all five harnesses, same standard as the Devin design note.
+`claude`/`codex` confirmed to have no ACP surface (full `--help` sweep, not re-trusting an earlier
+probe). `opencode acp` and `omp acp` are both real and were driven end-to-end with genuine captures
+(`tests/fixtures/opencode-acp.jsonl`, `tests/fixtures/amp-acp.jsonl`) — `acp-runner.ts` already
+handles both dialects without modification, since it sources the ACP mode id from the `Harness`'s own
+`permissionMap`, never from `session/new`'s response. Reframed mid-assessment (per the user) from
+"switch or don't switch" to **a configurable transport, selectable per harness**, stdout default and
+fallback, ACP opt-in only where the permission-tier gate is clean: opencode is close (fidelity gains,
+no tier-granularity loss versus what ships today, one closeable open question on `build`-mode write
+behavior); amp/omp should not even have `transport: 'acp'` as a legal config value yet — its ACP mode
+surface is structurally coarser than its stdout `--approval-mode` (2 tiers vs. 3), on top of live
+tool-use/cost capture being blocked by account quota/credit exhaustion across three attempts in this
+environment, not by the protocol. Also surfaced (not fixed here): a real `acp-runner.ts` bug sending
+`session/set_mode` unconditionally despite it being spec-optional — didn't affect this assessment's
+findings, but argues for a capability-aware handshake in any follow-up implementation.
+
 ---
 
 ## In-flight / TODO
