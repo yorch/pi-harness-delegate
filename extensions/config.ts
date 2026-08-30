@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DEFAULT_TIMEOUT_MS, type Harness, type Transport } from './harnesses/types.ts';
 
 export interface HarnessConfig {
@@ -32,6 +32,36 @@ export interface DelegateConfig {
   harnesses: Record<string, HarnessConfig>;
 }
 
+/**
+ * Provenance for how `loadConfig()` actually resolved its settings — the bit a bare `try/catch {}`
+ * used to erase entirely, making "no file", "file, no relevant key", and "file, unparseable" all
+ * look identical (empty defaults, no signal anywhere). `usedKey` is which key ended up populating
+ * `cfg`: `'delegate'` and `'claudeDelegate'` are mutually exclusive (the legacy branch only runs
+ * when `delegate` is *absent*), so `'claudeDelegate'` here means the legacy-only case that costs
+ * the user every setting under `delegate` — not "legacy key present at all" (see
+ * `legacyKeyPresent` for that). `raw` is the literal value of whichever key was used, exactly as
+ * read from the file — no defaults merged in, no per-field sanitizing — so `/delegate config` can
+ * show what was actually written next to what it resolved to.
+ */
+export interface ConfigSource {
+  file: string;
+  fileExists: boolean;
+  /** Set when the file exists but `JSON.parse` failed, or the parsed value isn't a JSON object
+   *  (e.g. an array or a bare string) — either way `cfg` fell back to defaults. */
+  parseError?: string;
+  usedKey: 'delegate' | 'claudeDelegate' | 'none';
+  /** Whether a `claudeDelegate` key exists in the file at all, independent of `usedKey` — true
+   *  even when `delegate` won and `claudeDelegate` was only partially merged (the `model`
+   *  fallback below). */
+  legacyKeyPresent: boolean;
+  raw?: unknown;
+}
+
+export interface ConfigLoadResult {
+  config: DelegateConfig;
+  source: ConfigSource;
+}
+
 export function agentDir(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent');
 }
@@ -53,7 +83,16 @@ function sanitizeHarnessConfig(v: HarnessConfig): HarnessConfig {
   return out;
 }
 
-export function loadConfig(): DelegateConfig {
+/**
+ * Loads `delegate` config from `~/.pi/agent/settings.json` alongside `ConfigSource`, describing
+ * how that happened (file present? which key won? did it fail to parse?) — see `ConfigSource`'s
+ * doc comment. `loadConfig()` below is a thin wrapper for the existing call sites that only want
+ * the resolved values; this is the one place that actually reads/parses the file, so a caller
+ * needing both never pays for a second parse. Never throws — any failure (missing file, bad JSON,
+ * a non-object root) is recorded on `source` and falls back to the same defaults `loadConfig()`
+ * has always returned.
+ */
+export function loadConfigWithSource(): ConfigLoadResult {
   const cfg: DelegateConfig = {
     timeoutMs: DEFAULT_TIMEOUT_MS,
     defaultMode: 'general',
@@ -66,15 +105,31 @@ export function loadConfig(): DelegateConfig {
     maxTranscripts: 100,
     harnesses: {},
   };
+  const file = join(agentDir(), 'settings.json');
+  const source: ConfigSource = { file, fileExists: false, usedKey: 'none', legacyKeyPresent: false };
   try {
-    const file = join(agentDir(), 'settings.json');
-    if (!existsSync(file)) return cfg;
-    const settings = JSON.parse(readFileSync(file, 'utf8')) as {
+    if (!existsSync(file)) return { config: cfg, source };
+    source.fileExists = true;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(file, 'utf8'));
+    } catch (err) {
+      source.parseError = err instanceof Error ? err.message : String(err);
+      return { config: cfg, source };
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      source.parseError = 'settings.json root is not a JSON object';
+      return { config: cfg, source };
+    }
+    const settings = parsed as {
       delegate?: Partial<DelegateConfig & { harnesses: Record<string, HarnessConfig> }>;
       claudeDelegate?: Partial<DelegateConfig & { model?: string }>;
     };
+    source.legacyKeyPresent = Boolean(settings.claudeDelegate);
     // Legacy claudeDelegate -> delegate.harnesses.claude migration
     if (settings.claudeDelegate && !settings.delegate) {
+      source.usedKey = 'claudeDelegate';
+      source.raw = settings.claudeDelegate;
       const c = settings.claudeDelegate as Partial<DelegateConfig>;
       if (typeof c.model === 'string') cfg.harnesses.claude = { ...(cfg.harnesses.claude ?? {}), model: c.model };
       if (typeof c.timeoutMs === 'number' && c.timeoutMs > 0) cfg.timeoutMs = c.timeoutMs;
@@ -112,8 +167,10 @@ export function loadConfig(): DelegateConfig {
         }
       }
       // also map harnesses.claude if any
-      return cfg;
+      return { config: cfg, source };
     }
+    source.usedKey = settings.delegate ? 'delegate' : 'none';
+    source.raw = settings.delegate;
     const d = settings.delegate ?? {};
     if (typeof d.defaultHarness === 'string' && d.defaultHarness) cfg.defaultHarness = d.defaultHarness;
     if (typeof d.defaultMode === 'string') cfg.defaultMode = d.defaultMode;
@@ -155,10 +212,121 @@ export function loadConfig(): DelegateConfig {
         cfg.harnesses.claude = { ...(cfg.harnesses.claude ?? {}), model: c.model };
       }
     }
-  } catch {
-    // invalid settings — fall back to defaults
+  } catch (err) {
+    // Anything unexpected (e.g. a read error after existsSync's check raced a delete) — still
+    // never throw; record it as a parse error so it's not silently indistinguishable from "no
+    // config" if it wasn't already caught (and thus reported) above.
+    if (!source.parseError) source.parseError = err instanceof Error ? err.message : String(err);
   }
-  return cfg;
+  return { config: cfg, source };
+}
+
+export function loadConfig(): DelegateConfig {
+  return loadConfigWithSource().config;
+}
+
+/**
+ * Human-readable lines describing how `loadConfig()` actually resolved its settings — the
+ * provenance report used by both `/delegate status` and `/delegate config`. Pure: takes the
+ * `ConfigSource` companion to `loadConfigWithSource()`'s result, no I/O, so it's testable without
+ * touching the filesystem.
+ */
+export function describeConfigSource(source: ConfigSource): string[] {
+  if (source.parseError) {
+    return [
+      `⚠ ${source.file} exists but failed to parse: ${source.parseError}`,
+      '  using defaults until this is fixed',
+    ];
+  }
+  if (!source.fileExists) {
+    return [`${source.file} not found — using defaults`];
+  }
+  if (source.usedKey === 'none') {
+    return [`${source.file} has no "delegate" key — using defaults`];
+  }
+  if (source.usedKey === 'claudeDelegate') {
+    return [
+      `⚠ using legacy "claudeDelegate" key in ${source.file}`,
+      '  two settings can never be reached this way: "defaultHarness" stays pinned to "claude", and there\'s no',
+      '  top-level default "model" (only claudeDelegate.model -> harnesses.claude.model migrates) — everything',
+      '  else (including per-harness settings like harnesses.<name>.transport) migrates fine',
+      '  rename "claudeDelegate" to "delegate" to unlock those two, or run `/delegate config init` to write an',
+      '  explicit "delegate" key for you (claudeDelegate itself is left untouched either way)',
+    ];
+  }
+  const lines = [`"delegate" key in ${source.file}`];
+  if (source.legacyKeyPresent) {
+    lines.push('  legacy "claudeDelegate" key is also present — ignored except claudeDelegate.model as a fallback');
+  }
+  return lines;
+}
+
+/**
+ * Full `/delegate config` report: provenance (`describeConfigSource`), the raw `delegate`/
+ * `claudeDelegate` value exactly as written in the file, and the effective config with defaults
+ * merged in — so a user can see both what they wrote and what it resolved to, and has a
+ * paste-ready starting point either way. Pure — takes an already-loaded `ConfigLoadResult`.
+ */
+export function buildConfigReport(result: ConfigLoadResult): string[] {
+  const lines = [...describeConfigSource(result.source)];
+  lines.push('');
+  lines.push('from file (as written, before defaults are applied):');
+  lines.push(JSON.stringify(result.source.raw ?? {}, null, 2));
+  lines.push('');
+  lines.push('effective config (file merged with defaults) — paste under "delegate" in settings.json,');
+  lines.push('or run `/delegate config init` to write it there directly:');
+  lines.push(JSON.stringify({ delegate: result.config }, null, 2));
+  return lines;
+}
+
+export interface WriteConfigResult {
+  ok: boolean;
+  file: string;
+  message: string;
+}
+
+/**
+ * Writes `delegateSubtree` into `settings.json` under the `delegate` key — replacing only that
+ * key and preserving every other top-level key verbatim (including a leftover `claudeDelegate`,
+ * which is never touched or removed here; that's the user's call, made by editing the file
+ * themselves). Read-modify-write, atomic: writes to `<file>.<pid>.tmp` in the same directory then
+ * `renameSync`s over the target, so a process death mid-write can never leave a torn file. Refuses
+ * to write (returns `ok: false`, file untouched) when the existing file is present but fails to
+ * parse or isn't a JSON object — overwriting an already-broken file would destroy whatever the
+ * user has in it; the caller should fall back to `buildConfigReport`'s paste-ready block instead.
+ * Never throws. Only ever called from an explicit user action (`/delegate config init`) — never
+ * on the strength of a read like `loadConfig()`/`showStatus`.
+ */
+export function writeDelegateConfig(delegateSubtree: unknown): WriteConfigResult {
+  const file = join(agentDir(), 'settings.json');
+  try {
+    let root: Record<string, unknown> = {};
+    if (existsSync(file)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(file, 'utf8'));
+      } catch (err) {
+        return {
+          ok: false,
+          file,
+          message: `refusing to write: ${file} exists but failed to parse (${err instanceof Error ? err.message : String(err)}) — fix or remove it first`,
+        };
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { ok: false, file, message: `refusing to write: ${file} exists but its root isn't a JSON object` };
+      }
+      root = parsed as Record<string, unknown>;
+    }
+    root.delegate = delegateSubtree;
+    const dir = dirname(file);
+    mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, `settings.json.${process.pid}.tmp`);
+    writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`, 'utf8');
+    renameSync(tmp, file);
+    return { ok: true, file, message: `wrote "delegate" key to ${file}` };
+  } catch (err) {
+    return { ok: false, file, message: `failed to write ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 export function resolveModelForHarness(
