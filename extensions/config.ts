@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DEFAULT_TIMEOUT_MS, type Harness, type Transport } from './harnesses/types.ts';
 
 export interface HarnessConfig {
@@ -250,7 +250,8 @@ export function describeConfigSource(source: ConfigSource): string[] {
       '  two settings can never be reached this way: "defaultHarness" stays pinned to "claude", and there\'s no',
       '  top-level default "model" (only claudeDelegate.model -> harnesses.claude.model migrates) — everything',
       '  else (including per-harness settings like harnesses.<name>.transport) migrates fine',
-      '  rename "claudeDelegate" to "delegate" to unlock those two',
+      '  rename "claudeDelegate" to "delegate" to unlock those two, or run `/delegate config init` to write an',
+      '  explicit "delegate" key for you (claudeDelegate itself is left untouched either way)',
     ];
   }
   const lines = [`"delegate" key in ${source.file}`];
@@ -272,9 +273,60 @@ export function buildConfigReport(result: ConfigLoadResult): string[] {
   lines.push('from file (as written, before defaults are applied):');
   lines.push(JSON.stringify(result.source.raw ?? {}, null, 2));
   lines.push('');
-  lines.push('effective config (file merged with defaults) — paste under "delegate" in settings.json:');
+  lines.push('effective config (file merged with defaults) — paste under "delegate" in settings.json,');
+  lines.push('or run `/delegate config init` to write it there directly:');
   lines.push(JSON.stringify({ delegate: result.config }, null, 2));
   return lines;
+}
+
+export interface WriteConfigResult {
+  ok: boolean;
+  file: string;
+  message: string;
+}
+
+/**
+ * Writes `delegateSubtree` into `settings.json` under the `delegate` key — replacing only that
+ * key and preserving every other top-level key verbatim (including a leftover `claudeDelegate`,
+ * which is never touched or removed here; that's the user's call, made by editing the file
+ * themselves). Read-modify-write, atomic: writes to `<file>.<pid>.tmp` in the same directory then
+ * `renameSync`s over the target, so a process death mid-write can never leave a torn file. Refuses
+ * to write (returns `ok: false`, file untouched) when the existing file is present but fails to
+ * parse or isn't a JSON object — overwriting an already-broken file would destroy whatever the
+ * user has in it; the caller should fall back to `buildConfigReport`'s paste-ready block instead.
+ * Never throws. Only ever called from an explicit user action (`/delegate config init`) — never
+ * on the strength of a read like `loadConfig()`/`showStatus`.
+ */
+export function writeDelegateConfig(delegateSubtree: unknown): WriteConfigResult {
+  const file = join(agentDir(), 'settings.json');
+  try {
+    let root: Record<string, unknown> = {};
+    if (existsSync(file)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(file, 'utf8'));
+      } catch (err) {
+        return {
+          ok: false,
+          file,
+          message: `refusing to write: ${file} exists but failed to parse (${err instanceof Error ? err.message : String(err)}) — fix or remove it first`,
+        };
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { ok: false, file, message: `refusing to write: ${file} exists but its root isn't a JSON object` };
+      }
+      root = parsed as Record<string, unknown>;
+    }
+    root.delegate = delegateSubtree;
+    const dir = dirname(file);
+    mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, `settings.json.${process.pid}.tmp`);
+    writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`, 'utf8');
+    renameSync(tmp, file);
+    return { ok: true, file, message: `wrote "delegate" key to ${file}` };
+  } catch (err) {
+    return { ok: false, file, message: `failed to write ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 export function resolveModelForHarness(

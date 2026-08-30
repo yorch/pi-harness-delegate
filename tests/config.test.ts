@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -356,4 +356,85 @@ test('buildConfigReport: shows both the raw file contents and the effective merg
       assert.match(text, /"defaultMode": "general"/); // effective, default-filled
     },
   );
+});
+
+// --- writeDelegateConfig ---
+
+test('writeDelegateConfig: creates settings.json when none exists', async () => {
+  const { writeDelegateConfig, loadConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(undefined, () => {
+    const result = writeDelegateConfig({ defaultHarness: 'codex' });
+    assert.equal(result.ok, true);
+    assert.equal(loadConfig().defaultHarness, 'codex');
+  });
+});
+
+test('writeDelegateConfig: replaces only the delegate key, preserving every other top-level key', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir =>
+      writeFileSync(
+        join(dir, 'settings.json'),
+        JSON.stringify({ theme: 'dark', packages: ['foo'], delegate: { defaultHarness: 'claude' } }),
+      ),
+    () => {
+      const result = writeDelegateConfig({ defaultHarness: 'codex' });
+      assert.equal(result.ok, true);
+      const written = JSON.parse(readFileSync(result.file, 'utf8'));
+      assert.equal(written.theme, 'dark');
+      assert.deepEqual(written.packages, ['foo']);
+      assert.equal(written.delegate.defaultHarness, 'codex');
+    },
+  );
+});
+
+test('writeDelegateConfig: preserves a leftover claudeDelegate key rather than removing it', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), JSON.stringify({ claudeDelegate: { model: 'opus' } })),
+    () => {
+      const result = writeDelegateConfig({ defaultHarness: 'claude' });
+      assert.equal(result.ok, true);
+      const written = JSON.parse(readFileSync(result.file, 'utf8'));
+      assert.deepEqual(written.claudeDelegate, { model: 'opus' });
+      assert.ok(written.delegate);
+    },
+  );
+});
+
+test('writeDelegateConfig: refuses to write over malformed JSON, file left untouched', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), '{ not valid json'),
+    () => {
+      const before = readFileSync(join(process.env.PI_CODING_AGENT_DIR as string, 'settings.json'), 'utf8');
+      const result = writeDelegateConfig({ defaultHarness: 'codex' });
+      assert.equal(result.ok, false);
+      assert.match(result.message, /refusing to write/);
+      const after = readFileSync(result.file, 'utf8');
+      assert.equal(after, before);
+    },
+  );
+});
+
+test('writeDelegateConfig: refuses to write when the root is not a JSON object', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), JSON.stringify(['nope'])),
+    () => {
+      const result = writeDelegateConfig({ defaultHarness: 'codex' });
+      assert.equal(result.ok, false);
+      assert.match(result.message, /refusing to write/);
+    },
+  );
+});
+
+test('writeDelegateConfig: atomic write leaves no temp file behind', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(undefined, () => {
+    const result = writeDelegateConfig({ defaultHarness: 'codex' });
+    assert.equal(result.ok, true);
+    const leftovers = readdirSync(process.env.PI_CODING_AGENT_DIR as string).filter(f => f.endsWith('.tmp'));
+    assert.deepEqual(leftovers, []);
+  });
 });
