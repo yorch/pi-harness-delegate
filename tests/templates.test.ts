@@ -79,7 +79,7 @@ test('mapClaudeUsage folds cache creation into input', () => {
   assert.equal(u.cost.total, 0.123);
 });
 
-test('mapClaudeUsage returns undefined when cost is unknown (not a fake $0)', () => {
+test('mapClaudeUsage reports real tokens with a $0 cost when cost is unknown (bounded exception — see usage.ts)', () => {
   const u = mapClaudeUsage({
     inputTokens: 10,
     outputTokens: 20,
@@ -87,7 +87,10 @@ test('mapClaudeUsage returns undefined when cost is unknown (not a fake $0)', ()
     cacheReadInputTokens: 0,
     totalCostUsd: null,
   });
-  assert.equal(u, undefined);
+  assert.equal(u.input, 10);
+  assert.equal(u.output, 20);
+  assert.equal(u.totalTokens, 30);
+  assert.equal(u.cost.total, 0);
 });
 
 test('loadTemplates does not load untrusted project templates', () => {

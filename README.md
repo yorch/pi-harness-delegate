@@ -196,6 +196,8 @@ Every run records in details + transcript: harness, mode, permission (normalized
 
 Claude reports turns and cost on every run; Codex/OpenCode/Amp don't always. An unmeasured turn count or cost renders as `—`/`n/a` (never `0`/`$0.000`) everywhere it's shown — the transcript header, `formatMetrics`, tool results, and `/delegate history` — so an unmeasured run is never mistaken for a free one. `/delegate status` shows a per-harness spend rollup (e.g. `$1.234 over 12 run(s) (3 unknown)`); runs with unknown cost are counted separately rather than folded into the total as `$0`.
 
+One deliberate, narrow exception: pi's own `Usage` (the footer/session token+cost stats) has no way to express "cost unknown" — its `cost.total` field is mandatory. Codex and Devin never report a `$` cost, so treating unknown-cost as unknown-usage there would drop those two harnesses' tokens out of pi's session totals entirely. `mapHarnessUsage`/`mapClaudeUsage` (`extensions/usage.ts`) report the real token counts with `cost.total: 0` in that one case — under-reporting spend by a bounded, knowable amount beats losing 40% of token accounting. This does not change anything above: transcripts, `formatMetrics`, and `/delegate status` still render unmeasured cost as `—`/`n/a`, never `$0`.
+
 ## Security model
 
 - `readonly` — no edits (e.g. Claude `plan`, Codex `read-only`).
