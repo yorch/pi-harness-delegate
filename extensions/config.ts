@@ -1,13 +1,20 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_TIMEOUT_MS } from './harnesses/types.ts';
+import { DEFAULT_TIMEOUT_MS, type Harness, type Transport } from './harnesses/types.ts';
 
 export interface HarnessConfig {
   model?: string;
   timeoutMs?: number;
   allowDangerous?: boolean;
   maxBudgetUsd?: number;
+  /** Overrides the harness's default transport ('stdout' unless the harness itself defaults to
+   *  'acp', e.g. Devin). A malformed value (not 'stdout'/'acp') is dropped at load time, same as
+   *  every other per-harness field's defensive parsing below; a well-formed but unsupported value
+   *  (e.g. 'acp' for a harness with no ACP surface) is *not* dropped here — it's validated against
+   *  `Harness.supportsTransports` by `resolveTransport()` instead, so misconfiguring it fails the
+   *  run with a clear message rather than being silently ignored. */
+  transport?: Transport;
 }
 
 export interface DelegateConfig {
@@ -36,6 +43,14 @@ export function outputsDir(harness?: string): string {
 
 export function legacyOutputsDir(): string {
   return join(agentDir(), 'claude-delegate', 'outputs');
+}
+
+/** Drops a malformed `transport` (anything but 'stdout'/'acp', including absent) before it's
+ *  stored — the rest of `HarnessConfig`'s fields are spread through as-is by `loadConfig()`. */
+function sanitizeHarnessConfig(v: HarnessConfig): HarnessConfig {
+  const out = { ...v };
+  if (out.transport !== 'stdout' && out.transport !== 'acp') delete out.transport;
+  return out;
 }
 
 export function loadConfig(): DelegateConfig {
@@ -92,7 +107,8 @@ export function loadConfig(): DelegateConfig {
       if (typeof c.maxTranscripts === 'number' && c.maxTranscripts >= 0) cfg.maxTranscripts = c.maxTranscripts;
       if (c.harnesses && typeof c.harnesses === 'object') {
         for (const [k, v] of Object.entries(c.harnesses)) {
-          if (v && typeof v === 'object') cfg.harnesses[k] = { ...(cfg.harnesses[k] ?? {}), ...(v as HarnessConfig) };
+          if (v && typeof v === 'object')
+            cfg.harnesses[k] = { ...(cfg.harnesses[k] ?? {}), ...sanitizeHarnessConfig(v as HarnessConfig) };
         }
       }
       // also map harnesses.claude if any
@@ -129,7 +145,7 @@ export function loadConfig(): DelegateConfig {
     if (typeof d.maxTranscripts === 'number' && d.maxTranscripts >= 0) cfg.maxTranscripts = d.maxTranscripts;
     if (d.harnesses && typeof d.harnesses === 'object') {
       for (const [k, v] of Object.entries(d.harnesses)) {
-        if (v && typeof v === 'object') cfg.harnesses[k] = { ...(v as HarnessConfig) };
+        if (v && typeof v === 'object') cfg.harnesses[k] = sanitizeHarnessConfig(v as HarnessConfig);
       }
     }
     // also support legacy claudeDelegate merged when delegate also present (delegate wins)
@@ -153,6 +169,25 @@ export function resolveModelForHarness(
 ): string | undefined {
   const resolve = (m?: string) => (m ? (cfg.modelAliases[m] ?? m) : undefined);
   return resolve(model) ?? resolve(templateModel) ?? resolve(cfg.harnesses[harness]?.model) ?? resolve(cfg.model);
+}
+
+/**
+ * Which transport a run should actually use: config override, falling back to the harness's own
+ * default (`harness.transport`, e.g. Devin's static 'acp'), falling back to 'stdout'. Validated
+ * against `harness.supportsTransports` — the ceiling of what the binary can actually do, distinct
+ * from what's configured — *before* the caller acquires a run slot or spawns anything, so
+ * misconfiguring e.g. `transport: 'acp'` for `claude` fails fast with a clear message instead of a
+ * cryptic "unknown subcommand" from the spawned process. See docs/acp-harness-assessment.md §5/§6.
+ */
+export function resolveTransport(cfg: DelegateConfig, harnessName: string, harness: Harness): Transport {
+  const transport = cfg.harnesses[harnessName]?.transport ?? harness.transport ?? 'stdout';
+  const allowed = harness.supportsTransports ?? [harness.transport ?? 'stdout'];
+  if (!allowed.includes(transport)) {
+    throw new Error(
+      `delegate.harnesses.${harnessName}.transport is "${transport}", but ${harnessName} only supports: ${allowed.join(', ')}`,
+    );
+  }
+  return transport;
 }
 
 export function getMaxConcurrent(cfg: DelegateConfig, harness?: string): number {

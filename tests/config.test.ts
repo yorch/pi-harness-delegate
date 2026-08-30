@@ -61,3 +61,72 @@ test('config: outputsDir partitioned', async () => {
   const legacy = legacyOutputsDir();
   assert.ok(legacy.includes('claude-delegate'));
 });
+
+async function loadConfigFromSettings(settings: unknown): Promise<import('../extensions/config.ts').DelegateConfig> {
+  const dir = join(tmpdir(), `cfg-transport-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(settings));
+    const { loadConfig } = await import('../extensions/config.ts');
+    return loadConfig();
+  } finally {
+    process.env.PI_CODING_AGENT_DIR = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('config: transport parses a valid value per harness', async () => {
+  const cfg = await loadConfigFromSettings({ delegate: { harnesses: { opencode: { transport: 'acp' } } } });
+  assert.equal(cfg.harnesses.opencode?.transport, 'acp');
+});
+
+test('config: transport absent stays undefined', async () => {
+  const cfg = await loadConfigFromSettings({ delegate: { harnesses: { opencode: { model: 'big-pickle' } } } });
+  assert.equal(cfg.harnesses.opencode?.transport, undefined);
+  assert.equal(cfg.harnesses.opencode?.model, 'big-pickle');
+});
+
+test('config: an invalid transport value is dropped, not passed through', async () => {
+  const cfg = await loadConfigFromSettings({
+    delegate: { harnesses: { claude: { transport: 'websocket', model: 'sonnet' } } },
+  });
+  assert.equal(cfg.harnesses.claude?.transport, undefined);
+  assert.equal(cfg.harnesses.claude?.model, 'sonnet'); // other fields on the same object still pass through
+});
+
+test('config: legacy claudeDelegate migration also sanitizes transport', async () => {
+  const cfg = await loadConfigFromSettings({
+    claudeDelegate: { harnesses: { claude: { transport: 'not-real' } } },
+  });
+  assert.equal(cfg.harnesses.claude?.transport, undefined);
+});
+
+test('resolveTransport: config override wins, falling back to the harness default, falling back to stdout', async () => {
+  const { resolveTransport } = await import('../extensions/config.ts');
+  const { devinHarness } = await import('../extensions/harnesses/devin.ts');
+  const { opencodeHarness } = await import('../extensions/harnesses/opencode.ts');
+  const base = await loadConfigFromSettings({ delegate: {} });
+
+  // no override -> harness's own default ('acp' for devin, 'stdout' for opencode)
+  assert.equal(resolveTransport(base, 'devin', devinHarness), 'acp');
+  assert.equal(resolveTransport(base, 'opencode', opencodeHarness), 'stdout');
+
+  // explicit override, within the harness's supported ceiling
+  const overridden = await loadConfigFromSettings({ delegate: { harnesses: { opencode: { transport: 'acp' } } } });
+  assert.equal(resolveTransport(overridden, 'opencode', opencodeHarness), 'acp');
+});
+
+test('resolveTransport: rejects a transport outside supportsTransports with a clear message', async () => {
+  const { resolveTransport } = await import('../extensions/config.ts');
+  const { claudeHarness } = await import('../extensions/harnesses/claude.ts');
+  const { ampHarness } = await import('../extensions/harnesses/amp.ts');
+  const claudeCfg = await loadConfigFromSettings({ delegate: { harnesses: { claude: { transport: 'acp' } } } });
+  assert.throws(() => resolveTransport(claudeCfg, 'claude', claudeHarness), /claude only supports: stdout/);
+
+  // amp/omp's ACP mode surface is a real permission-tier regression (2 tiers vs. 3) — not a legal
+  // config value yet, per docs/acp-harness-assessment.md §5.
+  const ampCfg = await loadConfigFromSettings({ delegate: { harnesses: { amp: { transport: 'acp' } } } });
+  assert.throws(() => resolveTransport(ampCfg, 'amp', ampHarness), /amp only supports: stdout/);
+});
