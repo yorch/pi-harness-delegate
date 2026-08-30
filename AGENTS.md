@@ -11,7 +11,7 @@ Guidance for AI coding agents working in this repository.
 | Command | What it does |
 | --- | --- |
 | `bun run typecheck` | `tsc --noEmit` over `extensions/` (strict, `allowImportingTsExtensions`) |
-| `bun test` | `bun test` (169 tests, bun:test — node:test compatible; `tests/live.test.ts` is opt-in, see below, and counts as 1 here) |
+| `bun test` | `bun test` (bun:test — node:test compatible; `tests/live.test.ts` is opt-in, see below) |
 | `bun run lint` | `biome check .` (2 spaces, 120 cols, single quotes) |
 | `bun run lint:fix` | `biome check --write .` |
 | `bun run verify` | `lint + typecheck + test` — CI and release both run this |
