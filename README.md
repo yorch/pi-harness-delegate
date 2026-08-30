@@ -81,11 +81,15 @@ delegate({ harness: "all", mode: "review", scope: "diff" })   # tool call form
 | --- | --- | --- | --- |
 | `claude` | `claude` | `readonly→plan`, `edit→acceptEdits`, `danger→bypassPermissions` | Full stream-json, cost + context%. Schema-verified against Claude Code 2.1.247. |
 | `codex` | `codex` | `readonly→read-only`, `edit→workspace-write`, `danger→danger-full-access` | `codex exec --json`. Schema-verified against codex-cli 0.149.1; cost is always unmeasured (`null`) on ChatGPT-plan auth. |
-| `opencode` | `opencode` | `readonly→read-only`, `edit→allow-edit`, `danger→danger` | `opencode run --format json`. Schema-verified against opencode 1.18.16. |
-| `amp` | `amp` (`omp` alias) | `readonly→read-only`, `edit→workspace`, `danger→danger` | `<binary> -p --mode json`, resolves whichever of `amp`/`omp` is actually on `PATH`. Schema-verified against omp 17.2.9 (Sourcegraph's real Amp CLI is unverified). |
+| `opencode` | `opencode` | `readonly→plan`, `edit→build`, `danger→build --auto` | `opencode run --format json` (stdout, default) or `opencode acp` ([ACP](https://agentclientprotocol.com), opt-in via `transport: "acp"` — see Config). Schema-verified against opencode 1.18.16. |
+| `amp` | `amp` (`omp` alias) | `readonly→always-ask`, `edit→write`, `danger→yolo` | `<binary> -p --mode json`, resolves whichever of `amp`/`omp` is actually on `PATH`. Schema-verified against omp 17.2.9 (Sourcegraph's real Amp CLI is unverified). `omp acp` is real but not offered as a `transport` option — its ACP mode surface only has 2 tiers against this CLI's genuine 3. |
 | `devin` | `devin` | `readonly→plan`, `edit→accept-edits`, `danger→bypass` | Runs `devin acp` — [Agent Client Protocol](https://agentclientprotocol.com) over stdio, not stdout JSONL (see `acp-runner.ts`). Real tool-call ids, a genuine context-window %, and a working `sessionId`/resume via `session/load`. Reports no `$` cost (stays `null`) and no turn count. `model` is wired via `devin acp --model <MODEL>` (fuzzy names, e.g. `opus`); the reported `model` is read back from Devin's own `_cognition.ai/agent_stopped` event rather than echoed from the request, so it reflects what actually ran. Schema-verified against `devin 3000.6.7 (260a97c8)`. |
 
 Detect availability: `delegate` checks `harness --version` at startup; missing harnesses hint install instructions.
+
+### Transport
+
+Every harness runs over its native CLI's stdout (`stdout`, the default and only option for `claude`/`codex`/`amp`). `opencode` and `devin` also speak [ACP](https://agentclientprotocol.com) (Agent Client Protocol — bidirectional JSON-RPC over stdio): Devin ships ACP-only (no stdout mode exists), and `opencode` supports both — `stdout` stays the default, `transport: "acp"` is opt-in per harness in config (see below). ACP gives `opencode` a genuine `cost`/`contextWindow` (both `null` over stdout today) and a resume path independently proven to recall cross-process state; the tradeoff is `model`/`numTurns` staying unmeasured (`null`) either way. `amp`/`omp` has a real `acp` subcommand too, but isn't offered as a `transport` value — its ACP mode surface has only 2 permission tiers against the stdout CLI's genuine 3, a real regression, not just an unverified one. Configuring a transport a harness doesn't support fails immediately with a clear error, before anything spawns.
 
 ## Modes (templates)
 
@@ -170,13 +174,15 @@ In `~/.pi/agent/settings.json`:
     "harnesses": {
       "claude": { "model": "sonnet" },
       "codex": { "model": "gpt-5" },
-      "opencode": { "model": "opencode-default" }
+      "opencode": { "model": "opencode-default", "transport": "acp" }
     }
   }
 }
 ```
 
 Legacy `claudeDelegate` is auto-migrated into `delegate.harnesses.claude` (deprecated).
+
+- `harnesses.<name>.transport` — `"stdout"` (default for every harness except `devin`, which is ACP-only) or `"acp"`. Only legal where the harness actually supports it — see [Transport](#transport) above; an unsupported value fails the run immediately with a clear message rather than being silently ignored or failing at spawn time.
 
 - `modelAliases` — templates may use `economy|balanced|max` or any alias; resolution: call → template → harness → global.
 - `maxConcurrent` — cap overlapping runs (default **`4`**, one slot per supported harness; may be `{global:4, perHarness:{claude:1}}`). Enforced across pi processes, not just the current one — a file-based registry under `~/.pi/agent/delegate/runs/` tracks active runs, so the slots available to you also depend on any other pi session running `delegate`. This is a **genuinely parallel** spend cap now, not just a "don't overlap" guard: a single-harness `/delegate` call still fails fast (`another delegate run is already in progress`) the moment it's at capacity, but `/delegate all …` fan-out queues for a free slot instead and can run up to `maxConcurrent` harnesses at once — meaning up to that many harnesses billing simultaneously. Lower it if you want fan-out to stay sequential/cheaper (`"maxConcurrent": 1` restores the old one-at-a-time behavior for everything, single runs included).
