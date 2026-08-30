@@ -178,6 +178,9 @@ test('devin-acp.jsonl: real toolCallId correlates tool_call/tool_call_update acr
   assert.ok(result);
   assert.equal(result?.sessionId, 'cactus-iberis');
   assert.equal(result?.stopReason, 'end_turn');
+  // The real model Devin ran, read back from _cognition.ai/agent_stopped's stats.modelLabel —
+  // independent of whatever --model was requested, since --model accepts fuzzy names.
+  assert.equal(result?.model, 'GLM-5.2 High');
   // Devin's ACP payload reports no $ cost and no turn count — honest-metrics convention (#11).
   assert.equal(result?.totalCostUsd, null);
   assert.equal(result?.numTurns, null);

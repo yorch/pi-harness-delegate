@@ -108,6 +108,17 @@ export function parseDevinLine(line: string, state: ParseState): ParseOutcome {
     return translateUpdate(o.params.update, state);
   }
 
+  if (o.method === '_cognition.ai/agent_stopped' && isRecord(o.params) && isRecord(o.params.stats)) {
+    // The real model Devin ran, independent of whatever --model was requested — the honest
+    // value to report, since `--model` accepts fuzzy names and enterprise config can override it.
+    const label = o.params.stats.modelLabel;
+    if (typeof label === 'string') {
+      state._harness ??= {};
+      state._harness.model = label;
+    }
+    return {};
+  }
+
   if (isRecord(o.result)) {
     const r = o.result;
     if (typeof r.stopReason === 'string') {
@@ -136,7 +147,7 @@ export function parseDevinLine(line: string, state: ParseState): ParseOutcome {
         durationMs: null,
         durationApiMs: null,
         ttftMs: null,
-        model: null,
+        model: typeof harnessState.model === 'string' ? harnessState.model : null,
         contextWindow: typeof harnessState.contextWindow === 'number' ? harnessState.contextWindow : null,
         maxOutputTokens: null,
         usage: u
@@ -172,10 +183,14 @@ export const devinHarness: Harness = {
       return { ok: false, hint: 'Install the Devin CLI: https://docs.devin.ai/' };
     }
   },
-  buildArgs(_opts: BuildArgsOpts): string[] {
+  buildArgs(opts: BuildArgsOpts): string[] {
     // The prompt, permission mode, and session lifecycle are all negotiated over the ACP wire
-    // (see acp-runner.ts) — this just launches the ACP server.
-    return ['acp'];
+    // (see acp-runner.ts) — this just launches the ACP server. `--model` is the one real CLI flag
+    // `devin acp` accepts (verified: `devin acp --help`); it sets the default model for every new
+    // ACP session on this server, and accepts fuzzy names (family slug, alias, or partial name).
+    const args = ['acp'];
+    if (opts.model) args.push('--model', opts.model);
+    return args;
   },
   parseLine(line: string, state: ParseState): ParseOutcome {
     return parseDevinLine(line, state);

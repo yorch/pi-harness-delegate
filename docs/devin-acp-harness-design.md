@@ -241,3 +241,15 @@ Claude's convention where `inputTokens` *excludes* cache reads (`index.ts` sums
 therefore `contextPercent` by roughly 2x on this fixture (a reported ~66% against Devin's own ~33%).
 `devin.ts` now maps `inputTokens: devinInputTokens - devinCachedReadTokens` (floored at 0) and keeps
 `cacheReadInputTokens` as-is, so `promptTokens` reconstructs Devin's real `inputTokens` figure exactly.
+
+**`devin acp --model <MODEL>` is real and changes what runs — confirmed live, and now wired.** The
+harness previously never passed a requested model through, yet echoed it into the transcript as if it
+had (`result.model` stayed `null`, so `index.ts` fell back to reporting the *requested* model as the one
+that ran). `devin acp --help` documents `--model <MODEL>` as accepting fuzzy names (family slug, alias,
+partial name) and overriding the enterprise-configured default for every new session on that server.
+Verified live: the same prompt against the same repo, no `--model` set, ran on `GLM-5.2 High` (per
+`_cognition.ai/agent_stopped`'s `stats.modelLabel`); with `--model opus`, it ran on `Claude Opus 5
+Medium`. `devin.ts` now wires `opts.model` into `buildArgs` (matching the `--model`-flag pattern already
+used by `claude.ts`/`codex.ts`) and reads the *actual* model back from `stats.modelLabel` on that same
+notification rather than echoing the request — so `result.model` reflects what really ran even if a
+requested `--model` were fuzzy-matched to something else, or unset entirely.
