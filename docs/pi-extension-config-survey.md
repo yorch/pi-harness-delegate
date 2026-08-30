@@ -260,9 +260,7 @@ function isTrusted(cwd: string): boolean {
 }
 ```
 
-The env-var path is fine — it's under the operator's own control. **The file path is not**: it reads
-`<cwd>/.pi/trusted`, a path *inside the project directory being evaluated for trust*. Nothing stops that
-file from being part of the repository's own committed content.
+Both paths turn out to matter, not just the file one — see the verdict below.
 
 **pi's real trust model** (`ctx.isProjectTrusted()`, `ExtensionContext`, confirmed reachable and real —
 `dist/core/extensions/types.d.ts:232`) is backed by `ProjectTrustStore`
@@ -289,16 +287,54 @@ file from being part of the repository's own committed content.
   saved file (`docs/extensions.md:969`) — a strictly larger notion of trust than the saved store alone,
   but every source that feeds it is still anchored outside the project's own repo content.
 
-**The divergence, stated plainly:** pi's trust decision cannot be self-declared by the thing being
-evaluated. This project's can — `<cwd>/.pi/trusted` is repo content, and a `git clone` of an untrusted
-or actively malicious repository can ship that file pre-committed with the byte `1`. If that repo is
-cloned and `/delegate` is run from inside it, `isTrusted()` returns `true` on the **first** invocation,
-with no prompt, no env var, and no prior human decision — at which point `loadTemplates()` (line 176)
-loads that same repo's `.pi/delegate/templates/`, which can define `permission: danger` and a `verify:`
-command that executes on the host. This reads as a real, low-effort-to-exploit gap in exactly the
-control this project's own `templates.ts` comment says it exists for ("untrusted clones must not
-override builtins") — not a style mismatch with pi's convention, but the convention pi uses specifically
-to prevent this class of bug.
+**Verdict — do the two gates agree? No, and they diverge in the dangerous direction, on two independent
+paths.** "Dangerous direction" means: a project pi's own trust store would treat as **untrusted** (no
+saved decision, `defaultProjectTrust` at its own default of `"ask"`, no interactive Trust click) is
+treated as **trusted** by this project's `isTrusted()` — so a hostile repo's project-local template loads
+when pi itself would have blocked or prompted for it.
+
+1. **The `.pi/trusted` file — dangerous, self-declarable by the untrusted content itself.**
+   `<cwd>/.pi/trusted` is read from inside the very project being evaluated. pi's model has **no
+   project-local self-declaration path at all** — every write to `trust.json` originates outside the
+   project (interactive prompt, the user's own global `defaultProjectTrust` setting, or a user/global-
+   scope extension handler; §above). A `git clone` of a malicious repo that ships `.pi/trusted`
+   pre-committed with `1` is trusted by this project on the **first** `/delegate` run in it — no prompt,
+   no prior human decision. pi would still show that same fresh clone as untrusted and, depending on
+   `defaultProjectTrust`, either prompt or refuse.
+2. **The `PI_TRUSTED=1`/`PI_DELEGATE_TRUSTED=1` env var — also dangerous, and this is the sharper of the
+   two divergences.** Grepped pi's compiled trust code (`trust-manager.js`) for any `process.env`
+   read: the only one is `process.env.HOME` (for locating the trust store itself); **there is no
+   environment-variable trust override anywhere in pi's real model.** This project's env var is a pure
+   invention with no pi analog to be "consistent" or "inconsistent" with — it just blanket-trusts. Set
+   once in a shell (plausibly to approve one specific, already-reviewed repo) it stays set for every
+   `cd` for the rest of that shell session or CI job. `cd` into an unrelated, unreviewed, possibly
+   malicious repo afterward and its project-local templates load too — while pi's own trust prompt would
+   still fire fresh for that second directory, since `trust.json` is keyed per-path and an env var can't
+   pre-populate it. This is exactly the mechanism the team lead's message called out as the likeliest
+   divergence, and reading the source confirms it: not just likely, but the only one of the two paths
+   with *zero* pi-side analog.
+
+**The reverse (annoying, not dangerous) direction also exists**, for completeness: a project a human
+genuinely trusted through pi's own interactive prompt (saved in `trust.json`) is refused by this
+project's `isTrusted()` if neither env var is set and the repo has no `.pi/trusted` file — this project's
+gate under-trusts relative to pi in that case. Not a security problem, just friction; not the direction
+the team lead asked to confirm, included only so the divergence isn't overstated as one-directional.
+
+**Reachability, confirmed against the version actually resolved, not just the docs:** `isProjectTrusted():
+boolean` is present on `ExtensionContext` in `node_modules/@earendil-works/pi-coding-agent/dist/core/
+extensions/types.d.ts:234` **inside this repo's own worktree**, resolved from this project's own
+`"@earendil-works/pi-coding-agent": "*"` peer dependency (`package.json:50`) — currently `0.84.3`
+(`package.json:59`, matching what `bun install` actually pulled). It is real, not aspirational, not a
+future-version API, and not merely present in the external copy used for the rest of this survey.
+
+**Summary in one paragraph:** this project's gate diverges from pi's real trust model in the dangerous
+direction on both of its two paths — the committed-file path lets the untrusted repo self-declare trust,
+something pi's model structurally cannot do; the env-var path has no equivalent in pi's model at all and
+blanket-trusts every subsequent directory for the life of the shell/process. Either path independently
+lets a hostile repo's `permission: danger` / `verify:`-carrying template load in a case pi itself would
+have gated. This reads as a real, low-effort-to-exploit gap in exactly the control this project's own
+`templates.ts` comment says it exists for ("untrusted clones must not override builtins") — not a style
+mismatch with pi's convention, but the convention pi uses specifically to prevent this class of bug.
 
 **Do any surveyed extensions use `ctx.isProjectTrusted()`?** No — zero hits for
 `isProjectTrusted`/`project_trust`/`ProjectTrust` across all eight surveyed extensions' source

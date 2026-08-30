@@ -265,16 +265,21 @@ Also flagged: the `claudeDelegate` legacy-migration branch (`extensions/config.t
 so a user still on the legacy key silently never sees any newer `delegate`-only field.
 
 **Separate, more urgent finding surfaced by the same research (doc §5): this project's project-template
-trust gate (`isTrusted()`, `extensions/templates.ts:143`) diverges from pi's real trust model in a way
-that looks exploitable.** pi's `ctx.isProjectTrusted()` is backed by `~/.pi/agent/trust.json` — a decision
+trust gate (`isTrusted()`, `extensions/templates.ts:143`) diverges from pi's real trust model in the
+dangerous direction, confirmed, on two independent paths — not just non-standard, exploitable.** pi's
+`ctx.isProjectTrusted()` (confirmed present on `ExtensionContext` at this repo's own resolved peer-dep
+version, `@earendil-works/pi-coding-agent@0.84.3`) is backed by `~/.pi/agent/trust.json` — a decision
 store *outside* the project directory, keyed by canonical path, writable only via an interactive prompt,
-the user's own `defaultProjectTrust` setting, or a user/global-scope `project_trust` extension handler
-(never by project-local content — pi's own docs confirm project-local extensions don't even load until
-trust is already resolved). This project's `isTrusted()` instead reads `<cwd>/.pi/trusted` — a path
-*inside* the project being evaluated, so a cloned repo can ship that file pre-committed with `1` and gain
-trust with no prompt at all, at which point its own `.pi/delegate/templates/` (which can set
-`permission: danger` and a `verify:` command) loads automatically. Not changed here — a security gate
-needs its own change with its own tests — but tracked for a dedicated fix.
+the user's own `defaultProjectTrust` setting, or a user/global-scope `project_trust` extension handler,
+and with **no environment-variable override anywhere in pi's compiled trust code**. This project's
+`isTrusted()` diverges on both of its own paths: the `<cwd>/.pi/trusted` file is read from *inside* the
+project being evaluated, so a cloned repo can ship it pre-committed with `1` and self-declare trust with
+no prompt at all — something pi's model cannot do by construction; and `PI_TRUSTED=1`/
+`PI_DELEGATE_TRUSTED=1`, once set in a shell for one reviewed repo, blanket-trusts every directory
+`cd`'d into afterward for the life of that session, a mechanism with zero analog in pi's own model. Either
+path lets a hostile repo's `permission: danger` / `verify:`-carrying template load in a case pi itself
+would have gated. Not changed here — a security gate needs its own change with its own tests — but
+tracked for a dedicated fix.
 
 ---
 
