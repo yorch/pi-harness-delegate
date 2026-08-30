@@ -210,3 +210,14 @@ session creation. Confirmed by fetching the real `NewSessionRequest`/`SetSession
 resolving correctly while the process kept idling afterward, so a runner that waits for the process to
 exit on its own (the stdout harnesses' pattern) hangs until the outer timeout fires. `acp-runner.ts`
 finishes and kills the process itself as soon as the response resolves.
+
+**A rejected handshake step leaked the child process.** Every exit path except the handshake IIFE's
+`.catch` killed the child; that one only called `fail(err)`, which clears the timeout — the one other
+thing that would have killed it — without a `proc.kill()`. Since ACP agents exit only on stdin EOF
+(never sent) and the runner never closes stdin on this path, every failed handshake step left `devin
+acp` running indefinitely, its open stdio pipes keeping the host process's event loop referenced.
+Confirmed live, both ways, with the same repro (`session/load` against a `sessionId` devin doesn't
+have — devin genuinely rejects this with a JSON-RPC error `"Session not found"`, unlike an unrecognized
+`session/set_mode` modeId, which devin accepted silently rather than rejecting): on the pre-fix code the
+spawned `devin acp` process was still alive half a second after `runAcpHarness` rejected; with the fix
+(`proc.kill('SIGKILL')` added to the `.catch`) it was gone by the same check, every time.

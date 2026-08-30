@@ -293,6 +293,10 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       }
       proc.kill('SIGKILL');
     })().catch(err => {
+      // Every other exit path (timeout, abort, success) kills the child — a rejected handshake
+      // step (bad modeId, a JSON-RPC error, a HANDSHAKE_TIMEOUT_MS expiry) must too, or the
+      // process leaks: ACP agents only exit on stdin EOF, which nothing else here sends.
+      proc.kill('SIGKILL');
       fail(err instanceof Error ? err : new Error(String(err)));
     });
   });
