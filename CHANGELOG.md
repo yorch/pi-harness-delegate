@@ -1,5 +1,43 @@
 # pi-harness-delegate
 
+## 0.6.0
+
+### Minor Changes
+
+- [#33](https://github.com/yorch/pi-harness-delegate/pull/33) [`6dde641`](https://github.com/yorch/pi-harness-delegate/commit/6dde641dfce4e9c517c1c403e8b8f105562322da) Thanks [@yorch](https://github.com/yorch)! - Add `/delegate config` — prints exactly what was read from `~/.pi/agent/settings.json` (or why nothing was: no file, no `delegate` key, or a parse error), plus the effective config with defaults filled in, as a paste-ready JSON block.
+  
+  Add `/delegate config init` — writes that effective config into `settings.json` under the `delegate` key, the only thing this extension ever writes there and only on this explicit command. It's a read-modify-write: the whole file is read, only the `delegate` key is replaced, every other key (pi's own settings, a leftover `claudeDelegate`) is preserved verbatim, and the write is atomic (temp file + rename). It refuses outright rather than writing over a file that fails to parse.
+  
+  `/delegate status` now leads with the same provenance instead of jumping straight to resolved values. This surfaces a real gap: staying on the legacy `claudeDelegate` key (rather than renaming it to `delegate`, or running `/delegate config init`) silently blocks two settings from ever being reachable — `defaultHarness` (stays pinned to `claude`) and a top-level default `model` (only `claudeDelegate.model` migrates, to `harnesses.claude.model`) — both `status` and `config` now call this out.
+  
+  Internally, `loadConfig()` no longer swallows a malformed or unparseable `settings.json` into indistinguishable defaults — `loadConfigWithSource()` reports provenance (file existence, which key won, parse errors) alongside the resolved config, without a second file read and without ever throwing.
+
+- [#27](https://github.com/yorch/pi-harness-delegate/pull/27) [`f2306ea`](https://github.com/yorch/pi-harness-delegate/commit/f2306ea5575497dca3ecca09f623733ecd887477) Thanks [@yorch](https://github.com/yorch)! - Add `delegate.harnesses.<name>.transport` — a per-harness config knob choosing between the existing `stdout` transport (default) and `acp` (Agent Client Protocol). `opencode` now ships dual-transport (`stdout` default, `acp` opt-in) after a live-verified finding that its `build` permission mode executes writes over ACP without ever calling `session/request_permission`. `devin` stays ACP-only; `claude`/`codex`/`amp` stay `stdout`-only (amp/omp's ACP mode surface has fewer permission tiers than its stdout CLI, so it is not offered as a legal transport value). Configuring an unsupported transport now fails immediately with a clear message, before any process spawns.
+  
+  Also hardens `acp-runner.ts`: `session/set_mode` is now capability-checked before being called (hard error, not a silent downgrade, when an agent can't confirm mode support), and the negotiated `protocolVersion` from `initialize` is validated against what was sent.
+
+- [#34](https://github.com/yorch/pi-harness-delegate/pull/34) [`e5f42b7`](https://github.com/yorch/pi-harness-delegate/commit/e5f42b77c6435b422a75f9bca1ee5960d3196b07) Thanks [@yorch](https://github.com/yorch)! - Security fix: project-local delegate templates could self-declare trust from inside the very repo they came from.
+  
+  `loadTemplates()` decided whether to load `.pi/delegate/templates/` by reading `.pi/trusted` from the project itself (or an env var, `PI_TRUSTED=1` / `PI_DELEGATE_TRUSTED=1`, that leaked trust to every directory for the rest of a shell session). A cloned hostile repo could commit `.pi/trusted` containing `1` and its project-local templates would load with no prompt and no prior human trust decision — including a template overriding a builtin by name. In particular, an override of the builtin `review` template (permission: readonly) could declare `permission: edit` and attach a `verify:` command, which runs host-side via `sh -c` after the harness exits. Net effect: `git clone <hostile repo> && cd it`, then `/delegate review` — which a user reasonably expects to be read-only — could execute an arbitrary host command.
+  
+  Fixed: `loadTemplates()` now takes an explicit `trusted` boolean (default `false`, fail-closed) instead of reading anything from the project or the environment. In the extension, that boolean comes from pi's own `ctx.isProjectTrusted()` — a trust decision backed by pi's trust store outside the project, set only by pi's own trust prompt or `defaultProjectTrust`. `.pi/trusted` and the `PI_TRUSTED`/`PI_DELEGATE_TRUSTED` environment variables no longer grant trust at all — remove them if you were relying on them, and trust the project through pi's own trust prompt (or `defaultProjectTrust`) instead. `/delegate status` now reports whether the current project is trusted and, if not, that project-local templates were skipped.
+
+### Patch Changes
+
+- [#29](https://github.com/yorch/pi-harness-delegate/pull/29) [`311ca71`](https://github.com/yorch/pi-harness-delegate/commit/311ca7189687f9624e737000d3da417fa4ddcc6c) Thanks [@yorch](https://github.com/yorch)! - Four polish fixes:
+  
+  - `mapHarnessUsage`/`mapClaudeUsage` (`extensions/usage.ts`) now report real token counts with `cost.total: 0` when a harness (Codex, Devin) doesn't report a dollar cost, instead of returning `undefined` and dropping those harnesses' tokens out of pi's session totals entirely. This is a narrow, deliberate exception scoped to pi's own `Usage` mapping — transcripts, `formatMetrics`, and `/delegate status` still render unmeasured cost as `—`/`n/a`, never `$0`.
+  - `run-registry.ts` gets `acquireRunWithinLimits()`, closing the count-then-act race in the concurrency guard: it writes its own entry, then re-reads the registry to confirm the write didn't push the global or per-harness limit over the top, undoing it immediately if so. Over-admission (the cap standing exceeded for a run's whole lifetime) is now impossible by construction, not just unlikely.
+  - `/delegate status` now shows each harness's active-run count next to the cap that actually applies to it (e.g. `1/2`), so a `maxConcurrent: {global, perHarness}` override is visible per-row instead of only as raw JSON in the header.
+  - `/delegate list` and `/delegate history` now share one harness-filter resolver, so they agree on alias (`omp`→`amp`) and case handling and both report an unrecognized harness name (with the valid list) instead of one silently showing an unfiltered list and the other silently showing an empty one. `/delegate history`'s header now names the active filter when one is applied.
+
+- [#30](https://github.com/yorch/pi-harness-delegate/pull/30) [`b6a7af9`](https://github.com/yorch/pi-harness-delegate/commit/b6a7af978fcbf4142d791125ecdb1822199f233a) Thanks [@yorch](https://github.com/yorch)! - Live-verified codex's `exec resume` path end-to-end (a fresh process resuming a session genuinely recalls prior context, not just an echoed session id) and fixed two bugs the verification surfaced:
+  
+  - `codex.ts`: `buildArgs` no longer appends `--add-dir` when resuming — `codex exec resume` has no such flag and rejects it outright (`unexpected argument '--add-dir' found`).
+  - `amp.ts`: a `turn_end`/`agent_end` whose failure only shows up as `message.stopReason === "error"` + `message.errorMessage` (observed live on a real 429 quota rejection, where `message.content` is an empty array) is now correctly reported as `isError: true` with the error message as the result text, instead of a silent, empty "successful" run.
+  
+  Also confirmed `omp`'s `--add-dir` is real and accepted (contrary to earlier research) — no change needed there — and added an opt-in `tests/live.test.ts` suite (`PI_DELEGATE_LIVE=1`) that spawns each detected harness for real and checks the basics a fixture can't: the process runs, a result comes back, `sessionId` is populated, and known-reported metrics are present. Never runs in CI or `bun run verify`.
+
 ## 0.5.0
 
 ### Minor Changes
