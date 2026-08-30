@@ -246,6 +246,26 @@ bugs into shipped code, gated on a live run this PR itself ran:
 
 ---
 
+## 18. Extension config conventions research
+
+**Status:** done (research) — [`docs/pi-extension-config-survey.md`](docs/pi-extension-config-survey.md)
+
+Surveyed how popular pi extensions handle config (own file vs. a key in pi's `settings.json`), so the
+concurrent `feat/config-ux` work follows the ecosystem instead of inventing something. **pi itself has no
+official extension-config mechanism** — the host's `SettingsManager` is exported but is pi's own closed
+`Settings` type, not reachable from `ExtensionContext`/`ExtensionAPI`; the only official guidance
+(`docs/extensions.md`) is "read your own file under `.pi/<name>.json`." No dominant convention on
+*placement* either (own file: `pi-mcp-adapter`, `pi-lens`, `@juicesharp/rpiv-ask-user-question`; a
+`settings.json` key: `@yorch/pi-statusbar`; both, for different subsystems: `pi-subagents`) — this
+project's placement (a `delegate` key in `settings.json`) is fine as-is given its config's size. But every
+extension surveyed with a real config surface **logs/warns on a malformed file** and **never blindly
+overwrites `settings.json` when it writes** — this project's `loadConfig()` is the only one that fails
+completely silently (bare `catch {}`), and the only one with no writer/command at all (hand-edit-only).
+Also flagged: the `claudeDelegate` legacy-migration branch (`extensions/config.ts:77-116`) returns early,
+so a user still on the legacy key silently never sees any newer `delegate`-only field.
+
+---
+
 ## In-flight / TODO
 
 - [ ] Live integration tests against real binaries (fixtures cover parsing; nothing exercises a real spawn end-to-end).
