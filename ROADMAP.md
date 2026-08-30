@@ -246,6 +246,43 @@ bugs into shipped code, gated on a live run this PR itself ran:
 
 ---
 
+## 18. Extension config conventions research
+
+**Status:** done (research) — [`docs/pi-extension-config-survey.md`](docs/pi-extension-config-survey.md)
+
+Surveyed how popular pi extensions handle config (own file vs. a key in pi's `settings.json`), so the
+concurrent `feat/config-ux` work follows the ecosystem instead of inventing something. **pi itself has no
+official extension-config mechanism** — the host's `SettingsManager` is exported but is pi's own closed
+`Settings` type, not reachable from `ExtensionContext`/`ExtensionAPI`; the only official guidance
+(`docs/extensions.md`) is "read your own file under `.pi/<name>.json`." No dominant convention on
+*placement* either (own file: `pi-mcp-adapter`, `pi-lens`, `@juicesharp/rpiv-ask-user-question`; a
+`settings.json` key: `@yorch/pi-statusbar`; both, for different subsystems: `pi-subagents`) — this
+project's placement (a `delegate` key in `settings.json`) is fine as-is given its config's size. But every
+extension surveyed with a real config surface **logs/warns on a malformed file** and **never blindly
+overwrites `settings.json` when it writes** — this project's `loadConfig()` is the only one that fails
+completely silently (bare `catch {}`), and the only one with no writer/command at all (hand-edit-only).
+Also flagged: the `claudeDelegate` legacy-migration branch (`extensions/config.ts:77-116`) returns early,
+so a user still on the legacy key silently never sees any newer `delegate`-only field.
+
+**Separate, more urgent finding surfaced by the same research (doc §5): this project's project-template
+trust gate (`isTrusted()`, `extensions/templates.ts:143`) diverges from pi's real trust model in the
+dangerous direction, confirmed, on two independent paths — not just non-standard, exploitable.** pi's
+`ctx.isProjectTrusted()` (confirmed present on `ExtensionContext` at this repo's own resolved peer-dep
+version, `@earendil-works/pi-coding-agent@0.84.3`) is backed by `~/.pi/agent/trust.json` — a decision
+store *outside* the project directory, keyed by canonical path, writable only via an interactive prompt,
+the user's own `defaultProjectTrust` setting, or a user/global-scope `project_trust` extension handler,
+and with **no environment-variable override anywhere in pi's compiled trust code**. This project's
+`isTrusted()` diverges on both of its own paths: the `<cwd>/.pi/trusted` file is read from *inside* the
+project being evaluated, so a cloned repo can ship it pre-committed with `1` and self-declare trust with
+no prompt at all — something pi's model cannot do by construction; and `PI_TRUSTED=1`/
+`PI_DELEGATE_TRUSTED=1`, once set in a shell for one reviewed repo, blanket-trusts every directory
+`cd`'d into afterward for the life of that session, a mechanism with zero analog in pi's own model. Either
+path lets a hostile repo's `permission: danger` / `verify:`-carrying template load in a case pi itself
+would have gated. Not changed here — a security gate needs its own change with its own tests — but
+tracked for a dedicated fix.
+
+---
+
 ## In-flight / TODO
 
 - [ ] Live integration tests against real binaries (fixtures cover parsing; nothing exercises a real spawn end-to-end).
