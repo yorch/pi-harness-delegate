@@ -21,7 +21,7 @@ bun test            # bun:test (node:test compatible)
 bun run verify      # lint + typecheck + test (also runs in CI/release)
 ```
 
-CI runs `verify` + `check-packables` + changeset presence on every push/PR (`.github/workflows/ci.yml`).
+CI runs `lint` + `typecheck` + `test` as separate steps (the same set `verify` bundles) + `check-packables` + changeset presence on every push/PR (`.github/workflows/ci.yml`).
 
 ## Project layout
 
@@ -59,12 +59,12 @@ PR with changeset → merge to main
   → Release workflow opens/updates `chore: version packages` PR
   → Review version numbers
   → Merge Version Packages PR
-  → Release workflow: verify → bun run release (typecheck + check-packables + changeset publish)
+  → Release workflow: verify → bun run release (verify + check-packables + changeset publish)
     → creates tag vX.Y.Z pinned to $GITHUB_SHA + GitHub Release
     → verifies `latest` dist-tag
 ```
 
-First publish of a brand-new package must be done locally with 2FA (`bun run release` prompts), then configure Trusted Publisher on npmjs.com (`Package → Settings → Trusted publisher → GitHub Actions` → `yorch/pi-harness-delegate` + `release.yml`). See `repo-release-process.md` for details.
+First publish of a brand-new package must be done locally with 2FA (`bun run release` prompts), then configure Trusted Publisher on npmjs.com (`Package → Settings → Trusted publisher → GitHub Actions` → `yorch/pi-harness-delegate` + `release.yml`). See the Release process section in `AGENTS.md` for details.
 
 ## Testing without pi
 
