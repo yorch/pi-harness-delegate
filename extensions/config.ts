@@ -1,4 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DEFAULT_TIMEOUT_MS, type Harness, type Transport } from './harnesses/types.ts';
@@ -83,17 +93,9 @@ function sanitizeHarnessConfig(v: HarnessConfig): HarnessConfig {
   return out;
 }
 
-/**
- * Loads `delegate` config from `~/.pi/agent/settings.json` alongside `ConfigSource`, describing
- * how that happened (file present? which key won? did it fail to parse?) — see `ConfigSource`'s
- * doc comment. `loadConfig()` below is a thin wrapper for the existing call sites that only want
- * the resolved values; this is the one place that actually reads/parses the file, so a caller
- * needing both never pays for a second parse. Never throws — any failure (missing file, bad JSON,
- * a non-object root) is recorded on `source` and falls back to the same defaults `loadConfig()`
- * has always returned.
- */
-export function loadConfigWithSource(): ConfigLoadResult {
-  const cfg: DelegateConfig = {
+/** Built-in defaults — a fresh object each call, since callers mutate the result. */
+export function defaultDelegateConfig(): DelegateConfig {
+  return {
     timeoutMs: DEFAULT_TIMEOUT_MS,
     defaultMode: 'general',
     defaultHarness: 'claude',
@@ -105,6 +107,44 @@ export function loadConfigWithSource(): ConfigLoadResult {
     maxTranscripts: 100,
     harnesses: {},
   };
+}
+
+/**
+ * Only the top-level settings whose effective value differs from the built-in default.
+ *
+ * What `/delegate config init` writes. Writing the full effective config would pin every default
+ * into settings.json, and the loader treats a present value as user intent — so a later release
+ * that changes a default (maxConcurrent 1 -> 4 already did) would never reach that user.
+ */
+export function nonDefaultConfig(cfg: DelegateConfig): Partial<DelegateConfig> {
+  const defaults = defaultDelegateConfig() as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(cfg as unknown as Record<string, unknown>)) {
+    if (v === undefined) continue;
+    if (k === 'modelAliases') {
+      // The loader merges aliases additively onto the defaults, so only the keys that differ need
+      // writing — whole-object diffing would pin the untouched default aliases next to a custom one.
+      const d = defaults.modelAliases as Record<string, string>;
+      const diff = Object.fromEntries(Object.entries(v as Record<string, string>).filter(([a, t]) => d[a] !== t));
+      if (Object.keys(diff).length > 0) out[k] = diff;
+      continue;
+    }
+    if (JSON.stringify(v) !== JSON.stringify(defaults[k])) out[k] = v;
+  }
+  return out as Partial<DelegateConfig>;
+}
+
+/**
+ * Loads `delegate` config from `~/.pi/agent/settings.json` alongside `ConfigSource`, describing
+ * how that happened (file present? which key won? did it fail to parse?) — see `ConfigSource`'s
+ * doc comment. `loadConfig()` below is a thin wrapper for the existing call sites that only want
+ * the resolved values; this is the one place that actually reads/parses the file, so a caller
+ * needing both never pays for a second parse. Never throws — any failure (missing file, bad JSON,
+ * a non-object root) is recorded on `source` and falls back to the same defaults `loadConfig()`
+ * has always returned.
+ */
+export function loadConfigWithSource(): ConfigLoadResult {
+  const cfg = defaultDelegateConfig();
   const file = join(agentDir(), 'settings.json');
   const source: ConfigSource = { file, fileExists: false, usedKey: 'none', legacyKeyPresent: false };
   try {
@@ -273,8 +313,8 @@ export function buildConfigReport(result: ConfigLoadResult): string[] {
   lines.push('from file (as written, before defaults are applied):');
   lines.push(JSON.stringify(result.source.raw ?? {}, null, 2));
   lines.push('');
-  lines.push('effective config (file merged with defaults) — paste under "delegate" in settings.json,');
-  lines.push('or run `/delegate config init` to write it there directly:');
+  lines.push('effective config (file merged with defaults) — for reference; you only need to put the values');
+  lines.push('you want to change under "delegate" (`/delegate config init` writes just those, not defaults):');
   lines.push(JSON.stringify({ delegate: result.config }, null, 2));
   return lines;
 }
@@ -298,13 +338,27 @@ export interface WriteConfigResult {
  * on the strength of a read like `loadConfig()`/`showStatus`.
  */
 export function writeDelegateConfig(delegateSubtree: unknown): WriteConfigResult {
-  const file = join(agentDir(), 'settings.json');
+  const configured = join(agentDir(), 'settings.json');
+  // Write through a symlink to its real target rather than replacing the link with a regular file.
+  let file = configured;
+  try {
+    file = realpathSync(configured);
+  } catch {
+    // absent — created below
+  }
+  // pi locks the path as configured (proper-lockfile realpath:false), not a symlink's target.
+  const lock = `${configured}.lock`;
+  const tmp = join(dirname(file), `settings.json.${process.pid}.tmp`);
+  let locked = false;
   try {
     let root: Record<string, unknown> = {};
+    let mode: number | undefined;
+    let trailingNewline = false;
     if (existsSync(file)) {
+      const raw = readFileSync(file, 'utf8');
       let parsed: unknown;
       try {
-        parsed = JSON.parse(readFileSync(file, 'utf8'));
+        parsed = JSON.parse(raw);
       } catch (err) {
         return {
           ok: false,
@@ -316,16 +370,56 @@ export function writeDelegateConfig(delegateSubtree: unknown): WriteConfigResult
         return { ok: false, file, message: `refusing to write: ${file} exists but its root isn't a JSON object` };
       }
       root = parsed as Record<string, unknown>;
+      mode = statSync(file).mode & 0o777;
+      trailingNewline = raw.endsWith('\n');
+    }
+    mkdirSync(dirname(file), { recursive: true });
+    // pi saves settings.json under proper-lockfile (`<file>.lock`, a directory taken with an atomic
+    // mkdir). Take the same lock, without waiting, so we neither lose a concurrent pi write nor have
+    // ours overwritten mid-read-modify-write. The read above is repeated under the lock.
+    try {
+      mkdirSync(lock);
+      locked = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        return {
+          ok: false,
+          file,
+          message: `refusing to write: ${file} is locked (another pi session is saving settings, or a crashed one left a stale lock that pi clears after ~10s) — retry in a moment`,
+        };
+      }
+      throw err;
+    }
+    if (existsSync(file)) {
+      const again: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (again === null || typeof again !== 'object' || Array.isArray(again)) {
+        return { ok: false, file, message: `refusing to write: ${file} changed and its root isn't a JSON object` };
+      }
+      root = again as Record<string, unknown>;
     }
     root.delegate = delegateSubtree;
-    const dir = dirname(file);
-    mkdirSync(dir, { recursive: true });
-    const tmp = join(dir, `settings.json.${process.pid}.tmp`);
-    writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`, 'utf8');
+    // Match the file's own format: pi writes JSON.stringify(x, null, 2) with no trailing newline.
+    writeFileSync(tmp, `${JSON.stringify(root, null, 2)}${trailingNewline ? '\n' : ''}`, { encoding: 'utf8' });
+    if (mode !== undefined) chmodSync(tmp, mode);
     renameSync(tmp, file);
     return { ok: true, file, message: `wrote "delegate" key to ${file}` };
   } catch (err) {
     return { ok: false, file, message: `failed to write ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  } finally {
+    // Cleanup is best-effort: this function must never throw.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // nothing useful to do
+    }
+    // Separate from the tmp cleanup so a failure there can never leave pi's lock behind.
+    if (locked) {
+      try {
+        rmSync(lock, { recursive: true, force: true });
+      } catch {
+        // nothing useful to do
+      }
+    }
   }
 }
 

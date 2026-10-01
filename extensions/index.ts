@@ -67,6 +67,7 @@ import {
   legacyOutputsDir,
   loadConfig,
   loadConfigWithSource,
+  nonDefaultConfig,
   resolveModelForHarness,
   resolveTransport,
   writeDelegateConfig,
@@ -585,7 +586,8 @@ async function showConfig(ctx: ExtensionContext): Promise<void> {
 /**
  * `/delegate config init` — the one place this extension ever writes to `settings.json`, and only
  * because a human explicitly typed this subcommand. Writes the current effective config (defaults
- * merged with whatever was already on disk) into the `delegate` key via `writeDelegateConfig()`
+ * merged with whatever was already on disk, minus anything still at its default — pinning defaults would
+ * stop later releases' default changes reaching the user) into the `delegate` key via `writeDelegateConfig()`
  * (read-modify-write, atomic, refuses on an unparseable file rather than clobbering it). This is
  * also the practical fix for the legacy-`claudeDelegate`-only gap `describeConfigSource` warns
  * about: writing an explicit `delegate` key (with the correctly-resolved values already folded
@@ -594,7 +596,7 @@ async function showConfig(ctx: ExtensionContext): Promise<void> {
  */
 async function initConfig(ctx: ExtensionContext): Promise<void> {
   const result = loadConfigWithSource();
-  const write = writeDelegateConfig(result.config);
+  const write = writeDelegateConfig(nonDefaultConfig(result.config));
   const msg = write.ok ? `✓ ${write.message}` : `✗ ${write.message}`;
   if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
   else ctx.ui.notify?.(msg, write.ok ? 'info' : 'warning');
