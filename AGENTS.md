@@ -12,6 +12,7 @@ Guidance for AI coding agents working in this repository.
 | --- | --- |
 | `bun run typecheck` | `tsc --noEmit` over `extensions/`, `tests/` and `scripts/*.mjs` (strict, `allowImportingTsExtensions`, `checkJs` for the scripts) |
 | `bun test` | `bun test` (bun:test — node:test compatible; `tests/live.test.ts` is opt-in, see below) |
+| `bun run test:coverage` | `bun test --coverage` — text table + `coverage/lcov.info` (git-ignored). Informational only: no thresholds, not in `verify`/CI |
 | `bun run lint` | `biome check .` (2 spaces, 120 cols, single quotes) |
 | `bun run lint:fix` | `biome check --write .` |
 | `bun run verify` | `lint + typecheck + test` — CI and release both run this |
