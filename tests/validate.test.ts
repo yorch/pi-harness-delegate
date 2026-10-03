@@ -37,10 +37,26 @@ test('prError: number, http(s) URL, or owner/repo#n only', () => {
     '42',
     'https://github.com/o/r/pull/42',
     'http://ghe.local/o/r/pull/7',
+    'https://github.com/o/r/pull/42/files',
+    'https://github.com/o/r/pull/42#discussion_r1',
     'yorch/pi-harness-delegate#12',
   ])
     assert.equal(prError(pr), null, pr);
-  for (const pr of ['-1', '--repo=evil/x', 'file:///etc/passwd', 'some-branch', 'o/r', '42; rm', ''])
+  for (const pr of [
+    '-1',
+    '--repo=evil/x',
+    'file:///etc/passwd',
+    'some-branch',
+    'o/r',
+    '42; rm',
+    '',
+    'https://user:token@github.com/o/r/pull/1', // userinfo
+    'https://github.com@evil.example/o/r/pull/1', // userinfo disguising the host
+    'https://evil.example/',
+    'https://github.com/o/r/issues/1',
+    'https://github.com/o/r/pull/abc',
+    'https://github.com/o/r/pull/1 --repo=x',
+  ])
     assert.ok(prError(pr), JSON.stringify(pr));
 });
 

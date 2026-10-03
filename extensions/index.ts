@@ -58,7 +58,7 @@ export default function (pi: ExtensionAPI) {
       'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
       'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
       'sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run\'s details (letters, digits, . _ : - only). It cannot be combined with a fan-out harness ("all" or a comma list) — a session belongs to one harness.',
-      'pr must be a PR number, an http(s) PR URL, or owner/repo#123.',
+      'pr must be a PR number, an http(s) pull-request URL (https://<host>/<owner>/<repo>/pull/<n>), or owner/repo#123.',
       'addDirs inside the working directory are accepted as-is; any entry outside it asks the human to confirm interactively and is refused in a non-interactive session.',
       'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
     ],

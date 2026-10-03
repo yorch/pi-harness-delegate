@@ -45,7 +45,7 @@ Only the prompt is required. A **harness as first word** and/or **mode as next w
 | `--mode=<template>` | Any template name (`review`, `plan`, `implement`, `security-audit`, `docs`, `general`, or your own) |
 | `--model=<model>` | Model or alias (`economy`/`balanced`/`max`, see `modelAliases`) |
 | `--scope=<scope>` | `diff` (current `git diff HEAD`), `pr` (`gh pr diff` for the current branch), or a path list |
-| `--pr=<pr>` | A specific PR to scope to: a number, an http(s) PR URL, or `owner/repo#123` (implies the PR diff as scope) |
+| `--pr=<pr>` | A specific PR to scope to: a number, an http(s) PR URL (`https://<host>/<owner>/<repo>/pull/<n>`, no `user@`), or `owner/repo#123` (implies the PR diff as scope) |
 | `--budget=<usd>` | Per-run spend cap in USD (same as the tool's `maxBudgetUsd`) |
 | `--add-dir=<path>` | Extra directory the harness may access; repeatable (`--add-dir=../shared --add-dir=/opt/lib`) |
 | `--resume=<session-id>` | Continue a previous delegated session (single harness only — not with a fan-out) |

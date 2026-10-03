@@ -16,6 +16,9 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const PR_NUMBER_RE = /^\d{1,10}$/;
 const PR_SHORTHAND_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}#\d{1,10}$/;
+// http(s)://<host>/<owner>/<repo>/pull/<n>[/files|?…|#…] — any host (GitHub Enterprise), but no
+// userinfo (`user:pass@`) and nothing that isn't actually a pull-request URL.
+const PR_URL_RE = /^https?:\/\/[^/@\s]+\/[^/\s]+\/[^/\s]+\/pull\/\d{1,10}(?:[/?#]\S*)?$/;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 
@@ -33,17 +36,13 @@ export function modelError(model: string): string | null {
   return null;
 }
 
-/** Returns an error message, or null when `pr` is a PR number, an http(s) URL, or `owner/repo#n`. */
+/** Returns an error message, or null when `pr` is a PR number, an http(s) pull-request URL
+ *  (`<host>/<owner>/<repo>/pull/<n>`, no userinfo), or `owner/repo#n`. */
 export function prError(pr: string): string | null {
   const bad = `invalid pr ${JSON.stringify(pr.slice(0, 80))} — expected a PR number, an http(s) PR URL, or owner/repo#123`;
   if (pr.startsWith('-') || CONTROL_RE.test(pr)) return bad;
   if (PR_NUMBER_RE.test(pr) || PR_SHORTHAND_RE.test(pr)) return null;
-  try {
-    const url = new URL(pr);
-    if (url.protocol === 'http:' || url.protocol === 'https:') return null;
-  } catch {
-    // not a URL
-  }
+  if (PR_URL_RE.test(pr)) return null;
   return bad;
 }
 
