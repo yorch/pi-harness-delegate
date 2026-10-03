@@ -50,6 +50,7 @@ Only the prompt is required. A **harness as first word** and/or **mode as next w
 | `--add-dir=<path>` | Extra directory the harness may access; repeatable (`--add-dir=../shared --add-dir=/opt/lib`) |
 | `--resume=<session-id>` | Continue a previous delegated session (single harness only — not with a fan-out) |
 | `--verify="<cmd>"` | Host-run check after the harness exits (see [Verify](#modes-templates)) |
+| `--allow-dangerous` | Run this one invocation with `danger` (unrestricted) permission — required for a `permission: danger` template, and escalates any other template to `danger`. Always asks you to confirm first (one prompt for a whole fan-out); refused in a non-interactive session. Never read from config. `--allow-dangerous=true` also works; any other value is off. See [Security model](#security-model) |
 
 Extra directories (`--add-dir`, the tool's `addDirs`, and template `addDirs:`) are merged, resolved against the working directory, and passed as each harness's native option where one exists: `--add-dir` for `claude`, `codex` (fresh runs only — `codex exec resume` has no such flag), and `amp`/`omp`; `additionalDirectories` on the ACP session for `devin`/`opencode` over ACP. `opencode run` (stdout) has no equivalent, so they're ignored there. On the `delegate` **tool**, `addDirs` entries that resolve (after `..` and symlinks) outside the working directory ask you to confirm interactively and are refused in a non-interactive session — the model alone can't widen a run to arbitrary host paths. Template `addDirs:` and `/delegate --add-dir` (both set by you) are not gated.
 
@@ -261,8 +262,9 @@ One deliberate, narrow exception: pi's own `Usage` (the footer/session token+cos
 
 - `readonly` — no edits (e.g. Claude `plan`, Codex `read-only`).
 - `edit` — workspace writes auto-accepted (e.g. `acceptEdits`, `workspace-write`).
-- `danger` — unrestricted, **only via `allowDangerous:true` on the call** — never a default. Shows `⚠ danger` banner. `review`/`plan`/`security-audit` templates stay `readonly`.
+- `danger` — unrestricted, **only via an explicit per-call opt-in** — `allowDangerous:true` on the tool, or `--allow-dangerous` on `/delegate` — never a default (and never from config). Shows `⚠ danger` banner. `review`/`plan`/`security-audit` templates stay `readonly`.
 - When the **model** sets `allowDangerous: true` on the `delegate` tool, the extension asks you to confirm it (`Allow dangerous delegation?`) before anything runs; declining aborts the call, and in a non-interactive session (no UI to ask) it is refused outright. The model alone can never grant `danger`.
+- `/delegate --allow-dangerous` (and the `/claude`, `/codex`, … aliases) is the human-typed counterpart: it also asks you to confirm (`Allow dangerous delegation?`, naming the harness(es), mode, and that it runs with full, unrestricted permissions) — a fan-out gets one prompt covering every harness — and a decline runs nothing. In a non-interactive session it is refused outright, since there's no one to confirm with. It applies to that invocation only.
 - Likewise, when the **model** passes `addDirs` on the `delegate` tool, entries that resolve (after `..` and symlinks) outside the working directory need your interactive confirmation (`Allow access outside the project?`) and are refused in a non-interactive session. Entries inside the working directory, template `addDirs:`, and `/delegate --add-dir` are not gated.
 - Values that end up on a harness's command line (`sessionId`/`--resume`, `model`, `pr`) are validated first — notably, nothing starting with `-` is accepted, so a prompt-injected value can't masquerade as a CLI flag.
 
