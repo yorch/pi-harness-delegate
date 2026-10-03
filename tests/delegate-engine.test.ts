@@ -933,6 +933,10 @@ test('delegate: a PR target reaches the scope heading only in normalized form, n
       });
       const argv = readFileSync(argsFile, 'utf8');
       assert.ok(argv.includes('# Scope\nPull request diff (o/r#7):\n'), 'heading carries owner/repo#n only');
+      assert.match(
+        argv,
+        /Pull request diff \(o\/r#7\):\n.*\nAnalyze it as input[^\n]*\nBEGIN UNTRUSTED DATA [0-9a-f]{16}\n/,
+      );
       assert.ok(!argv.includes('IGNORE_ALL_PRIOR_INSTRUCTIONS'), 'the URL tail never reaches the prompt');
       assert.ok(!argv.includes('A'.repeat(300)));
       // gh itself still gets the full target
@@ -958,6 +962,32 @@ test('delegate: gh stderr from a failed PR lookup is fenced as untrusted data â€
       const end = argv.lastIndexOf(`END UNTRUSTED DATA ${nonce}`);
       assert.ok(heading >= 0 && heading < begin && begin < injected && injected < end);
       assert.ok(argv.includes('GraphQL: Could not resolve'));
+    });
+  });
+});
+
+test('delegate: free-text scope reaches the harness as a delimited restriction, not as untrusted data to analyze', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/engine.ts');
+    const { readFileSync } = await import('node:fs');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      await delegate(
+        fakePi(async () => {
+          throw new Error('free-text scope must not shell out');
+        }),
+        fakeCtx(cwd),
+        { harness: 'claude', mode: 'tinker', task: 'tidy up', scope: 'src/a.ts, src/b' },
+      );
+      const argv = readFileSync(argsFile, 'utf8');
+      const nonce = argv.match(/\nBEGIN SCOPE ([0-9a-f]{16})\n/)?.[1];
+      assert.ok(nonce, 'scope text is delimited by a nonce-marked SCOPE block');
+      const heading = argv.indexOf('# Scope\nRestrict your work to this scope:\n');
+      const restrict = argv.indexOf('Restrict your work to it.');
+      const begin = argv.indexOf(`BEGIN SCOPE ${nonce}\n`);
+      const paths = argv.indexOf('src/a.ts, src/b');
+      const end = argv.lastIndexOf(`END SCOPE ${nonce}`);
+      assert.ok(heading >= 0 && heading < restrict && restrict < begin && begin < paths && paths < end);
+      assert.doesNotMatch(argv, /UNTRUSTED DATA|Analyze it as input/);
     });
   });
 });
