@@ -53,7 +53,7 @@ function fakePi(exec: (cmd: string, args: string[]) => Promise<unknown>): never 
 
 test('delegate: a refused danger template never holds a slot, however many times it is retried', async () => {
   await withSandbox({ maxConcurrent: 1, templates: { yolo: DANGER_TEMPLATE } }, async ({ cwd }) => {
-    const { delegate } = await import('../extensions/index.ts');
+    const { delegate } = await import('../extensions/engine.ts');
     const { activeCount } = await import('../extensions/concurrency.ts');
     const pi = fakePi(async () => {
       throw new Error('exec must not be reached');
@@ -71,7 +71,7 @@ test('delegate: a refused danger template never holds a slot, however many times
 
 test('delegate: a throw during scope resolution releases the slot', async () => {
   await withSandbox({ maxConcurrent: 1, templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
-    const { delegate } = await import('../extensions/index.ts');
+    const { delegate } = await import('../extensions/engine.ts');
     const { activeCount } = await import('../extensions/concurrency.ts');
     let calls = 0;
     const pi = fakePi(async () => {
@@ -91,7 +91,7 @@ test('delegate: a throw during scope resolution releases the slot', async () => 
 
 test('delegate: a cancel that lands right after the slot is won spawns nothing and frees the slot', async () => {
   await withSandbox({ maxConcurrent: 1, templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
-    const { delegate } = await import('../extensions/index.ts');
+    const { delegate } = await import('../extensions/engine.ts');
     const { activeCount } = await import('../extensions/concurrency.ts');
     // acquireSlot reads `aborted` once (false — the slot is granted), then delegate() re-checks it
     // (true) — the window between the grant and the spawn.
@@ -344,7 +344,7 @@ const CLAUDE_RESULT = JSON.stringify({
 test('delegate: addDirs from the template and the call reach the harness argv, resolved and deduped', async () => {
   const tpl = '---\nname: tinker\ndescription: t\npermission: edit\naddDirs: ../shared, /opt/lib\n---\nDo it.\n';
   await withSandbox({ templates: { tinker: tpl } }, async ({ cwd }) => {
-    const { delegate } = await import('../extensions/index.ts');
+    const { delegate } = await import('../extensions/engine.ts');
     const { readFileSync } = await import('node:fs');
     const { resolve } = await import('node:path');
     await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
@@ -367,14 +367,14 @@ test('delegate: addDirs from the template and the call reach the harness argv, r
 });
 
 test('mergeAddDirs: undefined when nothing is declared, so harness args stay unchanged', async () => {
-  const { mergeAddDirs } = await import('../extensions/index.ts');
+  const { mergeAddDirs } = await import('../extensions/engine.ts');
   assert.equal(mergeAddDirs('/repo'), undefined);
   assert.deepEqual(mergeAddDirs('/repo', ['a'], ['/repo/a', 'b']), ['/repo/a', '/repo/b']);
 });
 
 test('delegate: a budget on a harness that reports no cost is flagged as unenforced, in result and transcript', async () => {
   await withSandbox({ templates: {} }, async ({ cwd }) => {
-    const { delegate } = await import('../extensions/index.ts');
+    const { delegate } = await import('../extensions/engine.ts');
     const { readFileSync } = await import('node:fs');
     const lines = [
       JSON.stringify({ type: 'thread.started', thread_id: 't-1' }),
@@ -403,7 +403,7 @@ test('delegate: a budget on a harness that reports no cost is flagged as unenfor
 
 test('delegate: a host-enforced budget stops the run and records budget exceeded', async () => {
   await withSandbox({ templates: {} }, async ({ cwd }) => {
-    const { delegate } = await import('../extensions/index.ts');
+    const { delegate } = await import('../extensions/engine.ts');
     const { readFileSync } = await import('node:fs');
     const step = (cost: number) => JSON.stringify({ type: 'step_finish', sessionID: 's', part: { cost, tokens: {} } });
     const lines = [JSON.stringify({ type: 'text', part: { text: 'working' } }), step(0.4), step(0.4)];

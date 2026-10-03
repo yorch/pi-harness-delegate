@@ -48,7 +48,11 @@ throwaway manual session.
 
 ```
 extensions/            # the pi extension
-  index.ts             # tool + /delegate command registration, delegate() engine, fan-out
+  index.ts             # entry: tool + /delegate command registration, single-run overlay
+  engine.ts            # delegate() — the shared single-run engine — and its helpers
+  fanout.ts            # fan-out (tool + /delegate all/comma-list), multi-run overlay driver
+  history.ts           # /delegate history
+  subcommands.ts       # /delegate list | status | config | config init
   harnesses/           # harness abstraction (claude, codex, opencode, amp, devin) + registry
   runner.ts            # stdout transport: generic runHarness spawn+readline loop
   acp-runner.ts        # ACP transport (devin; opencode opt-in): JSON-RPC handshake over stdio
