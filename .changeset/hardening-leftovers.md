@@ -1,5 +1,0 @@
----
-"pi-harness-delegate": patch
----
-
-Security hardening: `git diff` output, `gh pr diff` bodies and `gh` error output are now fenced in the delegated prompt as untrusted data (a backtick fence longer than any run in the content, between `BEGIN/END UNTRUSTED DATA <nonce>` markers with a fresh random nonce), so a malicious PR can't break out into instruction position; the PR itself is named only as `owner/repo#n`/`#n`, never by its raw URL. A free-text `--scope` (or template `defaultScope`) is delimited the same way between `BEGIN/END SCOPE <nonce>` markers but framed as a restriction to honor — it can narrow the task, never add to it. A template's native `permission:` value is now checked against a per-harness allowlist of readonly/edit-equivalent modes — anything not on it (e.g. claude `auto`/`dontAsk`, devin `smart`, a custom opencode agent) is treated as `danger` and needs `allowDangerous`/`--allow-dangerous`; once confirmed it still runs as declared. Also: typed tool registration (no casts), a shared `maxConcurrent` parser, a `test:coverage` script, and deterministic (sleep-free) timing in tests.
