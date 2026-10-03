@@ -298,3 +298,76 @@ test('fan-out + sessionId is rejected up front on both the tool and the command 
     assert.match(err, /across a fan-out/);
   });
 });
+
+/**
+ * Put a fake `<name>` executable first on PATH for the duration of `fn`. The script records its
+ * argv (one per line) to `$FAKE_ARGS_FILE` and prints `stdoutLines`, so a real `delegate()` run can
+ * be driven end to end without the real CLI.
+ */
+async function withFakeBinaries<T>(
+  names: string[],
+  stdoutLines: string[],
+  fn: (argsFile: string) => Promise<T>,
+  opts: { sleepAfterSec?: number } = {},
+): Promise<T> {
+  const { chmodSync, mkdtempSync } = await import('node:fs');
+  const binDir = mkdtempSync(join(tmpdir(), 'fake-bin-'));
+  const argsFile = join(binDir, 'args.txt');
+  const body = stdoutLines.map(l => `printf '%s\\n' '${l.replace(/'/g, `'\\''`)}'`).join('\n');
+  const script = `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE"\n${body}\n${opts.sleepAfterSec ? `sleep ${opts.sleepAfterSec}\n` : ''}`;
+  for (const name of names) {
+    writeFileSync(join(binDir, name), script);
+    chmodSync(join(binDir, name), 0o755);
+  }
+  const prevPath = process.env.PATH;
+  const prevArgs = process.env.FAKE_ARGS_FILE;
+  process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.FAKE_ARGS_FILE = argsFile;
+  try {
+    return await fn(argsFile);
+  } finally {
+    process.env.PATH = prevPath;
+    if (prevArgs === undefined) delete process.env.FAKE_ARGS_FILE;
+    else process.env.FAKE_ARGS_FILE = prevArgs;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+const CLAUDE_RESULT = JSON.stringify({
+  type: 'result',
+  result: 'all good',
+  total_cost_usd: 0.01,
+  num_turns: 1,
+  session_id: 'sess-1',
+});
+
+test('delegate: addDirs from the template and the call reach the harness argv, resolved and deduped', async () => {
+  const tpl = '---\nname: tinker\ndescription: t\npermission: edit\naddDirs: ../shared, /opt/lib\n---\nDo it.\n';
+  await withSandbox({ templates: { tinker: tpl } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/index.ts');
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const run = await delegate(
+        fakePi(async () => ({ stdout: '', stderr: '', code: 0 })),
+        fakeCtx(cwd),
+        {
+          harness: 'claude',
+          mode: 'tinker',
+          task: 'x',
+          addDirs: ['/opt/lib', 'extra'],
+        },
+      );
+      assert.equal(run.content, 'all good');
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      const dirs = argv.flatMap((a, i) => (a === '--add-dir' ? [argv[i + 1]] : []));
+      assert.deepEqual(dirs, [resolve(cwd, '../shared'), '/opt/lib', resolve(cwd, 'extra')]);
+    });
+  });
+});
+
+test('mergeAddDirs: undefined when nothing is declared, so harness args stay unchanged', async () => {
+  const { mergeAddDirs } = await import('../extensions/index.ts');
+  assert.equal(mergeAddDirs('/repo'), undefined);
+  assert.deepEqual(mergeAddDirs('/repo', ['a'], ['/repo/a', 'b']), ['/repo/a', '/repo/b']);
+});

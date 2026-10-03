@@ -15,7 +15,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import {
   Container,
@@ -113,6 +113,9 @@ export interface DelegateOptions {
   allowDangerous?: boolean;
   sessionId?: string;
   pr?: string;
+  /** Extra directories the harness may access, merged with the template's `addDirs` (relative
+   *  paths resolve against the run's cwd). Per-harness limits apply — see each `buildArgs`. */
+  addDirs?: string[];
   /**
    * Host-run verification command override — takes precedence over the template's `verify`
    * frontmatter. Internal engine option only, not exposed on the `delegate` tool's schema — see
@@ -599,6 +602,17 @@ async function initConfig(ctx: ExtensionContext): Promise<void> {
   else ctx.ui.notify?.(msg, write.ok ? 'info' : 'warning');
 }
 
+/** Union of the template's and the call's extra dirs (template first, deduped), resolved against
+ *  `cwd`. Undefined when neither declares any, so harness args stay byte-identical. */
+export function mergeAddDirs(cwd: string, fromTemplate?: string[], fromCall?: string[]): string[] | undefined {
+  const out: string[] = [];
+  for (const d of [...(fromTemplate ?? []), ...(fromCall ?? [])]) {
+    const abs = resolve(cwd, d);
+    if (!out.includes(abs)) out.push(abs);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 function buildPrompt(
   template: DelegateTemplate,
   task: string,
@@ -634,7 +648,7 @@ export async function delegate(
 }> {
   // argv-bound inputs (sessionId/model/pr) are validated here, the one entry both the tool and
   // the /delegate command share — see validate.ts for the argument-injection rationale.
-  validateDelegateInputs({ sessionId: opts.sessionId, model: opts.model, pr: opts.pr });
+  validateDelegateInputs({ sessionId: opts.sessionId, model: opts.model, pr: opts.pr, addDirs: opts.addDirs });
   const config = loadConfig();
   const harnessName = opts.harness ?? config.defaultHarness ?? 'claude';
   const harness = getHarness(harnessName);
@@ -682,6 +696,7 @@ export async function delegate(
   const nativePermissionForRun = resolveNativePermission(template.permission, permission, nativePerm);
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
+  const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);
 
   // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
   // exactly as before; fan-out passes waitForSlot:true to queue instead.
@@ -734,6 +749,7 @@ export async function delegate(
       signal: opts.signal,
       timeoutMs: config.harnesses[harnessName]?.timeoutMs ?? config.timeoutMs,
       resumeSessionId: opts.sessionId,
+      addDirs,
       onStream: (t: string) => {
         streamedFull += t;
         opts.onStream?.(t);
@@ -928,6 +944,7 @@ interface DelegateToolParams {
   allowDangerous?: boolean;
   sessionId?: string;
   pr?: string;
+  addDirs?: string[];
 }
 
 /** One `delegate()` call with the tool's live-feed progress reporting (`onUpdate`). Shared by the
@@ -1000,7 +1017,12 @@ async function runFanoutTool(
 ): Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown>; usage?: unknown }> {
   const resumeErr = fanoutResumeError(params.harness, params.sessionId);
   if (resumeErr) throw new Error(resumeErr);
-  validateDelegateInputs({ sessionId: params.sessionId, model: params.model, pr: params.pr });
+  validateDelegateInputs({
+    sessionId: params.sessionId,
+    model: params.model,
+    pr: params.pr,
+    addDirs: params.addDirs,
+  });
   const detection = await detectAll();
   const { resolved, unknown, skipped } = resolveHarnessList(params.harness ?? 'all', {
     knownHarnesses: HARNESS_NAMES,
@@ -1036,6 +1058,7 @@ async function runFanoutTool(
           allowDangerous: params.allowDangerous === true,
           sessionId: params.sessionId,
           pr: params.pr,
+          addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
           waitForSlot: true,
           onAcquired: () =>
@@ -1162,7 +1185,15 @@ export default function (pi: ExtensionAPI) {
             'Escalate to danger permission (unrestricted). Always requires interactive human confirmation; refused without a UI.',
         }),
       ),
-      pr: Type.Optional(Type.String({ description: 'GitHub PR number/URL (alternative to scope pr).' })),
+      pr: Type.Optional(
+        Type.String({ description: 'GitHub PR number, http(s) PR URL, or owner/repo#123 (alternative to scope pr).' }),
+      ),
+      addDirs: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            'Extra directories (outside the working directory) the harness may access. Relative paths resolve against the working directory. Not every harness supports this (opencode ignores it; codex ignores it on resume).',
+        }),
+      ),
       // Deliberately no `verify` param — see the trust-model comment on DelegateToolParams/runVerify.
     }),
     async execute(
@@ -1193,6 +1224,7 @@ export default function (pi: ExtensionAPI) {
           allowDangerous: params.allowDangerous === true, // invariant: never inherit from config.allowDangerous — danger requires explicit per-call approval
           sessionId: params.sessionId,
           pr: params.pr,
+          addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
         },
         signal,
@@ -1326,6 +1358,7 @@ export default function (pi: ExtensionAPI) {
       budget?: number;
       sessionId?: string;
       pr?: string;
+      addDirs?: string[];
       verify?: string;
       template?: DelegateTemplate;
       isDanger: boolean;
@@ -1335,7 +1368,7 @@ export default function (pi: ExtensionAPI) {
     error: Error | null;
     cancelled: boolean;
   }> => {
-    const { harnessName, mode, task, scope, model, budget, sessionId, pr, verify, template, isDanger } = opts;
+    const { harnessName, mode, task, scope, model, budget, sessionId, pr, addDirs, verify, template, isDanger } = opts;
     const modeForDisplay = mode ?? 'general';
 
     const feed: FeedEntry[] = [];
@@ -1405,6 +1438,7 @@ export default function (pi: ExtensionAPI) {
       maxBudgetUsd: budget,
       sessionId,
       pr,
+      addDirs,
       verify,
       signal: ac.signal,
       onStream: t => {
@@ -1473,6 +1507,7 @@ export default function (pi: ExtensionAPI) {
     budget?: number;
     sessionId?: string;
     pr?: string;
+    addDirs?: string[];
     verify?: string;
     isDanger: boolean;
   }
@@ -1545,6 +1580,7 @@ export default function (pi: ExtensionAPI) {
         maxBudgetUsd: spec.budget,
         sessionId: spec.sessionId,
         pr: spec.pr,
+        addDirs: spec.addDirs,
         verify: spec.verify,
         signal: ac.signal,
         waitForSlot: true,
@@ -1651,7 +1687,12 @@ export default function (pi: ExtensionAPI) {
     try {
       const resumeErr = fanoutResumeError(harnessSpec, parsed.sessionId);
       if (resumeErr) throw new Error(resumeErr);
-      validateDelegateInputs({ sessionId: parsed.sessionId, model: parsed.model, pr: parsed.pr });
+      validateDelegateInputs({
+        sessionId: parsed.sessionId,
+        model: parsed.model,
+        pr: parsed.pr,
+        addDirs: parsed.addDirs,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (ctx.hasUI) ctx.ui.notify(msg, 'error');
@@ -1707,6 +1748,7 @@ export default function (pi: ExtensionAPI) {
         budget: parsed.budget,
         sessionId: parsed.sessionId,
         pr: parsed.pr,
+        addDirs: parsed.addDirs,
         verify: parsed.verify,
         isDanger,
       });
@@ -1878,6 +1920,7 @@ export default function (pi: ExtensionAPI) {
       budget: parsed.budget,
       sessionId: parsed.sessionId,
       pr: parsed.pr,
+      addDirs: parsed.addDirs,
       verify: parsed.verify,
       template,
       isDanger,

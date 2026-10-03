@@ -88,3 +88,10 @@ test('explicit scope wins over the template default', () => {
     scope: 'auth/',
   });
 });
+
+test('--add-dir is repeatable and keeps quoted values intact', () => {
+  const r = parseClaudeCommand('--mode=review --add-dir=../shared --add-dir="/opt/my lib" review it', MODES);
+  assert.deepEqual(r.addDirs, ['../shared', '/opt/my lib']);
+  assert.equal(r.task, 'review it');
+  assert.equal(parseClaudeCommand('review it', MODES).addDirs, undefined);
+});

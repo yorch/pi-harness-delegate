@@ -47,8 +47,11 @@ Only the prompt is required. A **harness as first word** and/or **mode as next w
 | `--scope=<scope>` | `diff` (current `git diff HEAD`), `pr` (`gh pr diff` for the current branch), or a path list |
 | `--pr=<pr>` | A specific PR to scope to: a number, an http(s) PR URL, or `owner/repo#123` (implies the PR diff as scope) |
 | `--budget=<usd>` | Per-run spend cap in USD (same as the tool's `maxBudgetUsd`) |
+| `--add-dir=<path>` | Extra directory the harness may access; repeatable (`--add-dir=../shared --add-dir=/opt/lib`) |
 | `--resume=<session-id>` | Continue a previous delegated session (single harness only — not with a fan-out) |
 | `--verify="<cmd>"` | Host-run check after the harness exits (see [Verify](#modes-templates)) |
+
+Extra directories (`--add-dir`, the tool's `addDirs`, and template `addDirs:`) are merged, resolved against the working directory, and passed as each harness's native option where one exists: `--add-dir` for `claude`, `codex` (fresh runs only — `codex exec resume` has no such flag), and `amp`/`omp`; `additionalDirectories` on the ACP session for `devin`/`opencode` over ACP. `opencode run` (stdout) has no equivalent, so they're ignored there.
 
 Flag values may be quoted (`--verify="bun test && bun run lint"`). `--resume`, `--model`, and `--pr` values are validated before anything runs — e.g. a value starting with `-` is rejected, so it can never be smuggled into a harness's command line as a flag.
 
@@ -66,7 +69,7 @@ Flag values may be quoted (`--verify="bun test && bun run lint"`). `--resume`, `
 Some modes have **default tasks** when the prompt is omitted:
 `/delegate review` reviews the current git diff (`scope: diff`), `/delegate security-audit` audits the repo. Modes without a default (`plan`, `implement`, `docs`, `general`) print a hint asking for a prompt.
 
-The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff, `pr` = PR diff, path list, or whole repo), `model`, `maxBudgetUsd`, `allowDangerous`, `sessionId`, `pr`. (`verify` is deliberately *not* a tool parameter — see below.) Setting `allowDangerous` from the tool always asks you to confirm interactively, and is refused outright in a non-interactive session — see [Security model](#security-model).
+The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff, `pr` = PR diff, path list, or whole repo), `model`, `maxBudgetUsd`, `allowDangerous`, `sessionId`, `pr`, `addDirs`. (`verify` is deliberately *not* a tool parameter — see below.) Setting `allowDangerous` from the tool always asks you to confirm interactively, and is refused outright in a non-interactive session — see [Security model](#security-model).
 
 `claude_delegate` remains as a deprecated alias for `delegate{harness:claude}`.
 
@@ -153,6 +156,7 @@ All frontmatter keys (one `key: value` per line; only `name` is required):
 | `defaultTask` | Task used when the prompt is omitted (e.g. `review` → review the current diff) |
 | `defaultScope` | Scope used with `defaultTask` (e.g. `diff`) |
 | `verify` | Host-run check command (see below) |
+| `addDirs` | Comma-separated extra directories the harness may access (merged with the call's `addDirs`/`--add-dir`) |
 | `harness` | Informational: which harness a template targets (shown by `/delegate list`) |
 
 **Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, use the native key (`permissionMode: dontAsk`, `sandbox: ...`) — it overrides `permission` for that harness.

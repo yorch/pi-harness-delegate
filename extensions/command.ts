@@ -18,6 +18,8 @@ export interface DelegateCommandArgs {
   pr?: string;
   /** Host-run verification command override (--verify=); takes precedence over the template's. */
   verify?: string;
+  /** Extra directories the harness may access (--add-dir=, repeatable). */
+  addDirs?: string[];
 }
 
 export type ClaudeCommandArgs = DelegateCommandArgs;
@@ -38,11 +40,16 @@ export function parseDelegateCommand(
   knownHarnesses: ReadonlySet<string> = KNOWN_HARNESSES,
 ): DelegateCommandArgs {
   const flags: Record<string, string> = {};
+  const addDirs: string[] = [];
   // supports quoted values ("…"/'…') so multi-word flags like --verify="bun test" survive intact
   const rest = raw.replace(
     /--([a-zA-Z-]+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g,
     (_m, k: string, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
-      flags[k] = dq ?? sq ?? bare ?? '';
+      const value = dq ?? sq ?? bare ?? '';
+      // --add-dir is the one repeatable flag — every occurrence is kept, in order
+      if (k === 'add-dir') {
+        if (value) addDirs.push(value);
+      } else flags[k] = value;
       return '';
     },
   );
@@ -78,6 +85,7 @@ export function parseDelegateCommand(
   if (flags.resume) out.sessionId = flags.resume;
   if (flags.pr) out.pr = flags.pr;
   if (flags.verify) out.verify = flags.verify;
+  if (addDirs.length > 0) out.addDirs = addDirs;
   return out;
 }
 
