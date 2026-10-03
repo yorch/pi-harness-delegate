@@ -39,7 +39,8 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /** Exact structural match to Claude's tiers (session/new's captured `availableModes`: plan, accept-edits,
- *  smart, ask, bypass). `smart`/`ask` stay reachable via the existing `nativePermission` escape hatch. */
+ *  smart, ask, bypass). `smart`/`ask` stay reachable via the existing `nativePermission` escape hatch
+ *  (`smart` only as danger — see `safeNativePermissions`). */
 const PERMISSION_MAP: Record<NormalizedPermission, string> = {
   readonly: 'plan',
   edit: 'accept-edits',
@@ -203,6 +204,10 @@ export const devinHarness: Harness = {
     edit: [PERMISSION_MAP.edit],
     danger: [PERMISSION_MAP.danger],
   },
+  // ACP `availableModes` (fixture): accept-edits, smart, ask, plan, bypass. `ask` prompts for every
+  // action, which the ACP runner always declines. Not listed (=> danger): `bypass`, and `smart`
+  // ("additionally auto-runs actions a fast model judges safe" per `devin --help`).
+  safeNativePermissions: ['plan', 'accept-edits', 'ask'],
   // ACP-only — no stdout mode exists to select between, so there's nothing to configure.
   supportsTransports: ['acp'],
 };

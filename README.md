@@ -160,7 +160,17 @@ All frontmatter keys (one `key: value` per line; only `name` is required):
 | `addDirs` | Comma-separated extra directories the harness may access (merged with the call's `addDirs`/`--add-dir`) |
 | `harness` | Informational: which harness a template targets (shown by `/delegate list`) |
 
-**Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, use the native key (`permissionMode: dontAsk`, `sandbox: ...`) — it overrides `permission` for that harness.
+**Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, put the native value in `permission:` (e.g. `permission: ask` in a `devin/` template) — it is passed to that harness as-is. Legacy `permissionMode:`/`sandbox:` keys only map onto the normalized tiers (`plan` → `readonly`, `bypassPermissions` → `danger`, anything else → `edit`).
+
+Native values are checked against a per-harness **allowlist** of readonly/edit-equivalent modes; anything else — the harness's own danger mode *or a value not on the list* — is treated as `danger` and needs `allowDangerous` / `--allow-dangerous` (fail closed). Once confirmed, an unlisted value still runs as declared rather than being swapped for the harness's danger mode.
+
+| Harness | Native values treated as non-danger |
+| --- | --- |
+| `claude` | `plan`, `acceptEdits`, `manual`, `default` (`auto`, `dontAsk`, `bypassPermissions` → danger) |
+| `codex` | `read-only`, `workspace-write` |
+| `opencode` | `plan`, `build` (custom agents, `build --auto` → danger) |
+| `amp`/`omp` | `always-ask`, `write` |
+| `devin` | `plan`, `accept-edits`, `ask` (`smart`, `bypass` → danger) |
 
 **Verify:** `verify` is a shell command run **on the host** (never handed to the harness) right after it exits — e.g. `verify: bun test` on an `implement`/`docs`/`general` template turns "the harness says it's done" into an actual pass/fail. It's report-only: a failing verify is appended as its own section in the transcript and injected report, and surfaced in the tool result's `details.verify` (`{command, exitCode, ok}`), but it never changes whether the run itself is reported as an error — that stays whatever the harness reported. No template ships one by default — there's no universally-correct check command, so nothing is invented for you.
 

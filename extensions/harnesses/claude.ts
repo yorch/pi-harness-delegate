@@ -156,6 +156,11 @@ export const claudeHarness: Harness = {
     edit: ['acceptEdits'],
     danger: ['bypassPermissions'],
   },
+  // `claude --permission-mode` choices (2.1.x): acceptEdits, auto, bypassPermissions, manual, dontAsk,
+  // plan. `default` is the older spelling of `manual`. Not listed (=> danger): `bypassPermissions`,
+  // `auto` (a classifier auto-approves actions), and `dontAsk` — its effective reach is whatever the
+  // user's allow rules grant, which this extension can't see, so it fails closed.
+  safeNativePermissions: ['plan', 'acceptEdits', 'manual', 'default'],
   // `--max-budget-usd` (see buildArgs) — claude enforces the cap itself.
   nativeBudget: true,
   // No `acp` subcommand exists (docs/acp-harness-assessment.md §2) — confirmed against the full

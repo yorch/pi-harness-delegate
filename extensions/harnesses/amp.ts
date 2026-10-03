@@ -271,6 +271,8 @@ export const ampHarness: Harness = {
     return null;
   },
   permissionMap: { readonly: ['always-ask'], edit: ['write'], danger: ['yolo'] },
+  // `omp --approval-mode` values: always-ask, write, yolo.
+  safeNativePermissions: ['always-ask', 'write'],
   // `omp acp` is real and live-verified (docs/acp-harness-assessment.md §2/§4) — but deliberately
   // NOT offered as a config value yet: its ACP mode surface only has 2 tiers (`default`/`plan`),
   // while the stdout `--approval-mode` above has 3 genuine ones. Adding 'acp' here would let a

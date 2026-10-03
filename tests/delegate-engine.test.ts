@@ -428,6 +428,31 @@ test('delegate: a hostile `git diff` reaches the harness fenced as untrusted dat
   });
 });
 
+test('delegate: an unlisted native permission is gated as danger, and runs as declared once allowed', async () => {
+  const tpl = '---\nname: auto\ndescription: t\npermission: auto\n---\nDo it.\n';
+  await withSandbox({ templates: { auto: tpl } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/engine.ts');
+    const { readFileSync } = await import('node:fs');
+    const pi = fakePi(async () => ({ stdout: '', stderr: '', code: 0 }));
+    await assert.rejects(
+      () => delegate(pi, fakeCtx(cwd), { harness: 'claude', mode: 'auto', task: 'x' }),
+      /requires danger permission \(native permission "auto" is not a known readonly\/edit mode for claude/,
+    );
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const run = await delegate(pi, fakeCtx(cwd), {
+        harness: 'claude',
+        mode: 'auto',
+        task: 'x',
+        allowDangerous: true,
+      });
+      assert.equal(run.result.isError, false);
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      // the declared mode, not silently widened to bypassPermissions
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'auto');
+    });
+  });
+});
+
 test('mergeAddDirs: undefined when nothing is declared, so harness args stay unchanged', async () => {
   const { mergeAddDirs } = await import('../extensions/engine.ts');
   assert.equal(mergeAddDirs('/repo'), undefined);

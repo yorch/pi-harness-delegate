@@ -32,7 +32,7 @@ import {
   resolveModelForHarness,
   resolveTransport,
 } from './config.ts';
-import { ALIASES, getHarness, HARNESS_NAMES, isNativeDangerPermission } from './harnesses/registry.ts';
+import { ALIASES, classifyNativePermission, getHarness, HARNESS_NAMES } from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { runHarness } from './runner.ts';
 import {
@@ -289,11 +289,16 @@ export async function delegate(
   // (or, for fan-out, waits for) a concurrency slot it can't use.
   let permission: NormalizedPermission = template.permission;
   const nativePerm = template.nativePermission;
-  const isNativeDanger = isNativeDangerPermission(harness, nativePerm);
+  const nativeClass = classifyNativePermission(harness, nativePerm);
+  const isNativeDanger = nativeClass === 'danger' || nativeClass === 'unlisted';
   if (template.permission === 'danger' || isNativeDanger) {
     if (opts.allowDangerous !== true) {
+      const why =
+        nativeClass === 'unlisted'
+          ? ` (native permission "${nativePerm}" is not a known readonly/edit mode for ${harnessName}, so it is treated as danger)`
+          : '';
       throw new Error(
-        `template "${mode}" requires danger permission — never a default: pass allowDangerous:true on the delegate tool, or --allow-dangerous on /delegate (both ask you to confirm interactively)`,
+        `template "${mode}" requires danger permission${why} — never a default: pass allowDangerous:true on the delegate tool, or --allow-dangerous on /delegate (both ask you to confirm interactively)`,
       );
     }
     permission = 'danger';
@@ -303,8 +308,13 @@ export async function delegate(
   }
   const permissionForDisplay = nativePerm ?? permission;
   // Dropped when an explicit escalation moved us off the template's own tier — see
-  // resolveNativePermission(). Applies to both transports.
-  const nativePermissionForRun = resolveNativePermission(template.permission, permission, nativePerm);
+  // resolveNativePermission(). Applies to both transports. Exception: an `unlisted` native mode
+  // gated as danger runs as declared once confirmed — it is no wider than the harness's own danger
+  // mode, and swapping it for that mode would silently widen a merely-unrecognised one.
+  const nativePermissionForRun =
+    nativeClass === 'unlisted' && permission === 'danger'
+      ? nativePerm
+      : resolveNativePermission(template.permission, permission, nativePerm);
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);

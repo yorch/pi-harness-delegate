@@ -91,6 +91,11 @@ export interface Harness {
   /** Normalized -> native CLI arg fragments, used by the 'stdout' transport's buildArgs/nativePermission. */
   permissionMap?: Record<NormalizedPermission, string[]>;
   permissionHint?: (permission: NormalizedPermission) => string[];
+  /** Allowlist of native permission values (a template's `permission: <native>` escape hatch) that are
+   *  readonly- or edit-equivalent for this harness. Anything else — including a value this list has
+   *  never heard of — is treated as danger (fail closed) by `isNativeDangerPermission` in registry.ts.
+   *  Omitted -> no native value is considered safe. Covers both transports' vocabularies. */
+  safeNativePermissions?: readonly string[];
   /** True when `buildArgs` passes `maxBudgetUsd` to a native CLI budget flag (claude's
    *  `--max-budget-usd`). Otherwise the runners enforce it host-side from the streamed
    *  `totalCostUsd` — possible only when the harness actually reports cost. */
