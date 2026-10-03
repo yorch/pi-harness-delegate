@@ -109,6 +109,34 @@ export function defaultDelegateConfig(): DelegateConfig {
   };
 }
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+/** `maxConcurrent.perHarness` from raw settings: only non-negative numeric entries survive.
+ *  Undefined when the value isn't an object or no entry is valid. */
+export function parsePerHarness(raw: unknown): Record<string, number> | undefined {
+  if (!isObject(raw)) return undefined;
+  const ph: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'number' && v >= 0) ph[k] = v;
+  }
+  return Object.keys(ph).length > 0 ? ph : undefined;
+}
+
+/** `maxConcurrent` from raw settings (shared by the `delegate` and legacy `claudeDelegate` keys):
+ *  a non-negative number, or `{global?, perHarness?}` with at least one valid part. Undefined
+ *  means "not configured / invalid — keep the default". */
+export function parseMaxConcurrent(raw: unknown): DelegateConfig['maxConcurrent'] | undefined {
+  if (typeof raw === 'number') return raw >= 0 ? raw : undefined;
+  if (!isObject(raw)) return undefined;
+  const out: { global?: number; perHarness?: Record<string, number> } = {};
+  if (typeof raw.global === 'number' && raw.global >= 0) out.global = raw.global;
+  const perHarness = parsePerHarness(raw.perHarness);
+  if (perHarness) out.perHarness = perHarness;
+  return out.global !== undefined || out.perHarness ? out : undefined;
+}
+
 /**
  * Only the top-level settings whose effective value differs from the built-in default.
  *
@@ -185,20 +213,8 @@ export function loadConfigWithSource(): ConfigLoadResult {
           if (typeof v === 'string' && v) cfg.modelAliases[k] = v;
         }
       }
-      if (typeof c.maxConcurrent === 'number' && c.maxConcurrent >= 0) cfg.maxConcurrent = c.maxConcurrent;
-      else if (c.maxConcurrent && typeof c.maxConcurrent === 'object') {
-        const obj = c.maxConcurrent as { global?: unknown; perHarness?: unknown };
-        const out: { global?: number; perHarness?: Record<string, number> } = {};
-        if (typeof obj.global === 'number' && obj.global >= 0) out.global = obj.global;
-        if (obj.perHarness && typeof obj.perHarness === 'object') {
-          const ph: Record<string, number> = {};
-          for (const [k, v] of Object.entries(obj.perHarness as Record<string, unknown>)) {
-            if (typeof v === 'number' && v >= 0) ph[k] = v;
-          }
-          if (Object.keys(ph).length > 0) out.perHarness = ph;
-        }
-        if (out.global !== undefined || out.perHarness) cfg.maxConcurrent = out;
-      }
+      const legacyMaxConcurrent = parseMaxConcurrent(c.maxConcurrent);
+      if (legacyMaxConcurrent !== undefined) cfg.maxConcurrent = legacyMaxConcurrent;
       if (typeof c.maxTranscripts === 'number' && c.maxTranscripts >= 0) cfg.maxTranscripts = c.maxTranscripts;
       if (c.harnesses && typeof c.harnesses === 'object') {
         for (const [k, v] of Object.entries(c.harnesses)) {
@@ -225,20 +241,8 @@ export function loadConfigWithSource(): ConfigLoadResult {
         if (typeof v === 'string' && v) cfg.modelAliases[k] = v;
       }
     }
-    if (typeof d.maxConcurrent === 'number' && d.maxConcurrent >= 0) cfg.maxConcurrent = d.maxConcurrent;
-    else if (d.maxConcurrent && typeof d.maxConcurrent === 'object') {
-      const obj = d.maxConcurrent as { global?: unknown; perHarness?: unknown };
-      const out: { global?: number; perHarness?: Record<string, number> } = {};
-      if (typeof obj.global === 'number' && obj.global >= 0) out.global = obj.global;
-      if (obj.perHarness && typeof obj.perHarness === 'object') {
-        const ph: Record<string, number> = {};
-        for (const [k, v] of Object.entries(obj.perHarness as Record<string, unknown>)) {
-          if (typeof v === 'number' && v >= 0) ph[k] = v;
-        }
-        if (Object.keys(ph).length > 0) out.perHarness = ph;
-      }
-      if (out.global !== undefined || out.perHarness) cfg.maxConcurrent = out;
-    }
+    const maxConcurrent = parseMaxConcurrent(d.maxConcurrent);
+    if (maxConcurrent !== undefined) cfg.maxConcurrent = maxConcurrent;
     if (typeof d.maxTranscripts === 'number' && d.maxTranscripts >= 0) cfg.maxTranscripts = d.maxTranscripts;
     if (d.harnesses && typeof d.harnesses === 'object') {
       for (const [k, v] of Object.entries(d.harnesses)) {
@@ -454,12 +458,10 @@ export function resolveTransport(cfg: DelegateConfig, harnessName: string, harne
 
 export function getMaxConcurrent(cfg: DelegateConfig, harness?: string): number {
   if (typeof cfg.maxConcurrent === 'number') return cfg.maxConcurrent;
-  // if object shape {global, perHarness}
-  const mc = cfg.maxConcurrent as unknown as { global?: number; perHarness?: Record<string, number> };
-  if (harness && mc.perHarness && typeof mc.perHarness[harness] === 'number') {
-    const v = mc.perHarness[harness];
-    if (typeof v === 'number') return v;
-  }
+  // object shape {global, perHarness} — narrowed by the number check above
+  const mc = cfg.maxConcurrent;
+  const perHarness = harness ? mc.perHarness?.[harness] : undefined;
+  if (typeof perHarness === 'number') return perHarness;
   if (typeof mc.global === 'number') return mc.global;
   return 1;
 }

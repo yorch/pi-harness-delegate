@@ -551,3 +551,21 @@ test('nonDefaultConfig: omits everything still at its default, keeps real overri
   const cfg = { ...defaultDelegateConfig(), defaultHarness: 'codex', harnesses: { codex: { model: 'm' } } };
   assert.deepEqual(nonDefaultConfig(cfg), { defaultHarness: 'codex', harnesses: { codex: { model: 'm' } } });
 });
+
+test('parseMaxConcurrent / parsePerHarness: one parser for both the delegate and legacy keys', async () => {
+  const { parseMaxConcurrent, parsePerHarness } = await import('../extensions/config.ts');
+  assert.equal(parseMaxConcurrent(0), 0);
+  assert.equal(parseMaxConcurrent(3), 3);
+  assert.equal(parseMaxConcurrent(-1), undefined);
+  assert.equal(parseMaxConcurrent('4'), undefined);
+  assert.equal(parseMaxConcurrent(null), undefined);
+  assert.equal(parseMaxConcurrent({}), undefined);
+  assert.deepEqual(parseMaxConcurrent({ global: 2 }), { global: 2 });
+  assert.deepEqual(parseMaxConcurrent({ global: -2, perHarness: { claude: 1, codex: -1, amp: 'x' } }), {
+    perHarness: { claude: 1 },
+  });
+  assert.equal(parseMaxConcurrent({ global: 'x', perHarness: { codex: -1 } }), undefined);
+  assert.equal(parsePerHarness(undefined), undefined);
+  assert.equal(parsePerHarness({ claude: -1 }), undefined);
+  assert.deepEqual(parsePerHarness({ claude: 0, codex: 2 }), { claude: 0, codex: 2 });
+});
