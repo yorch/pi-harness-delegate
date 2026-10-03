@@ -92,6 +92,16 @@ export function isFanoutSpec(harness: string | undefined): boolean {
   return lower === 'all' || lower.includes(',');
 }
 
+/**
+ * A session id belongs to exactly one harness's session store, so resuming "it" across a fan-out
+ * is meaningless — every other harness would either error out or silently start fresh under a
+ * foreign id. Returns the rejection message (null when fine); shared by the tool and command paths.
+ */
+export function fanoutResumeError(harnessSpec: string | undefined, sessionId: string | undefined): string | null {
+  if (!sessionId || !isFanoutSpec(harnessSpec)) return null;
+  return `cannot resume session "${sessionId}" across a fan-out (harness "${harnessSpec}") — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=${sessionId} …)`;
+}
+
 export type HarnessFilterResolution =
   | { kind: 'none' } // no filter word given
   | { kind: 'known'; harness: string } // resolved to its canonical name (aliases/case normalized)

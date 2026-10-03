@@ -51,6 +51,7 @@ import {
   type VerifyResult,
 } from './activity.ts';
 import {
+  fanoutResumeError,
   isFanoutSpec,
   parseDelegateCommand,
   resolveDefaults,
@@ -1002,6 +1003,8 @@ async function runFanoutTool(
   signal: AbortSignal | undefined,
   onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
 ): Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown>; usage?: unknown }> {
+  const resumeErr = fanoutResumeError(params.harness, params.sessionId);
+  if (resumeErr) throw new Error(resumeErr);
   validateDelegateInputs({ sessionId: params.sessionId, model: params.model, pr: params.pr });
   const detection = await detectAll();
   const { resolved, unknown, skipped } = resolveHarnessList(params.harness ?? 'all', {
@@ -1125,7 +1128,7 @@ export default function (pi: ExtensionAPI) {
       'Pass harness (claude|codex|opencode|amp|devin) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
       'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
       'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
-      "sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run's details (letters, digits, . _ : - only).",
+      'sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run\'s details (letters, digits, . _ : - only). It cannot be combined with a fan-out harness ("all" or a comma list) — a session belongs to one harness.',
       'pr must be a PR number, an http(s) PR URL, or owner/repo#123.',
       'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
     ],
@@ -1651,6 +1654,8 @@ export default function (pi: ExtensionAPI) {
   const runFanoutCommand = async (ctx: ExtensionContext, parsed: ReturnType<typeof parseDelegateCommand>) => {
     const harnessSpec = parsed.harness as string;
     try {
+      const resumeErr = fanoutResumeError(harnessSpec, parsed.sessionId);
+      if (resumeErr) throw new Error(resumeErr);
       validateDelegateInputs({ sessionId: parsed.sessionId, model: parsed.model, pr: parsed.pr });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

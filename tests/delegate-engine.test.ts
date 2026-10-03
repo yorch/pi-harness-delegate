@@ -277,3 +277,24 @@ test('/delegate command: flag-shaped --resume/--pr are rejected on both single a
     assert.match(fanout, /invalid pr/);
   });
 });
+
+test('fan-out + sessionId is rejected up front on both the tool and the command path', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { tools, commands } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await assert.rejects(
+      () =>
+        tools
+          .get('delegate')
+          ?.execute('t', { harness: 'all', task: 'x', sessionId: 'abc' }, undefined, undefined, ctx) ??
+        Promise.resolve(),
+      /across a fan-out/,
+    );
+    const handler = commands.get('delegate')?.handler;
+    assert.ok(handler);
+    const err = await captureStderr(() => handler('claude,codex tinker --resume=abc continue', ctx));
+    assert.match(err, /across a fan-out/);
+  });
+});
