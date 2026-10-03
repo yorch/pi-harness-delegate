@@ -224,13 +224,32 @@ export function resolveNativePermission(
  *
  * Pure filesystem inspection — no trust logic. The caller supplies the trust decision.
  */
-export function projectTemplatePresence(cwd: string): {
+export function projectTemplatePresence(
+  cwd: string,
+  /** Canonical harness names — the only partitions `loadTemplates` ever reads (callers pass the
+   *  registry's `HARNESS_NAMES`; injected so this module stays free of the harness registry). */
+  harnessNames: readonly string[],
+): {
   /** Template dirs that exist and would load if the project were trusted. */
   dirs: string[];
   /** A leftover `.pi/trusted` file — strong evidence the user relied on the removed mechanism. */
   staleTrustFile: boolean;
 } {
-  const candidates = [projectTemplatesDir(cwd), legacyProjectTemplatesDir(cwd)];
+  // the per-harness partitions (`.pi/delegate/templates/<harness>/`) load too — see loadTemplates —
+  // so they count as skipped content just like the shared root does. Only real harness partitions:
+  // loadTemplates is always called with a canonical name, so `omp/` (an alias), `archive/`,
+  // `shared/` etc. are never read and must not trigger the warning either.
+  const known = new Set(harnessNames);
+  let partitions: string[] = [];
+  try {
+    partitions = readdirSync(projectTemplatesDir(cwd), { withFileTypes: true })
+      .filter(e => e.isDirectory() && known.has(e.name))
+      .map(e => projectTemplatesDir(cwd, e.name))
+      .sort();
+  } catch {
+    // absent or unreadable
+  }
+  const candidates = [projectTemplatesDir(cwd), ...partitions, legacyProjectTemplatesDir(cwd)];
   const dirs: string[] = [];
   for (const dir of candidates) {
     try {

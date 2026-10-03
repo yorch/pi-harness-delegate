@@ -649,3 +649,147 @@ test('delegate tool path is unchanged: its own confirm wording, and no danger wi
     });
   });
 });
+
+// ── command-path danger banner ─────────────────────────────────────────────
+
+/** Interactive ctx that renders every overlay once on mount and records whether it showed the
+ *  danger banner — `progressWindow`'s "⚠ danger" row or `multiProgressWindow`'s equivalent. */
+function bannerCtx(cwd: string) {
+  const banners: boolean[] = [];
+  const notes: string[] = [];
+  const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
+  const ctx = {
+    cwd,
+    hasUI: true,
+    isProjectTrusted: () => true,
+    ui: {
+      theme,
+      confirm: async () => false,
+      notify: (msg: string) => notes.push(msg),
+      setStatus: () => {},
+      custom: (factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => unknown) =>
+        new Promise(resolve => {
+          const comp = factory({ requestRender() {} }, theme, {}, v => {
+            comp.dispose?.();
+            resolve(v);
+          }) as { render(w: number): string[]; dispose?: () => void };
+          banners.push(comp.render(100).some(l => /danger/i.test(l)));
+        }),
+    },
+  };
+  return { ctx, banners, notes };
+}
+
+test('/delegate danger banner follows the template that actually runs: default mode and native danger modes', async () => {
+  await withSandbox({ templates: { yolo: DANGER_TEMPLATE, tinker: EDIT_TEMPLATE } }, async ({ agentDir, cwd }) => {
+    writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ delegate: { defaultMode: 'yolo' } }));
+    const ocTpl = join(cwd, '.pi', 'delegate', 'templates', 'opencode');
+    mkdirSync(ocTpl, { recursive: true });
+    writeFileSync(join(ocTpl, 'auto.md'), '---\nname: auto\ndescription: t\npermission: build --auto\n---\nGo.\n');
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const cases: Array<[string, string, boolean]> = [
+      ['delegate', 'claude do it', true], // no mode → defaultMode `yolo` (danger)
+      ['claude', 'do it', true], // alias, same default
+      ['delegate', 'claude tinker do it', false], // explicit edit template
+      ['opencode', 'auto do it', true], // native danger not in the old hardcoded list
+    ];
+    // fake binaries: the edit-template case really runs; nothing may reach a real CLI
+    await withFakeBinaries(['claude', 'opencode'], [CLAUDE_RESULT], async () => {
+      for (const [name, args, expected] of cases) {
+        const { ctx, banners } = bannerCtx(cwd);
+        await commands.get(name)?.handler(args, ctx);
+        assert.deepEqual(banners, [expected], `/${name} ${args}`);
+        takePendingReport();
+      }
+    });
+  });
+});
+
+test('/delegate fan-out danger banner uses the default mode when none is given', async () => {
+  await withSandbox({ templates: { yolo: DANGER_TEMPLATE } }, async ({ agentDir, cwd }) => {
+    writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ delegate: { defaultMode: 'yolo' } }));
+    const codexTpl = join(cwd, '.pi', 'delegate', 'templates', 'codex');
+    mkdirSync(codexTpl, { recursive: true });
+    writeFileSync(join(codexTpl, 'yolo.md'), DANGER_TEMPLATE);
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT], async () => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const { ctx, banners } = bannerCtx(cwd);
+      await commands.get('delegate')?.handler('claude,codex do it', ctx);
+      assert.deepEqual(banners, [true]);
+      takePendingReport();
+    });
+  });
+});
+
+test('/delegate fan-out danger banner follows a native danger mode, not a token list', async () => {
+  // opencode's `build --auto` is danger only by its own permissionMap — absent from the legacy
+  // token list — so a fan-out path that went back to a hardcoded list would show no banner here
+  await withSandbox({ templates: { auto: EDIT_TEMPLATE.replace('name: tinker', 'name: auto') } }, async ({ cwd }) => {
+    const ocTpl = join(cwd, '.pi', 'delegate', 'templates', 'opencode');
+    mkdirSync(ocTpl, { recursive: true });
+    writeFileSync(join(ocTpl, 'auto.md'), '---\nname: auto\ndescription: t\npermission: build --auto\n---\nGo.\n');
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude', 'opencode'], [CLAUDE_RESULT], async () => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const { ctx, banners } = bannerCtx(cwd);
+      await commands.get('delegate')?.handler('claude,opencode auto do it', ctx);
+      assert.deepEqual(banners, [true]);
+      takePendingReport();
+    });
+  });
+});
+
+test('/delegate --budget that cannot be honored is reported and runs nothing', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { commands } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    for (const [name, args] of [
+      ['delegate', 'claude tinker --budget=0 do it'],
+      ['delegate', 'claude,codex tinker --budget=-2 do it'],
+      ['codex', '--budget=abc do it'],
+    ] as const) {
+      const err = await captureStderr(() => commands.get(name)?.handler(args, ctx) ?? Promise.resolve());
+      assert.match(err, /--budget must be a positive number/, `${name} ${args}`);
+      assert.match(err, /Usage: \/(delegate|codex) /);
+    }
+  });
+});
+
+test('fan-out comparison rows report real prompt tokens on both the tool and the command path', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const line = JSON.stringify({
+      type: 'result',
+      result: 'ok',
+      total_cost_usd: 0.01,
+      num_turns: 1,
+      session_id: 's',
+      usage: { input_tokens: 12_000, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    });
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [line], async () => {
+      const { tools, commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+      // `claude,` normalizes away on the command path; the tool path keeps it a (one-harness) fan-out
+      const out = (await tools
+        .get('delegate')
+        ?.execute('t', { harness: 'claude,', mode: 'tinker', task: 'x' }, undefined, undefined, ctx)) as {
+        content: { text: string }[];
+      };
+      assert.match(out.content[0].text, /12k tok/);
+      const orig = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (() => true) as typeof process.stdout.write;
+      try {
+        await commands.get('delegate')?.handler('claude,claude tinker do it', ctx);
+      } finally {
+        process.stdout.write = orig;
+      }
+      const report = takePendingReport();
+      assert.ok(report);
+      assert.match(report.content, /12k tok/);
+    });
+  });
+});

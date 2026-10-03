@@ -223,3 +223,93 @@ test('acquireSlot: in-process counters never absorb another process’s registry
     assert.equal(activeCount(), 0);
   });
 });
+
+test('pollDelayMs: interval plus bounded jitter, deterministic given random', async () => {
+  const { pollDelayMs, POLL_JITTER_FRACTION } = await import('../extensions/concurrency.ts');
+  assert.equal(
+    pollDelayMs(200, () => 0),
+    200,
+  );
+  assert.equal(
+    pollDelayMs(200, () => 0.5),
+    200 + Math.floor(200 * POLL_JITTER_FRACTION * 0.5),
+  );
+  assert.equal(
+    pollDelayMs(200, () => 0.999999),
+    200 + Math.floor(200 * POLL_JITTER_FRACTION * 0.999999),
+  );
+  // out-of-range randoms are clamped — never below the interval, never past the jitter cap
+  assert.equal(
+    pollDelayMs(200, () => -3),
+    200,
+  );
+  assert.equal(
+    pollDelayMs(200, () => 7),
+    200 + 200 * POLL_JITTER_FRACTION,
+  );
+  // non-finite draws get no jitter — NaN must never reach setTimeout (it would fire at 0ms)
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])
+    assert.equal(
+      pollDelayMs(200, () => bad),
+      200,
+      String(bad),
+    );
+  for (let i = 0; i < 100; i++) {
+    const d = pollDelayMs(100);
+    assert.ok(d >= 100 && d <= 100 + 100 * POLL_JITTER_FRACTION, String(d));
+  }
+});
+
+test('acquireSlot: a waiting poll draws its jitter from the injected random', async () => {
+  await withAgentDir(async () => {
+    const { acquireSlot } = await import('../extensions/concurrency.ts');
+    const config = makeConfig(1);
+    const release = await acquireSlot({ harness: 'claude', mode: 'review', config, wait: false });
+    let draws = 0;
+    const waiter = acquireSlot({
+      harness: 'codex',
+      mode: 'review',
+      config,
+      wait: true,
+      pollIntervalMs: 5,
+      random: () => {
+        draws++;
+        return 0;
+      },
+    });
+    await sleep(40);
+    assert.ok(draws > 0, 'every poll pause goes through the injected random');
+    release();
+    const release2 = await waiter;
+    release2();
+  });
+});
+
+test('acquireSlot: the jittered delay is what each poll actually sleeps for', async () => {
+  await withAgentDir(async () => {
+    const { acquireSlot, POLL_JITTER_FRACTION } = await import('../extensions/concurrency.ts');
+    const config = makeConfig(1);
+    const release = await acquireSlot({ harness: 'claude', mode: 'review', config, wait: false });
+    const slept: number[] = [];
+    const waiter = acquireSlot({
+      harness: 'codex',
+      mode: 'review',
+      config,
+      wait: true,
+      pollIntervalMs: 100,
+      random: () => 0.5,
+      sleep: async ms => {
+        slept.push(ms);
+        if (slept.length === 3) release(); // free the slot after a few polls
+        await sleep(1);
+      },
+    });
+    const release2 = await waiter;
+    release2();
+    assert.ok(slept.length >= 3, `polled ${slept.length} times`);
+    // interval + floor(interval * fraction * 0.5) — the jitter is applied, not just drawn
+    const expected = 100 + Math.floor(100 * POLL_JITTER_FRACTION * 0.5);
+    assert.ok(expected > 100);
+    for (const ms of slept) assert.equal(ms, expected);
+  });
+});

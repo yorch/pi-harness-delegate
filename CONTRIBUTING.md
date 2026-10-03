@@ -17,7 +17,7 @@ Development and release notes for `pi-harness-delegate`.
 bun install
 bun run lint        # Biome check (2 spaces, 120 cols, single quotes)
 bun run lint:fix    # auto-fix
-bun run typecheck   # tsc --noEmit
+bun run typecheck   # tsc --noEmit (extensions/, tests/, scripts/)
 bun test            # bun:test (node:test compatible)
 bun run verify      # lint + typecheck + test (also runs in CI/release)
 ```

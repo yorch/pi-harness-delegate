@@ -81,3 +81,20 @@ test('buildReportContent omits footers when absent', () => {
   assert.ok(!content.includes('transcript'));
   assert.ok(!content.includes('resume'));
 });
+
+test('runMetrics: reports the real prompt-token figure (not 0) from delegate() details', async () => {
+  const { runMetrics } = await import('../extensions/engine.ts');
+  const line = runMetrics({
+    numTurns: 2,
+    totalCostUsd: 0.5,
+    promptTokens: 12_400,
+    contextPercent: 6.2,
+    durationMs: 3000,
+  });
+  assert.equal(line, '2 turn(s) · $0.500 · 12k tok · 6.2% ctx · 3s');
+  // unmeasured stays unmeasured
+  assert.equal(
+    runMetrics({ numTurns: null, totalCostUsd: null, promptTokens: null, contextPercent: null, durationMs: null }),
+    '— turn(s) · $—',
+  );
+});

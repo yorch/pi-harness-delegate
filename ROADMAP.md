@@ -17,7 +17,7 @@ Extract `Harness` interface (`NormalizedPermission`, `detect`, `buildArgs`, `par
 - `extensions/config.ts` (new key `delegate`, legacy `claudeDelegate` migration)
 - `extensions/templates.ts` normalized `permission` + native escape hatch, shared < harness < user < project load order
 - `extensions/index.ts` `delegate()` harness-aware, `delegate` tool + `claude_delegate` alias, `/delegate` + aliases `/claude|codex|opencode|amp|omp`, concurrency Map per harness + global, partitioned transcripts, hint/progress/usage generalized
-- Shims `run-claude.ts`, `stream-parse.ts` for compat
+- Shims `run-claude.ts`, `stream-parse.ts` for compat (since removed — they were only used by tests)
 - `templates/shared` + `templates/<harness>` (claude/codex/opencode/amp) with normalized frontmatter
 
 ## 2. Claude harness (faithful port)

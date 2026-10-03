@@ -59,11 +59,11 @@ test('opencode fixture parses hello with step_finish tokens', () => {
 
 test('amp fixture parses hello with message_update deltas', () => {
   const lines = loadFixture('amp-hello.jsonl');
-  const state = { streamedText: '', activities: [], result: null, _harness: {} } as never;
+  const state: ParseState = { streamedText: '', activities: [], result: null, _harness: {} };
   let streamed = '';
   let result: ReturnType<typeof parseAmpLine>['result'] = null;
   for (const l of lines) {
-    const out = parseAmpLine(l, state as never);
+    const out = parseAmpLine(l, state);
     if (out.streamedText) streamed += out.streamedText;
     if (out.result) result = out.result;
   }

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { HARNESS_NAMES } from '../extensions/harnesses/registry.ts';
 import {
   describeSkippedProjectTemplates,
   loadTemplates,
@@ -215,7 +216,7 @@ test('projectTemplatePresence: finds trusted-only content that would be skipped'
   const dir = mkdtempSync(join(tmpdir(), 'pi-presence-'));
   try {
     // Nothing there yet — an unaffected user must never be warned.
-    assert.deepEqual(projectTemplatePresence(dir), { dirs: [], staleTrustFile: false });
+    assert.deepEqual(projectTemplatePresence(dir, HARNESS_NAMES), { dirs: [], staleTrustFile: false });
 
     // A project that actually has templates, plus the leftover file from the removed mechanism.
     const proj = join(dir, '.pi', 'delegate', 'templates');
@@ -223,9 +224,40 @@ test('projectTemplatePresence: finds trusted-only content that would be skipped'
     writeFileSync(join(proj, 'review.md'), '---\nname: review\ndescription: d\npermission: readonly\n---\nx');
     writeFileSync(join(dir, '.pi', 'trusted'), '1');
 
-    const p = projectTemplatePresence(dir);
+    const p = projectTemplatePresence(dir, HARNESS_NAMES);
     assert.deepEqual(p.dirs, [proj]);
     assert.equal(p.staleTrustFile, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projectTemplatePresence: per-harness project template dirs count as skipped content too', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-presence-partitioned-'));
+  try {
+    // only a partitioned override — nothing at the shared root
+    const claudeDir = join(dir, '.pi', 'delegate', 'templates', 'claude');
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, 'review.md'), '---\nname: review\npermission: edit\n---\nx');
+    // an empty partition is not content
+    mkdirSync(join(dir, '.pi', 'delegate', 'templates', 'codex'), { recursive: true });
+    assert.deepEqual(projectTemplatePresence(dir, HARNESS_NAMES).dirs, [claudeDir]);
+    // subdirs loadTemplates never reads — an alias dir, an archive, a non-harness name — are not
+    // skipped content, so they must not trigger the untrusted-project warning
+    for (const other of ['omp', 'archive', 'shared']) {
+      const d = join(dir, '.pi', 'delegate', 'templates', other);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, 'review.md'), '---\nname: review\npermission: edit\n---\nx');
+    }
+    // ...and the loader agrees: even trusted, none of them reaches any harness (only claude/ does)
+    for (const h of HARNESS_NAMES.filter(n => n !== 'claude'))
+      assert.equal(loadTemplates(dir, h, true).get('review')?.permission, 'readonly', h);
+    assert.deepEqual(projectTemplatePresence(dir, HARNESS_NAMES).dirs, [claudeDir]);
+    // ...and it actually is what an untrusted load skips
+    assert.notEqual(
+      loadTemplates(dir, 'claude', true).get('review')?.permission,
+      loadTemplates(dir, 'claude', false).get('review')?.permission,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

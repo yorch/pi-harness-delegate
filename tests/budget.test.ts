@@ -213,3 +213,67 @@ test('runAcpHarness: on resume, new spend past the cap still stops the run', asy
   assert.equal(res.budgetExceeded, true);
   assert.equal(res.stopReason, 'budget_exceeded');
 });
+
+// ── reported cost on a resumed session-cumulative run ──────────────────────
+
+const close = (actual: number | null, expected: number, msg?: string) =>
+  assert.ok(actual !== null && Math.abs(actual - expected) < 1e-9, `${msg ?? ''} expected ~${expected}, got ${actual}`);
+
+test('runAcpHarness: a resumed run reports only its own spend, not the session total (no double count)', async () => {
+  const run = (costs: number[], replayCost?: number, hang = false) =>
+    runAcpHarness({
+      harness: fakeOpencodeAcp({ costs, replayCost, hang }),
+      prompt: 'p',
+      cwd: process.cwd(),
+      permission: 'edit',
+      maxBudgetUsd: hang ? 0.5 : undefined,
+      timeoutMs: 30_000,
+      resumeSessionId: 's1',
+    });
+  // replayed baseline: an exact delta
+  close((await run([5.1, 5.3], 5)).totalCostUsd, 0.3, 'replayed baseline');
+  // no replayed baseline: the first post-prompt total is already partly this run's spend, so any
+  // delta from it (0.2 here) would silently omit that first step — unmeasured instead
+  assert.equal((await run([5.1, 5.3])).totalCostUsd, null);
+  // one post-prompt sample and no replay: the delta would be a fake $0 — unmeasured instead
+  assert.equal((await run([5.1])).totalCostUsd, null);
+  // ...while the budget check still trips off that same first-sample baseline (documented bias)
+  const stoppedNoReplay = await run([5.1, 5.7], undefined, true);
+  assert.equal(stoppedNoReplay.budgetExceeded, true);
+  assert.equal(stoppedNoReplay.totalCostUsd, null);
+  // no cost at all during this run: whatever was replayed is prior spend, not this run's
+  assert.equal((await run([], 5)).totalCostUsd, null);
+  // a budget-stopped resume reports the delta too, not the cumulative total it was killed at
+  const stopped = await run([5.1, 5.7], 5, true);
+  assert.equal(stopped.budgetExceeded, true);
+  close(stopped.totalCostUsd, 0.7, 'budget-stopped');
+});
+
+test('runAcpHarness: a fresh run still reports the running total as-is', async () => {
+  const res = await runAcpHarness({
+    harness: fakeOpencodeAcp({ costs: [0.1, 0.3] }),
+    prompt: 'p',
+    cwd: process.cwd(),
+    permission: 'edit',
+    timeoutMs: 10_000,
+  });
+  assert.equal(res.totalCostUsd, 0.3);
+});
+
+test('resumedRunCost: pure delta rules', async () => {
+  const { resumedRunCost } = await import('../extensions/acp-runner.ts');
+  const base = { resumed: true, baselineFromReplay: true, postPromptCostSamples: 2 };
+  assert.equal(resumedRunCost({ ...base, resumed: false, totalCostUsd: 3, baselineUsd: 0 }), 3);
+  assert.equal(resumedRunCost({ ...base, totalCostUsd: null, baselineUsd: 1 }), null);
+  assert.equal(resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: 1 }), 2);
+  assert.equal(resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: undefined }), null);
+  assert.equal(resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: 1, postPromptCostSamples: 0 }), null);
+  // first-sample baseline: never a measured-looking delta, however many samples followed
+  for (const postPromptCostSamples of [1, 2, 5])
+    assert.equal(
+      resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: 2.5, baselineFromReplay: false, postPromptCostSamples }),
+      null,
+    );
+  // never negative, even if an agent's running total goes backwards
+  assert.equal(resumedRunCost({ ...base, totalCostUsd: 1, baselineUsd: 2 }), 0);
+});

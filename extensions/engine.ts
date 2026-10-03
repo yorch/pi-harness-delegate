@@ -13,6 +13,7 @@ import {
   buildVerifyResult,
   collectActivityLog,
   describeBudget,
+  formatMetrics,
   formatToolUse,
   pruneOutputs,
   resolveVerifyPlan,
@@ -135,7 +136,7 @@ const warnedUntrustedProjects = new Set<string>();
 
 export function warnIfProjectTemplatesSkipped(ctx: ExtensionContext, trusted: boolean): void {
   if (trusted || warnedUntrustedProjects.has(ctx.cwd)) return;
-  const lines = describeSkippedProjectTemplates(projectTemplatePresence(ctx.cwd));
+  const lines = describeSkippedProjectTemplates(projectTemplatePresence(ctx.cwd, HARNESS_NAMES));
   if (lines.length === 0) return;
   warnedUntrustedProjects.add(ctx.cwd);
   const msg = lines.join('\n');
@@ -452,6 +453,23 @@ export async function delegate(
     activityLog: collectActivityLog(activityEvents),
     verify,
   };
+}
+
+/**
+ * The one-line metrics summary (`N turn(s) · $X · Nk tok · N% ctx · Ns`) for a finished `delegate()`
+ * run, read from its `details`. Shared by the single-run command path and both fan-out paths so a
+ * comparison row reports the same real prompt-token figure the single run does (it used to be a
+ * hard-coded 0 there, which silently dropped the `tok` column from every fan-out row).
+ */
+export function runMetrics(details: Record<string, unknown>): string {
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  return formatMetrics({
+    numTurns: num(details.numTurns),
+    totalCostUsd: num(details.totalCostUsd),
+    promptTokens: num(details.promptTokens) ?? 0,
+    contextPercent: num(details.contextPercent),
+    durationMs: num(details.durationMs),
+  });
 }
 
 export function summarize(content: string, max = 30_000): { text: string; truncated: boolean } {

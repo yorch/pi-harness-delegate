@@ -52,12 +52,6 @@ export interface ParseOutcome {
   runningCostUsd?: number;
 }
 
-export interface StreamParseOutcome {
-  streamedText: string;
-  result: StreamedResult | null;
-  activities: ActivityEvent[];
-}
-
 export interface BuildArgsOpts {
   prompt: string;
   cwd: string;
@@ -69,8 +63,6 @@ export interface BuildArgsOpts {
   resumeSessionId?: string;
   resumeId?: string;
 }
-
-export type HarnessBuildOpts = BuildArgsOpts;
 
 export interface DetectResult {
   ok: boolean;

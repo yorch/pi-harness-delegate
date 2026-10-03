@@ -6,13 +6,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { OverlayHandle } from '@earendil-works/pi-tui';
-import {
-  buildFanoutReport,
-  type FanoutRunSummary,
-  formatMetrics,
-  formatToolUse,
-  orderFanoutResults,
-} from './activity.ts';
+import { buildFanoutReport, type FanoutRunSummary, formatToolUse, orderFanoutResults } from './activity.ts';
 import { fanoutResumeError, type parseDelegateCommand, resolveDefaults, resolveHarnessList } from './command.ts';
 import { type DelegateConfig, loadConfig } from './config.ts';
 import {
@@ -21,10 +15,17 @@ import {
   injectReport,
   isProjectTrusted,
   runDelegateForTool,
+  runMetrics,
   summarize,
   type ToolProgressUpdate,
 } from './engine.ts';
-import { detectAll, HARNESS_NAMES, isKnownHarness, resolveHarnessName } from './harnesses/registry.ts';
+import {
+  detectAll,
+  HARNESS_NAMES,
+  isKnownHarness,
+  isTemplateDanger,
+  resolveHarnessName,
+} from './harnesses/registry.ts';
 import type { ActivityEvent } from './harnesses/types.ts';
 import { NotifyBatcher } from './notify.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
@@ -124,13 +125,7 @@ export async function runFanoutTool(
       return {
         harness: h,
         ok: !run.result.isError,
-        metrics: formatMetrics({
-          numTurns: run.result.numTurns,
-          totalCostUsd: run.result.totalCostUsd,
-          promptTokens: 0,
-          contextPercent: typeof run.details.contextPercent === 'number' ? run.details.contextPercent : null,
-          durationMs: run.result.durationMs,
-        }),
+        metrics: runMetrics(run.details),
         cost: run.result.totalCostUsd,
         body: summary.text,
         file: (run.details.file as string) ?? undefined,
@@ -437,18 +432,15 @@ export async function runFanoutCommand(
   for (const h of resolved) {
     const templates = loadTemplates(ctx.cwd, h, trusted);
     const resolvedTaskScope = resolveDefaults(parsed, templates);
-    const template = parsed.mode ? templates.get(parsed.mode) : undefined;
     if (!resolvedTaskScope) {
       const message = `mode "${parsed.mode ?? 'general'}" needs a prompt`;
       immediateFailures.push({ harness: h, ok: false, cost: null, error: message });
       batcher.failure(`${h}: ${message}`);
       continue;
     }
-    const isDanger =
-      template?.permission === 'danger' ||
-      (template?.nativePermission
-        ? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission)
-        : false);
+    // the template delegate() will actually run for this harness (default mode when none given),
+    // judged by the engine's own danger gate — so the banner can't disagree with the engine
+    const isDanger = isTemplateDanger(h, templates.get(modeForReport));
     specs.push({
       harnessName: h,
       task: resolvedTaskScope.task,
@@ -493,13 +485,7 @@ export async function runFanoutCommand(
     }
     const { content, details, result, verify } = outcome.result;
     const summary = summarize(content);
-    const metrics = formatMetrics({
-      numTurns: result.numTurns,
-      totalCostUsd: result.totalCostUsd,
-      promptTokens: 0,
-      contextPercent: typeof details.contextPercent === 'number' ? details.contextPercent : null,
-      durationMs: typeof details.durationMs === 'number' ? details.durationMs : null,
-    });
+    const metrics = runMetrics(details);
     batcher.success(`${outcome.harnessName} ${parsed.mode ?? 'general'} — ${metrics}`);
     return {
       harness: outcome.harnessName,

@@ -28,6 +28,7 @@ import {
   isOverBudget,
   type RunHarnessOptions,
 } from './runner.ts';
+import { appendActivities, appendStreamed } from './stream-caps.ts';
 
 /** Bound on the initial handshake (initialize / session/new / session/set_mode) so a hung agent
  *  doesn't wedge the whole `timeoutMs` budget before `session/prompt` — the actual work — even starts. */
@@ -66,6 +67,37 @@ function supportsSessionModes(sessionResult: unknown): boolean {
   return false;
 }
 
+/**
+ * The cost to report for *this* run of a session whose harness reports a session-cumulative running
+ * total (opencode over ACP: `usage_update.cost.amount`). On a fresh session that total is this run's
+ * spend as-is. On a resume it also includes every prior turn — reporting it unchanged would make
+ * `/delegate status`'s spend rollup count those turns again on every resume — so the delta since
+ * `baselineUsd` (the same baseline the host budget check uses; see `costBaseline` in
+ * `runAcpHarness`) is reported instead.
+ *
+ * When the baseline wasn't replayed before the prompt (`baselineFromReplay: false`) it is the first
+ * running total seen *after* the prompt, so any delta silently omits that first step's spend — an
+ * under-report that looks measured (with one sample it's even a fake "$0"). That case is reported
+ * as `null` (unmeasured), per the honest-metrics convention. The host budget check still uses that
+ * first-sample baseline on purpose (biased toward never killing a resumed run for prior turns'
+ * spend); only the *reported* figure refuses to guess. Pure.
+ */
+export function resumedRunCost(opts: {
+  totalCostUsd: number | null;
+  resumed: boolean;
+  baselineUsd: number | undefined;
+  baselineFromReplay: boolean;
+  postPromptCostSamples: number;
+}): number | null {
+  const { totalCostUsd, resumed, baselineUsd, baselineFromReplay, postPromptCostSamples } = opts;
+  if (!resumed || totalCostUsd === null) return totalCostUsd;
+  // no cost reported during this run at all — whatever total we hold is prior turns' spend
+  if (baselineUsd === undefined || postPromptCostSamples === 0) return null;
+  // baseline is this run's own first sample: the true spend is unknowable, not "the delta"
+  if (!baselineFromReplay) return null;
+  return Math.max(0, totalCostUsd - baselineUsd);
+}
+
 /** Placeholder for a run the host stops mid-turn before the harness produced anything result-shaped. */
 function emptyResult(): StreamedResult {
   return {
@@ -92,7 +124,14 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
+/** Test-only knobs — production callers pass only `opts`. */
+export interface AcpRunnerInternals {
+  /** Overrides `HANDSHAKE_TIMEOUT_MS` so a hung-handshake test doesn't take 30s. */
+  handshakeTimeoutMs?: number;
+}
+
+export function runAcpHarness(opts: RunHarnessOptions, internals: AcpRunnerInternals = {}): Promise<HarnessResult> {
+  const handshakeTimeoutMs = internals.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     // Already cancelled (e.g. the user hit cancel while this run was still being set up) —
     // never spawn a process just to kill it.
@@ -112,6 +151,10 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     });
 
     const proc = spawn(opts.harness.binary, args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    // A write to a child that already exited surfaces as an async EPIPE 'error' on stdin — not as a
+    // throw from write() (writeLine's try/catch can't see it). Unhandled, that event would crash the
+    // host process; the run itself already ends through the 'close'/timeout/abort paths.
+    proc.stdin.on('error', () => {});
 
     const state: ParseState = { streamedText: '', activities: [], result: null, _harness: {} };
     let stderr = '';
@@ -129,9 +172,8 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     // never killing a resumed run for spend it didn't incur.
     let prePromptCost: number | undefined;
     let costBaseline: number | undefined;
+    let postPromptCostSamples = 0;
     const startAt = Date.now();
-    const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
-    const MAX_ACTIVITIES = 5000;
 
     let nextId = 1;
     const pending = new Map<number, PendingRequest>();
@@ -145,6 +187,14 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       const ttft = firstTokenAt !== null ? firstTokenAt - startAt : r.ttftMs;
       resolve({
         ...r,
+        // a resumed session's running total includes prior turns — report only this run's share
+        totalCostUsd: resumedRunCost({
+          totalCostUsd: r.totalCostUsd,
+          resumed: Boolean(opts.resumeSessionId),
+          baselineUsd: costBaseline,
+          baselineFromReplay: prePromptCost !== undefined,
+          postPromptCostSamples,
+        }),
         ttftMs: ttft,
         streamedText: state.streamedText,
         harness: opts.harness.name,
@@ -261,6 +311,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       if (typeof outcome.runningCostUsd === 'number') {
         if (!promptSent) prePromptCost = outcome.runningCostUsd;
         else {
+          postPromptCostSamples++;
           costBaseline ??= outcome.runningCostUsd;
           if (!settled && isCostOverBudget(opts.harness, opts.maxBudgetUsd, outcome.runningCostUsd, costBaseline)) {
             proc.kill('SIGKILL');
@@ -285,24 +336,9 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       // is sent — on a resume that's the replayed prior conversation, not the new turn's own output.
       if (promptSent && outcome.streamedText) {
         if (firstTokenAt === null) firstTokenAt = Date.now();
-        if (state.streamedText.length < MAX_STREAMED) {
-          const remaining = MAX_STREAMED - state.streamedText.length;
-          const chunk =
-            outcome.streamedText.length > remaining
-              ? `${outcome.streamedText.slice(0, remaining)} [truncated ${outcome.streamedText.length - remaining} chars]`
-              : outcome.streamedText;
-          state.streamedText += chunk;
-          opts.onStream?.(chunk);
-        }
+        appendStreamed(state, outcome.streamedText, opts.onStream); // capped — see stream-caps.ts
       }
-      if (promptSent && outcome.activities) {
-        for (const a of outcome.activities) {
-          if (state.activities.length < MAX_ACTIVITIES) {
-            state.activities.push(a);
-            opts.onActivity?.(a);
-          }
-        }
-      }
+      if (promptSent && outcome.activities) appendActivities(state, outcome.activities, opts.onActivity);
       if (outcome.result) {
         if (!outcome.result.result) outcome.result.result = state.streamedText;
         state.result = outcome.result;
@@ -370,7 +406,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
           protocolVersion: PROTOCOL_VERSION,
           clientCapabilities: {}, // no fs/terminal proxying — decline those requests if asked (see handleServerRequest)
         },
-        HANDSHAKE_TIMEOUT_MS,
+        handshakeTimeoutMs,
       );
       if (settled) return;
       // The client "should disconnect" (spec text) if the agent didn't echo back the version we
@@ -398,11 +434,11 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
         sessionResult = await sendRequest(
           'session/load',
           { sessionId: opts.resumeSessionId, ...sessionParams },
-          HANDSHAKE_TIMEOUT_MS,
+          handshakeTimeoutMs,
         );
         sessionId = opts.resumeSessionId;
       } else {
-        sessionResult = await sendRequest('session/new', sessionParams, HANDSHAKE_TIMEOUT_MS);
+        sessionResult = await sendRequest('session/new', sessionParams, handshakeTimeoutMs);
         sessionId =
           isRecord(sessionResult) && typeof sessionResult.sessionId === 'string' ? sessionResult.sessionId : null;
       }
@@ -428,7 +464,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
             `cannot verify the "${opts.permission}" permission tier would be honored over ACP`,
         );
       }
-      await sendRequest('session/set_mode', { sessionId, modeId }, HANDSHAKE_TIMEOUT_MS);
+      await sendRequest('session/set_mode', { sessionId, modeId }, handshakeTimeoutMs);
       if (settled) return;
       promptSent = true;
       costBaseline = opts.resumeSessionId ? prePromptCost : 0;
