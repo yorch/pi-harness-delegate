@@ -47,12 +47,18 @@ export function fmtElapsed(ms: number): string {
 }
 
 /**
- * Slice a feed down to its last `max` entries, reporting how many were dropped so the caller can
+ * Fit a feed into `max` rendered lines, reporting how many entries were dropped so the caller can
  * show a "+N earlier" marker instead of silently truncating with no hint older entries existed.
- * Pure — testable without a TUI.
+ * The marker itself takes one of the `max` lines: when anything is dropped only the last `max - 1`
+ * entries are visible, so marker + entries never exceed `max` (for `max >= 1`). `max <= 0` shows no entries (and
+ * reports everything hidden) — never `slice(-0)`'s "everything". Pure — testable without a TUI.
  */
 export function truncateFeed<T>(entries: T[], max: number): { visible: T[]; hiddenCount: number } {
-  return { visible: entries.slice(-max), hiddenCount: Math.max(0, entries.length - max) };
+  const cap = Math.max(0, Math.floor(max));
+  if (entries.length <= cap) return { visible: [...entries], hiddenCount: 0 };
+  // one line goes to the marker; with a cap of 0 or 1 there's no room for entries at all
+  const keep = Math.max(0, cap - 1);
+  return { visible: keep > 0 ? entries.slice(-keep) : [], hiddenCount: entries.length - keep };
 }
 
 /** Style one feed entry; the returned string may contain ANSI colors. */

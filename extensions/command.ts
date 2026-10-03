@@ -26,19 +26,67 @@ export interface DelegateCommandArgs {
    * — never inherited from config, never applied headless. Absent unless explicitly true.
    */
   allowDangerous?: boolean;
+  /** Flag values that were given but are unusable (e.g. `--budget=0`) — the handler reports these
+   *  and runs nothing, rather than silently dropping the flag. Absent when there are none. */
+  errors?: string[];
 }
 
 export type ClaudeCommandArgs = DelegateCommandArgs;
 
-const KNOWN_HARNESSES = new Set(['claude', 'codex', 'opencode', 'amp', 'omp']);
+/**
+ * The flag set every `/delegate`-family command accepts after the harness — the single source for
+ * the `/delegate` description, its usage warning, and every alias command's (`/claude`, `/omp`, …)
+ * description, so the hints can't drift from what `parseDelegateCommand` actually parses.
+ */
+export const COMMAND_FLAGS_HINT =
+  '[--mode=review|plan|implement|security-audit|docs|general] [--model=…] [--scope=diff|pr|paths] [--pr=<n|url>] [--budget=<usd>] [--verify=<cmd>] [--resume=<id>] [--add-dir=<path>] [--allow-dangerous] <prompt>';
 
-/** True when `word` is `all`, a single known harness/alias, or a comma-separated list of them. */
+/** Usage line for `/delegate` itself. */
+export function delegateUsage(): string {
+  return `/delegate [--harness=claude|codex|opencode|amp|devin|all|<a,b>] ${COMMAND_FLAGS_HINT}`;
+}
+
+/** Usage line for an alias command (`/claude`, `/omp`, …) — same flags, harness fixed. */
+export function aliasUsage(command: string): string {
+  return `/${command} ${COMMAND_FLAGS_HINT}`;
+}
+
+const KNOWN_HARNESSES = new Set(['claude', 'codex', 'opencode', 'amp', 'omp', 'devin']);
+const HARNESS_ALIASES: Readonly<Record<string, string>> = { omp: 'amp' };
+
+/** True when `word` is `all`, a single known harness/alias, or a comma-separated list of them
+ *  (a stray empty element, e.g. the trailing comma in `claude,`, is ignored). */
 function looksLikeHarnessSpec(word: string, knownHarnesses: ReadonlySet<string>): boolean {
   const lower = word.toLowerCase();
   if (lower === 'all' || knownHarnesses.has(lower)) return true;
+  if (!lower.includes(',')) return false;
   const parts = lower.split(',').filter(Boolean);
-  return parts.length > 1 && parts.every(p => knownHarnesses.has(p));
+  return parts.length > 0 && parts.every(p => knownHarnesses.has(p));
 }
+
+/**
+ * Normalize a harness spec the same way whether it came from `--harness=` or the first word:
+ * lowercased, empty list elements dropped (`claude,` -> `claude`, `,` -> none), and a single name
+ * alias-normalized (`omp` -> `amp`). A real list / `all` is left for `resolveHarnessList`.
+ */
+function normalizeHarnessSpec(spec: string): string | undefined {
+  const parts = spec
+    .toLowerCase()
+    .split(',')
+    .map(p => p.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return undefined;
+  if (parts.length === 1) return HARNESS_ALIASES[parts[0]] ?? parts[0];
+  return parts.join(',');
+}
+
+/**
+ * One pass over the raw command: a backticked or double-quoted prose span is skipped verbatim (so
+ * `explain "--mode=x"` or `` `--allow-dangerous` `` in the prompt is never eaten as a flag); a
+ * `--key=value` (value bare, "double" or 'single' quoted) or bare `--allow-dangerous` token that
+ * starts a word is a flag. Every other `--word` stays in the text untouched.
+ */
+const FLAG_OR_PROSE = /`[^`]*`|"[^"]*"|(^|\s)--([a-zA-Z][a-zA-Z-]*)(?:=(?:"([^"]*)"|'([^']*)'|(\S+))|(?=\s|$))/g;
 
 export function parseDelegateCommand(
   raw: string,
@@ -47,27 +95,36 @@ export function parseDelegateCommand(
 ): DelegateCommandArgs {
   const flags: Record<string, string> = {};
   const addDirs: string[] = [];
-  // supports quoted values ("…"/'…') so multi-word flags like --verify="bun test" survive intact
-  let rest = raw.replace(
-    /--([a-zA-Z-]+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g,
-    (_m, k: string, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
+  const errors: string[] = [];
+  let allowDangerousBare = false;
+  const rest = raw.replace(
+    FLAG_OR_PROSE,
+    (
+      m: string,
+      lead: string | undefined,
+      k: string | undefined,
+      dq: string | undefined,
+      sq: string | undefined,
+      bare: string | undefined,
+    ) => {
+      if (k === undefined) return m; // quoted/backticked prose — leave it alone
+      const hasValue = dq !== undefined || sq !== undefined || bare !== undefined;
+      if (!hasValue) {
+        // bare boolean flag: only `--allow-dangerous`; any other bare `--word` is prose
+        if (k !== 'allow-dangerous') return m;
+        allowDangerousBare = true;
+        return lead ?? '';
+      }
       const value = dq ?? sq ?? bare ?? '';
       // --add-dir is the one repeatable flag — every occurrence is kept, in order
       if (k === 'add-dir') {
         if (value) addDirs.push(value);
       } else flags[k] = value;
-      return '';
+      return lead ?? '';
     },
   );
-  // bare boolean flag(s): `--allow-dangerous` with no `=value`. Run after the `--key=value` pass, so
-  // a quoted flag value (e.g. --verify="echo --allow-dangerous") is already gone and can't match.
-  let allowDangerousBare = false;
-  rest = rest.replace(/(^|\s)--allow-dangerous(?=\s|$)/g, (_m, lead: string) => {
-    allowDangerousBare = true;
-    return lead;
-  });
 
-  let harness = flags.harness?.toLowerCase();
+  let harness = flags.harness !== undefined ? normalizeHarnessSpec(flags.harness) : undefined;
   let mode = flags.mode;
   let task = rest.trim();
 
@@ -75,9 +132,7 @@ export function parseDelegateCommand(
   const words = task.split(/\s+/).filter(Boolean);
   let idx = 0;
   if (!harness && words[idx] && looksLikeHarnessSpec(words[idx], knownHarnesses)) {
-    harness = words[idx].toLowerCase();
-    // single-name alias normalization only — a list/`all` is resolved later by resolveHarnessList
-    if (harness === 'omp') harness = 'amp';
+    harness = normalizeHarnessSpec(words[idx]);
     idx++;
   }
   if (!mode && words[idx] && knownModes.has(words[idx])) {
@@ -93,7 +148,9 @@ export function parseDelegateCommand(
   if (flags.scope) out.scope = flags.scope;
   if (flags.budget !== undefined) {
     const budget = Number(flags.budget);
-    if (Number.isFinite(budget) && budget > 0) out.budget = budget;
+    // an explicit spend cap that can't be honored is an error, never silently "no cap"
+    if (flags.budget.trim() !== '' && Number.isFinite(budget) && budget > 0) out.budget = budget;
+    else errors.push(`--budget must be a positive number of USD (got "${flags.budget}")`);
   }
   if (flags.resume) out.sessionId = flags.resume;
   if (flags.pr) out.pr = flags.pr;
@@ -101,6 +158,7 @@ export function parseDelegateCommand(
   if (addDirs.length > 0) out.addDirs = addDirs;
   // `=true` is tolerated; any other explicit value (`=false`, `=yes`, …) means off — fail closed
   if (allowDangerousBare || flags['allow-dangerous']?.toLowerCase() === 'true') out.allowDangerous = true;
+  if (errors.length > 0) out.errors = errors;
   return out;
 }
 

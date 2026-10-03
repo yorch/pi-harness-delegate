@@ -18,7 +18,14 @@ import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from '@ear
 import { Container, Markdown, type OverlayHandle, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { formatMetrics, formatToolUse, ToolCallIndex } from './activity.ts';
-import { isFanoutSpec, parseDelegateCommand, resolveDefaults, resolveHarnessFilter } from './command.ts';
+import {
+  aliasUsage,
+  delegateUsage,
+  isFanoutSpec,
+  parseDelegateCommand,
+  resolveDefaults,
+  resolveHarnessFilter,
+} from './command.ts';
 import { loadConfig } from './config.ts';
 import {
   type DelegateToolParams,
@@ -32,7 +39,7 @@ import {
   takePendingReport,
 } from './engine.ts';
 import { closeWhenMounted, type RunUiState, runFanoutCommand, runFanoutTool } from './fanout.ts';
-import { ALIASES, HARNESS_NAMES, isKnownHarness, resolveHarnessName } from './harnesses/registry.ts';
+import { ALIASES, HARNESS_NAMES, isKnownHarness, isTemplateDanger, resolveHarnessName } from './harnesses/registry.ts';
 import type { ActivityEvent } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
 import { showHistory } from './history.ts';
@@ -502,6 +509,13 @@ export default function (pi: ExtensionAPI) {
     const parsed = parseDelegateCommand(rawForParse, allModes, knownHarnessesSet);
     // if forcedHarness provided, it wins
     if (forcedHarness) parsed.harness = forcedHarness;
+    // a flag that was given but can't be honored (e.g. --budget=0) runs nothing — never silently dropped
+    if (parsed.errors && parsed.errors.length > 0) {
+      const msg = `${parsed.errors.join('; ')}\nUsage: ${forcedHarness ? aliasUsage(forcedHarness) : delegateUsage()}`;
+      if (ctx.hasUI) ctx.ui.notify(msg, 'error');
+      else process.stderr.write(`${msg}\n`);
+      return;
+    }
 
     // fan-out: harness field is `all` or a comma list — resolve to detected harnesses and run
     // the engine once per harness instead of the single-harness flow below.
@@ -513,12 +527,10 @@ export default function (pi: ExtensionAPI) {
     const harnessName = parsed.harness ?? loadConfig().defaultHarness ?? 'claude';
     const templates = loadTemplates(ctx.cwd, harnessName, trusted);
     const resolved = resolveDefaults(parsed, templates);
-    const template = parsed.mode ? templates.get(parsed.mode) : undefined;
-    const isDanger =
-      template?.permission === 'danger' ||
-      (template?.nativePermission
-        ? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission)
-        : false);
+    // the template delegate() will actually run — the default mode when none was given — so the
+    // danger banner agrees with the engine's own gate (isTemplateDanger, same check)
+    const template = templates.get(parsed.mode || loadConfig().defaultMode);
+    const isDanger = isTemplateDanger(harnessName, template);
 
     if (!resolved) {
       if (parsed.mode)
@@ -526,11 +538,7 @@ export default function (pi: ExtensionAPI) {
           `/delegate ${parsed.mode} <what to do> — give a prompt for the "${parsed.mode}" mode`,
           'warning',
         );
-      else
-        ctx.ui.notify?.(
-          'Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=…] [--model=…] [--scope=…] [--pr=…] [--budget=…] [--verify=…] [--resume=…] [--allow-dangerous] <prompt>',
-          'warning',
-        );
+      else ctx.ui.notify?.(`Usage: ${forcedHarness ? aliasUsage(forcedHarness) : delegateUsage()}`, 'warning');
       return;
     }
 
@@ -619,34 +627,24 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand('delegate', {
-    description:
-      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--pr=<n|url>] [--budget=<usd>] [--verify=<cmd>] [--resume=<id>] [--allow-dangerous] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless.',
+    description: `Delegate a task to any harness. Usage: ${delegateUsage()} — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless.`,
     handler: makeHandler(),
   });
-  pi.registerCommand('claude', {
-    description: 'Alias for /delegate --harness=claude. Usage: /claude [--mode=...] <prompt>',
-    handler: makeHandler('claude'),
-  });
-  pi.registerCommand('codex', {
-    description: 'Alias for /delegate --harness=codex. Usage: /codex [--mode=...] <prompt>',
-    handler: makeHandler('codex'),
-  });
-  pi.registerCommand('opencode', {
-    description: 'Alias for /delegate --harness=opencode. Usage: /opencode [--mode=...] <prompt>',
-    handler: makeHandler('opencode'),
-  });
-  pi.registerCommand('amp', {
-    description: 'Alias for /delegate --harness=amp. Usage: /amp [--mode=...] <prompt>',
-    handler: makeHandler('amp'),
-  });
-  pi.registerCommand('omp', {
-    description: 'Alias for /delegate --harness=amp (omp compat). Usage: /omp [--mode=...] <prompt>',
-    handler: makeHandler('amp'),
-  });
-  pi.registerCommand('devin', {
-    description: 'Alias for /delegate --harness=devin. Usage: /devin [--mode=...] <prompt>',
-    handler: makeHandler('devin'),
-  });
+  // alias commands: same flag set as /delegate (one source — COMMAND_FLAGS_HINT), harness fixed
+  const aliasCommands: [command: string, harness: string, note: string][] = [
+    ['claude', 'claude', ''],
+    ['codex', 'codex', ''],
+    ['opencode', 'opencode', ''],
+    ['amp', 'amp', ''],
+    ['omp', 'amp', ' (omp compat)'],
+    ['devin', 'devin', ''],
+  ];
+  for (const [command, harness, note] of aliasCommands) {
+    pi.registerCommand(command, {
+      description: `Alias for /delegate --harness=${harness}${note}. Usage: ${aliasUsage(command)}`,
+      handler: makeHandler(harness),
+    });
+  }
 
   pi.on('input', async (event, _ctx) => {
     if (event.source === 'extension') return { action: 'continue' };

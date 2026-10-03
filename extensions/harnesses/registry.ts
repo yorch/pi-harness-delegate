@@ -78,3 +78,19 @@ export function isNativeDangerPermission(harness: Harness | undefined, nativePer
   const danger = harness?.permissionMap?.danger;
   return Array.isArray(danger) && danger.length > 0 && native === danger.join(' ');
 }
+
+/**
+ * Will running `template` on `harnessName` be a danger-tier run? The same test `delegate()` gates on
+ * (normalized `danger`, or a native permission that is this harness's own danger mode — see
+ * `isNativeDangerPermission`), exposed so the command paths' danger banner can't disagree with the
+ * engine about what is actually dangerous.
+ */
+export function isTemplateDanger(
+  harnessName: string,
+  template: { permission: string; nativePermission?: string } | undefined,
+): boolean {
+  if (!template) return false;
+  return (
+    template.permission === 'danger' || isNativeDangerPermission(getHarness(harnessName), template.nativePermission)
+  );
+}

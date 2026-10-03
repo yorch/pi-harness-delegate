@@ -156,3 +156,55 @@ test('fanoutResumeError: a session id cannot be resumed across a fan-out', async
   assert.match(fanoutResumeError('all', 'abc') ?? '', /cannot resume session "abc" across a fan-out/);
   assert.match(fanoutResumeError('claude,codex', 'abc') ?? '', /single harness|one harness/);
 });
+
+test('parseDelegateCommand --harness= is lowercased and alias-normalized like the first-word form', () => {
+  assert.equal(parseDelegateCommand('--harness=omp review it', MODES, HARNESSES).harness, 'amp');
+  assert.equal(parseDelegateCommand('--harness=OMP review it', MODES, HARNESSES).harness, 'amp');
+  assert.equal(parseDelegateCommand('--harness=Codex review it', MODES, HARNESSES).harness, 'codex');
+  assert.equal(parseDelegateCommand('OMP review it', MODES, HARNESSES).harness, 'amp');
+});
+
+test('parseDelegateCommand trailing/stray commas in a harness list are dropped', () => {
+  // `claude,` is just claude — a single harness, not a one-element fan-out
+  for (const raw of ['claude, review it', '--harness=claude, review it', '--harness=,claude review it']) {
+    const r = parseDelegateCommand(raw, MODES, HARNESSES);
+    assert.equal(r.harness, 'claude', raw);
+    assert.equal(isFanoutSpec(r.harness), false, raw);
+    assert.equal(r.mode, 'review', raw);
+    assert.equal(r.task, 'it', raw);
+  }
+  assert.equal(parseDelegateCommand('claude,,codex, plan x', MODES, HARNESSES).harness, 'claude,codex');
+  assert.equal(parseDelegateCommand('omp, plan x', MODES, HARNESSES).harness, 'amp');
+  // a bare `,` is no harness at all, and stays prose
+  const comma = parseDelegateCommand(', plan x', MODES, HARNESSES);
+  assert.equal(comma.harness, undefined);
+  assert.equal(parseDelegateCommand('--harness=, plan x', MODES, HARNESSES).harness, undefined);
+});
+
+test('parseDelegateCommand --budget that is 0, negative, NaN or empty is reported, not silently ignored', () => {
+  for (const v of ['0', '-1', 'abc', 'NaN', 'Infinity', '""']) {
+    const r = parseDelegateCommand(`--budget=${v} review it`, MODES, HARNESSES);
+    assert.equal(r.budget, undefined, v);
+    assert.equal(r.errors?.length, 1, v);
+    assert.match(r.errors?.[0] ?? '', /--budget must be a positive number/, v);
+  }
+  const ok = parseDelegateCommand('--budget=0.5 review it', MODES, HARNESSES);
+  assert.equal(ok.budget, 0.5);
+  assert.equal(ok.errors, undefined);
+});
+
+test('parseDelegateCommand leaves --k=v inside quoted or backticked prose alone', () => {
+  const bt = parseDelegateCommand('review explain what `--mode=plan` and `--allow-dangerous` do', MODES, HARNESSES);
+  assert.equal(bt.mode, 'review');
+  assert.equal(bt.allowDangerous, undefined);
+  assert.equal(bt.task, 'explain what `--mode=plan` and `--allow-dangerous` do');
+  const dq = parseDelegateCommand('review why does "--budget=0" crash --model=opus', MODES, HARNESSES);
+  assert.equal(dq.task, 'why does "--budget=0" crash');
+  assert.equal(dq.budget, undefined);
+  assert.equal(dq.errors, undefined);
+  assert.equal(dq.model, 'opus');
+  // a flag glued to a preceding word isn't a flag either
+  assert.equal(parseDelegateCommand('review fix foo--model=x', MODES, HARNESSES).model, undefined);
+  // an unknown bare --word is prose, kept as-is
+  assert.equal(parseDelegateCommand('review add a --dry-run option', MODES, HARNESSES).task, 'add a --dry-run option');
+});

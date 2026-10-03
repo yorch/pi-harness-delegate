@@ -24,7 +24,13 @@ import {
   summarize,
   type ToolProgressUpdate,
 } from './engine.ts';
-import { detectAll, HARNESS_NAMES, isKnownHarness, resolveHarnessName } from './harnesses/registry.ts';
+import {
+  detectAll,
+  HARNESS_NAMES,
+  isKnownHarness,
+  isTemplateDanger,
+  resolveHarnessName,
+} from './harnesses/registry.ts';
 import type { ActivityEvent } from './harnesses/types.ts';
 import { NotifyBatcher } from './notify.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
@@ -437,18 +443,15 @@ export async function runFanoutCommand(
   for (const h of resolved) {
     const templates = loadTemplates(ctx.cwd, h, trusted);
     const resolvedTaskScope = resolveDefaults(parsed, templates);
-    const template = parsed.mode ? templates.get(parsed.mode) : undefined;
     if (!resolvedTaskScope) {
       const message = `mode "${parsed.mode ?? 'general'}" needs a prompt`;
       immediateFailures.push({ harness: h, ok: false, cost: null, error: message });
       batcher.failure(`${h}: ${message}`);
       continue;
     }
-    const isDanger =
-      template?.permission === 'danger' ||
-      (template?.nativePermission
-        ? ['bypassPermissions', 'danger-full-access', 'danger'].includes(template.nativePermission)
-        : false);
+    // the template delegate() will actually run for this harness (default mode when none given),
+    // judged by the engine's own danger gate — so the banner can't disagree with the engine
+    const isDanger = isTemplateDanger(h, templates.get(modeForReport));
     specs.push({
       harnessName: h,
       task: resolvedTaskScope.task,
