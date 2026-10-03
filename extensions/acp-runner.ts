@@ -76,9 +76,11 @@ function supportsSessionModes(sessionResult: unknown): boolean {
  * `runAcpHarness`) is reported instead.
  *
  * When the baseline wasn't replayed before the prompt (`baselineFromReplay: false`) it is the first
- * running total seen *after* the prompt, so the delta under-counts that first step — and with only
- * one post-prompt sample it's necessarily 0, which would be a fake "measured $0". That case is
- * reported as `null` (unmeasured), per the honest-metrics convention. Pure.
+ * running total seen *after* the prompt, so any delta silently omits that first step's spend — an
+ * under-report that looks measured (with one sample it's even a fake "$0"). That case is reported
+ * as `null` (unmeasured), per the honest-metrics convention. The host budget check still uses that
+ * first-sample baseline on purpose (biased toward never killing a resumed run for prior turns'
+ * spend); only the *reported* figure refuses to guess. Pure.
  */
 export function resumedRunCost(opts: {
   totalCostUsd: number | null;
@@ -91,7 +93,8 @@ export function resumedRunCost(opts: {
   if (!resumed || totalCostUsd === null) return totalCostUsd;
   // no cost reported during this run at all — whatever total we hold is prior turns' spend
   if (baselineUsd === undefined || postPromptCostSamples === 0) return null;
-  if (!baselineFromReplay && postPromptCostSamples < 2) return null;
+  // baseline is this run's own first sample: the true spend is unknowable, not "the delta"
+  if (!baselineFromReplay) return null;
   return Math.max(0, totalCostUsd - baselineUsd);
 }
 

@@ -232,10 +232,15 @@ test('runAcpHarness: a resumed run reports only its own spend, not the session t
     });
   // replayed baseline: an exact delta
   close((await run([5.1, 5.3], 5)).totalCostUsd, 0.3, 'replayed baseline');
-  // no replayed baseline: delta from the first post-prompt total (the budget check's own baseline)
-  close((await run([5.1, 5.3])).totalCostUsd, 0.2, 'first-sample baseline');
+  // no replayed baseline: the first post-prompt total is already partly this run's spend, so any
+  // delta from it (0.2 here) would silently omit that first step — unmeasured instead
+  assert.equal((await run([5.1, 5.3])).totalCostUsd, null);
   // one post-prompt sample and no replay: the delta would be a fake $0 — unmeasured instead
   assert.equal((await run([5.1])).totalCostUsd, null);
+  // ...while the budget check still trips off that same first-sample baseline (documented bias)
+  const stoppedNoReplay = await run([5.1, 5.7], undefined, true);
+  assert.equal(stoppedNoReplay.budgetExceeded, true);
+  assert.equal(stoppedNoReplay.totalCostUsd, null);
   // no cost at all during this run: whatever was replayed is prior spend, not this run's
   assert.equal((await run([], 5)).totalCostUsd, null);
   // a budget-stopped resume reports the delta too, not the cumulative total it was killed at
@@ -263,10 +268,12 @@ test('resumedRunCost: pure delta rules', async () => {
   assert.equal(resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: 1 }), 2);
   assert.equal(resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: undefined }), null);
   assert.equal(resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: 1, postPromptCostSamples: 0 }), null);
-  assert.equal(
-    resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: 3, baselineFromReplay: false, postPromptCostSamples: 1 }),
-    null,
-  );
+  // first-sample baseline: never a measured-looking delta, however many samples followed
+  for (const postPromptCostSamples of [1, 2, 5])
+    assert.equal(
+      resumedRunCost({ ...base, totalCostUsd: 3, baselineUsd: 2.5, baselineFromReplay: false, postPromptCostSamples }),
+      null,
+    );
   // never negative, even if an agent's running total goes backwards
   assert.equal(resumedRunCost({ ...base, totalCostUsd: 1, baselineUsd: 2 }), 0);
 });
