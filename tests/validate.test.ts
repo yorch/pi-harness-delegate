@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   addDirError,
   addDirsOutsideCwd,
+  confirmDangerousCommand,
   confirmDangerousToolCall,
   confirmToolAddDirs,
   modelError,
@@ -171,4 +172,40 @@ test('confirmToolAddDirs: inside cwd needs no UI; outside fails closed without o
   await assert.rejects(() => confirmToolAddDirs(ui('throw') as never, ['/']), /declined/);
   await confirmToolAddDirs(ui(true) as never, ['/']);
   assert.equal(asked, 3);
+});
+
+test('confirmDangerousCommand: fails closed with no UI (or no confirm dialog)', async () => {
+  for (const ctx of [{ hasUI: false }, { hasUI: true, ui: {} }]) {
+    await assert.rejects(
+      () => confirmDangerousCommand(ctx as never, { harnesses: ['claude'], mode: 'implement', task: 't' }),
+      /--allow-dangerous for claude implement needs interactive confirmation.*headless/,
+    );
+  }
+});
+
+test('confirmDangerousCommand: one prompt naming every harness, the mode, and full permissions', async () => {
+  const asked: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: {
+      confirm: async (_title: string, message: string) => {
+        asked.push(message);
+        return false;
+      },
+    },
+  };
+  await assert.rejects(
+    () => confirmDangerousCommand(ctx as never, { harnesses: ['claude', 'codex'], mode: 'yolo', task: 'wipe it' }),
+    /declined — nothing was run/,
+  );
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /all 2 harnesses \(claude, codex\)/);
+  assert.match(asked[0], /"yolo"/);
+  assert.match(asked[0], /DANGER permission — full, unrestricted/);
+  assert.match(asked[0], /wipe it/);
+  await confirmDangerousCommand({ hasUI: true, ui: { confirm: async () => true } } as never, {
+    harnesses: ['claude'],
+    mode: 'yolo',
+    task: 't',
+  });
 });

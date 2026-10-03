@@ -95,3 +95,40 @@ test('--add-dir is repeatable and keeps quoted values intact', () => {
   assert.equal(r.task, 'review it');
   assert.equal(parseClaudeCommand('review it', MODES).addDirs, undefined);
 });
+
+test('--allow-dangerous: bare flag and =true set it, without leaking into the task', () => {
+  for (const raw of [
+    '--allow-dangerous claude implement wire it up',
+    'claude implement --allow-dangerous wire it up',
+    'claude implement wire it up --allow-dangerous',
+    'claude implement --allow-dangerous=true wire it up',
+    'claude implement --allow-dangerous=TRUE wire it up',
+  ]) {
+    const r = parseClaudeCommand(raw, MODES);
+    assert.equal(r.allowDangerous, true, raw);
+    assert.equal(r.harness, 'claude', raw);
+    assert.equal(r.mode, 'implement', raw);
+    assert.equal(r.task, 'wire it up', raw);
+  }
+});
+
+test('--allow-dangerous: absent, =false, or any other value leaves it off (and out of the task)', () => {
+  for (const raw of [
+    'implement wire it up',
+    'implement --allow-dangerous=false wire it up',
+    'implement --allow-dangerous=yes wire it up',
+    'implement --allow-dangerous=1 wire it up',
+  ]) {
+    const r = parseClaudeCommand(raw, MODES);
+    assert.equal(r.allowDangerous, undefined, raw);
+    assert.equal(r.task, 'wire it up', raw);
+  }
+});
+
+test('--allow-dangerous: only a standalone token counts — not inside a quoted flag value or a longer word', () => {
+  const quoted = parseClaudeCommand('implement --verify="echo --allow-dangerous" go', MODES);
+  assert.equal(quoted.allowDangerous, undefined);
+  assert.equal(quoted.verify, 'echo --allow-dangerous');
+  const longer = parseClaudeCommand('implement --allow-dangerously go', MODES);
+  assert.equal(longer.allowDangerous, undefined);
+});

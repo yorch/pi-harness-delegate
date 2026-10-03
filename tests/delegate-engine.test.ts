@@ -339,7 +339,8 @@ test('fan-out + sessionId is rejected up front on both the tool and the command 
 
 /**
  * Put a fake `<name>` executable first on PATH for the duration of `fn`. The script records its
- * argv (one per line) to `$FAKE_ARGS_FILE` and prints `stdoutLines`, so a real `delegate()` run can
+ * argv (one per line) to `$FAKE_ARGS_FILE` (and to `$FAKE_ARGS_FILE.<name>`, so concurrent fan-out
+ * runs of different binaries can be told apart) and prints `stdoutLines`, so a real `delegate()` run can
  * be driven end to end without the real CLI.
  */
 async function withFakeBinaries<T>(
@@ -352,7 +353,7 @@ async function withFakeBinaries<T>(
   const binDir = mkdtempSync(join(tmpdir(), 'fake-bin-'));
   const argsFile = join(binDir, 'args.txt');
   const body = stdoutLines.map(l => `printf '%s\\n' '${l.replace(/'/g, `'\\''`)}'`).join('\n');
-  const script = `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE"\n${body}\n${opts.sleepAfterSec ? `exec sleep ${opts.sleepAfterSec}\n` : ''}`;
+  const script = `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE"\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE.$(basename "$0")"\n${body}\n${opts.sleepAfterSec ? `exec sleep ${opts.sleepAfterSec}\n` : ''}`;
   for (const name of names) {
     writeFileSync(join(binDir, name), script);
     chmodSync(join(binDir, name), 0o755);
@@ -467,5 +468,184 @@ test('delegate: a host-enforced budget stops the run and records budget exceeded
       },
       { sleepAfterSec: 20 },
     );
+  });
+});
+
+// ── /delegate --allow-dangerous ────────────────────────────────────────────
+
+/** An interactive ctx whose overlays mount (and close) immediately and whose confirm is scripted. */
+function uiCtx(cwd: string, answer: boolean) {
+  const asked: string[] = [];
+  const notes: string[] = [];
+  const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
+  const ctx = {
+    cwd,
+    hasUI: true,
+    isProjectTrusted: () => true,
+    ui: {
+      theme,
+      confirm: async (_title: string, message: string) => {
+        asked.push(message);
+        return answer;
+      },
+      notify: (msg: string) => notes.push(msg),
+      setStatus: () => {},
+      custom: (factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => unknown) =>
+        new Promise(resolve => {
+          const comp = factory({ requestRender() {} }, theme, {}, v => {
+            (comp as { dispose?: () => void } | undefined)?.dispose?.();
+            resolve(v);
+          }) as { dispose?: () => void };
+        }),
+    },
+  };
+  return { ctx, asked, notes };
+}
+
+function readArgs(file: string): string[] | null {
+  const { existsSync, readFileSync } = require('node:fs') as typeof import('node:fs');
+  return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n') : null;
+}
+
+test('/delegate --allow-dangerous: a confirmed run reaches the engine with danger permission', async () => {
+  await withSandbox({ templates: { yolo: DANGER_TEMPLATE, tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      for (const [name, args] of [
+        ['delegate', 'claude yolo --allow-dangerous do it'], // danger template
+        ['claude', 'tinker --allow-dangerous=true do it'], // alias + escalation of an edit template
+      ] as const) {
+        const { ctx, asked, notes } = uiCtx(cwd, true);
+        await commands.get(name)?.handler(args, ctx);
+        assert.equal(asked.length, 1, `${name}: exactly one confirm`);
+        assert.match(asked[0], /claude/);
+        assert.match(asked[0], /full, unrestricted permissions/);
+        const argv = readArgs(argsFile);
+        assert.ok(argv?.includes('bypassPermissions'), `${name}: harness ran with danger permission`);
+        assert.ok(
+          notes.some(n => /done/.test(n)),
+          `${name}: ${notes.join(' | ')}`,
+        );
+        rmSync(argsFile, { force: true });
+        takePendingReport();
+      }
+    });
+  });
+});
+
+test('/delegate --allow-dangerous: a decline runs nothing and leaks no slot', async () => {
+  await withSandbox({ maxConcurrent: 1, templates: { yolo: DANGER_TEMPLATE } }, async ({ cwd }) => {
+    const { activeCount } = await import('../extensions/concurrency.ts');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { commands } = await loadExtension(async () => {
+        throw new Error('must not run');
+      });
+      const { ctx, asked, notes } = uiCtx(cwd, false);
+      for (let i = 0; i < 3; i++) await commands.get('delegate')?.handler('claude yolo --allow-dangerous do it', ctx);
+      assert.equal(asked.length, 3);
+      assert.ok(notes.every(n => /declined — nothing was run/.test(n)));
+      assert.equal(readArgs(argsFile), null, 'harness never spawned');
+      assert.equal(activeCount(), 0);
+    });
+  });
+});
+
+test('/delegate --allow-dangerous: headless is refused without running (single and fan-out)', async () => {
+  await withSandbox({ templates: { yolo: DANGER_TEMPLATE } }, async ({ cwd }) => {
+    const { activeCount } = await import('../extensions/concurrency.ts');
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT], async argsFile => {
+      const { commands } = await loadExtension(async () => {
+        throw new Error('must not run');
+      });
+      const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+      const single = await captureStderr(
+        () => commands.get('delegate')?.handler('claude yolo --allow-dangerous x', ctx) ?? Promise.resolve(),
+      );
+      assert.match(single, /needs interactive confirmation.*headless/);
+      const fan = await captureStderr(
+        () => commands.get('delegate')?.handler('claude,codex yolo --allow-dangerous x', ctx) ?? Promise.resolve(),
+      );
+      assert.match(fan, /needs interactive confirmation.*headless/);
+      assert.equal(readArgs(argsFile), null, 'not even detection probed a binary');
+      assert.equal(activeCount(), 0);
+    });
+  });
+});
+
+test('/delegate on a danger template without --allow-dangerous is refused, naming the flag, with no prompt', async () => {
+  await withSandbox({ templates: { yolo: DANGER_TEMPLATE } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { commands } = await loadExtension();
+      const { ctx, asked, notes } = uiCtx(cwd, true);
+      await commands.get('delegate')?.handler('claude yolo do it', ctx);
+      assert.equal(asked.length, 0, 'config/default never triggers (or implies) the danger confirm');
+      assert.ok(
+        notes.some(n => /requires danger permission.*--allow-dangerous on \/delegate/.test(n)),
+        notes.join(' | '),
+      );
+      assert.equal(readArgs(argsFile), null);
+    });
+  });
+});
+
+test('/delegate fan-out --allow-dangerous: one confirm for every harness; decline runs none, approve runs all as danger', async () => {
+  await withSandbox({ templates: { yolo: DANGER_TEMPLATE } }, async ({ cwd }) => {
+    const codexTpl = join(cwd, '.pi', 'delegate', 'templates', 'codex');
+    mkdirSync(codexTpl, { recursive: true });
+    writeFileSync(join(codexTpl, 'yolo.md'), DANGER_TEMPLATE);
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    const { activeCount } = await import('../extensions/concurrency.ts');
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT], async argsFile => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+
+      const declined = uiCtx(cwd, false);
+      await commands.get('delegate')?.handler('claude,codex yolo --allow-dangerous do it', declined.ctx);
+      assert.equal(declined.asked.length, 1);
+      assert.match(declined.asked[0], /all 2 harnesses \(claude, codex\)/);
+      // detection probed the binaries (`--version`), but no delegated run started
+      assert.deepEqual(readArgs(`${argsFile}.claude`), ['--version']);
+      assert.deepEqual(readArgs(`${argsFile}.codex`), ['--version']);
+      assert.equal(takePendingReport(), null);
+
+      const approved = uiCtx(cwd, true);
+      await commands.get('delegate')?.handler('claude,codex yolo --allow-dangerous do it', approved.ctx);
+      assert.equal(approved.asked.length, 1, 'one confirm covers the whole fan-out');
+      assert.ok(readArgs(`${argsFile}.claude`)?.includes('bypassPermissions'));
+      assert.ok(readArgs(`${argsFile}.codex`)?.includes('danger-full-access'));
+      const report = takePendingReport();
+      assert.ok(report);
+      assert.doesNotMatch(report.content, /requires danger permission/);
+      assert.equal(activeCount(), 0);
+    });
+  });
+});
+
+test('delegate tool path is unchanged: its own confirm wording, and no danger without allowDangerous', async () => {
+  await withSandbox({ templates: { yolo: DANGER_TEMPLATE } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const tool = tools.get('delegate');
+      assert.ok(tool);
+      const { ctx, asked } = uiCtx(cwd, true);
+      // no allowDangerous: refused by the engine, never prompted
+      await assert.rejects(
+        () => tool.execute('t', { harness: 'claude', mode: 'yolo', task: 'x' }, undefined, undefined, ctx),
+        /requires danger permission.*allowDangerous:true on the delegate tool/,
+      );
+      assert.equal(asked.length, 0);
+      assert.equal(readArgs(argsFile), null);
+      // allowDangerous: the tool's own (model-requested) confirm, then a danger run
+      await tool.execute(
+        't',
+        { harness: 'claude', mode: 'yolo', task: 'x', allowDangerous: true },
+        undefined,
+        undefined,
+        ctx,
+      );
+      assert.equal(asked.length, 1);
+      assert.match(asked[0], /^The agent wants to run claude yolo with DANGER permission/);
+      assert.ok(readArgs(argsFile)?.includes('bypassPermissions'));
+    });
   });
 });
