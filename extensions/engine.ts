@@ -179,10 +179,11 @@ export interface ScopeSection {
   data?: string;
 }
 
-/** A random hex nonce that does not occur anywhere in `content` (so the content can't forge it). */
-export function untrustedNonce(content: string): string {
+/** A random hex nonce that does not occur anywhere in `content` (so the content can't forge it).
+ *  `random` is injectable only so tests can force a collision; it defaults to 8 random bytes. */
+export function untrustedNonce(content: string, random: () => string = () => randomBytes(8).toString('hex')): string {
   for (;;) {
-    const nonce = randomBytes(8).toString('hex');
+    const nonce = random();
     if (!content.includes(nonce)) return nonce;
   }
 }
