@@ -14,7 +14,7 @@
  * Legacy: { claudeDelegate: {...} } is auto-migrated.
  */
 
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import {
@@ -45,10 +45,10 @@ import {
   parseTranscriptMeta,
   pruneOutputs,
   resolveVerifyPlan,
-  safeSegmentName,
   skipVerifyResult,
   ToolCallIndex,
   type VerifyResult,
+  writeTranscript,
 } from './activity.ts';
 import {
   fanoutResumeError,
@@ -397,12 +397,7 @@ async function viewTranscript(ctx: ExtensionContext, entry: HistoryEntry): Promi
 }
 
 function saveOutput(harness: string, mode: string, text: string): string {
-  const dir = outputsDirFor(harness);
-  mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = join(dir, `${stamp}-${safeSegmentName(mode)}.md`);
-  writeFileSync(file, text, 'utf8');
-  return file;
+  return writeTranscript(outputsDirFor(harness), mode, text);
 }
 
 async function showHistory(ctx: ExtensionContext, harnessFilter?: string): Promise<void> {

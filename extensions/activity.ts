@@ -1,4 +1,4 @@
-import { readdirSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 
@@ -256,6 +256,30 @@ export function buildClaudeReportContent(opts: {
 }
 
 /** Delete oldest transcript files beyond `maxCount` (0 = keep everything). */
+/**
+ * Write one transcript to `dir` (created if needed) and return its path. Transcripts hold the
+ * delegated prompt, repo diffs, and the harness's full output — owner-only: the directory is
+ * `0700` and each file `0600` (chmod'd explicitly too, since `mkdirSync`'s `mode` only applies to
+ * directories it creates and is subject to the umask).
+ */
+export function writeTranscript(dir: string, mode: string, text: string): string {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    // best-effort — e.g. a dir owned by someone else; the file mode below still applies
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const file = join(dir, `${stamp}-${safeSegmentName(mode)}.md`);
+  writeFileSync(file, text, { encoding: 'utf8', mode: 0o600 });
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    // best-effort
+  }
+  return file;
+}
+
 export function pruneOutputs(dir: string, maxCount: number): void {
   if (maxCount <= 0) return;
   let files: string[];

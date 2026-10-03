@@ -170,3 +170,26 @@ test('formatSpend reports unknown-cost runs honestly instead of folding them int
   assert.equal(formatSpend({ totalCostUsd: 1.234, runs: 12, unknownRuns: 3 }), '$1.234 over 12 run(s) (3 unknown)');
   assert.equal(formatSpend({ totalCostUsd: 0, runs: 2, unknownRuns: 0 }), '$0.000 over 2 run(s)');
 });
+
+test('writeTranscript: owner-only permissions on the directory and each file', async () => {
+  const { mkdtempSync, statSync, readFileSync, rmSync, mkdirSync, chmodSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { writeTranscript } = await import('../extensions/activity.ts');
+  const root = mkdtempSync(join(tmpdir(), 'transcript-perms-'));
+  try {
+    const dir = join(root, 'outputs', 'claude');
+    const file = writeTranscript(dir, 'review', '# hi');
+    assert.equal(readFileSync(file, 'utf8'), '# hi');
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    // a pre-existing, too-open directory is tightened too
+    const loose = join(root, 'loose');
+    mkdirSync(loose, { mode: 0o755 });
+    chmodSync(loose, 0o755);
+    writeTranscript(loose, 'plan', 'x');
+    assert.equal(statSync(loose).mode & 0o777, 0o700);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
