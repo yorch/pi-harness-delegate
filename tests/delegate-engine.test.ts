@@ -128,3 +128,152 @@ test('delegate: a cancel that lands right after the slot is won spawns nothing a
     assert.equal(activeCount(), 0);
   });
 });
+
+interface CapturedTool {
+  name: string;
+  execute: (id: string, params: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<unknown>;
+}
+
+async function loadExtension(exec: (cmd: string, args: string[]) => Promise<unknown> = async () => ({})) {
+  const mod = await import('../extensions/index.ts');
+  const tools = new Map<string, CapturedTool>();
+  const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+  const pi = {
+    exec,
+    registerTool: (t: CapturedTool) => tools.set(t.name, t),
+    registerCommand: (name: string, c: { handler: (args: string, ctx: unknown) => Promise<void> }) =>
+      commands.set(name, c),
+    on: () => {},
+  };
+  mod.default(pi as never);
+  return { tools, commands };
+}
+
+test('delegate tool: allowDangerous with no UI is refused before anything runs', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { tools } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    for (const name of ['delegate', 'claude_delegate']) {
+      await assert.rejects(
+        () =>
+          tools
+            .get(name)
+            ?.execute(
+              't',
+              { harness: 'claude', mode: 'tinker', task: 'x', allowDangerous: true },
+              undefined,
+              undefined,
+              {
+                cwd,
+                hasUI: false,
+                isProjectTrusted: () => true,
+              },
+            ) ?? Promise.resolve(),
+        /no interactive UI/,
+      );
+    }
+  });
+});
+
+test('delegate tool: allowDangerous asks the human; a decline stops it, an approval proceeds', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { tools } = await loadExtension();
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    let answer = false;
+    let asked = 0;
+    const ctx = {
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: {
+        confirm: async () => {
+          asked++;
+          return answer;
+        },
+        notify: () => {},
+      },
+    };
+    await assert.rejects(
+      () =>
+        tool.execute(
+          't',
+          { harness: 'claude', mode: 'tinker', task: 'x', allowDangerous: true },
+          undefined,
+          undefined,
+          ctx,
+        ),
+      /declined/,
+    );
+    answer = true;
+    // past the gate — fails on the unknown mode instead, without spawning anything
+    await assert.rejects(
+      () =>
+        tool.execute(
+          't',
+          { harness: 'claude', mode: 'nope', task: 'x', allowDangerous: true },
+          undefined,
+          undefined,
+          ctx,
+        ),
+      /unknown delegate mode "nope"/,
+    );
+    assert.equal(asked, 2);
+  });
+});
+
+test('delegate tool: flag-shaped sessionId/model/pr are rejected before a slot or process is used', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { tools } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [{ sessionId: '--dangerously-skip' }, /invalid sessionId/],
+      [{ model: '--yolo' }, /invalid model/],
+      [{ pr: '--repo=evil/x' }, /invalid pr/],
+      [{ harness: 'claude,codex', pr: '-1' }, /invalid pr/], // fan-out validates up front too
+    ];
+    for (const [extra, re] of cases) {
+      await assert.rejects(
+        () => tool.execute('t', { harness: 'claude', mode: 'tinker', task: 'x', ...extra }, undefined, undefined, ctx),
+        re,
+      );
+    }
+    const { activeCount } = await import('../extensions/concurrency.ts');
+    assert.equal(activeCount(), 0);
+  });
+});
+
+async function captureStderr(fn: () => Promise<void>): Promise<string> {
+  const orig = process.stderr.write.bind(process.stderr);
+  let out = '';
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    out += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = orig;
+  }
+  return out;
+}
+
+test('/delegate command: flag-shaped --resume/--pr are rejected on both single and fan-out paths', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { commands } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const handler = commands.get('delegate')?.handler;
+    assert.ok(handler);
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    const single = await captureStderr(() => handler('claude tinker --resume=--evil do it', ctx));
+    assert.match(single, /invalid sessionId/);
+    const fanout = await captureStderr(() => handler('claude,codex tinker --pr=--repo=x do it', ctx));
+    assert.match(fanout, /invalid pr/);
+  });
+});

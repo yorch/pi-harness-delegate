@@ -246,14 +246,22 @@ export const codexHarness: Harness = {
   },
   buildArgs(opts: BuildArgsOpts): string[] {
     const sandbox = opts.nativePermission ?? SANDBOX_MAP[opts.permission] ?? 'workspace-write';
-    const args = opts.resumeSessionId
-      ? ['exec', 'resume', opts.resumeSessionId, opts.prompt, '--json']
-      : ['exec', '--json', opts.prompt, '--sandbox', sandbox];
+    if (opts.resumeSessionId) {
+      // Positionals go after `--` so a session id (or prompt) can never be parsed as a flag —
+      // confirmed live: `codex exec resume --json -- --x "p"` takes `--x` as the session id,
+      // while the same without `--` is a hard "unexpected argument" error. Every flag must
+      // therefore come before the `--`.
+      // `codex exec resume --help` has no `--sandbox`/`--add-dir` at all (confirmed live: passing
+      // --add-dir to resume is a hard CLI error, "unexpected argument '--add-dir' found") — only the
+      // fresh-turn branch below supports either flag.
+      const args = ['exec', 'resume', '--json'];
+      if (opts.model) args.push('--model', opts.model);
+      args.push('--', opts.resumeSessionId, opts.prompt);
+      return args;
+    }
+    const args = ['exec', '--json', opts.prompt, '--sandbox', sandbox];
     if (opts.model) args.push('--model', opts.model);
-    // `codex exec resume --help` has no `--sandbox`/`--add-dir` at all (confirmed live: passing
-    // --add-dir to resume is a hard CLI error, "unexpected argument '--add-dir' found") — only the
-    // fresh-turn branch above supports either flag.
-    if (!opts.resumeSessionId) for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
+    for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
     return args;
   },
   parseLine(line: string, state: ParseState): ParseOutcome {

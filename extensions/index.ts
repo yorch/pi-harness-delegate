@@ -95,6 +95,7 @@ import {
   resolveNativePermission,
 } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
+import { confirmDangerousToolCall, validateDelegateInputs } from './validate.ts';
 
 /** Render a possibly-unknown cost — `null` means the harness didn't report one, not a measured $0. */
 function formatCost(cost: number | null): string {
@@ -635,6 +636,9 @@ export async function delegate(
   activityLog: string[];
   verify?: VerifyResult;
 }> {
+  // argv-bound inputs (sessionId/model/pr) are validated here, the one entry both the tool and
+  // the /delegate command share — see validate.ts for the argument-injection rationale.
+  validateDelegateInputs({ sessionId: opts.sessionId, model: opts.model, pr: opts.pr });
   const config = loadConfig();
   const harnessName = opts.harness ?? config.defaultHarness ?? 'claude';
   const harness = getHarness(harnessName);
@@ -713,7 +717,7 @@ export async function delegate(
         : 'No git diff vs HEAD (working tree clean).';
     } else if (opts.scope === 'pr' || opts.pr) {
       const target = opts.pr ?? '';
-      const pr = await pi.exec('gh', target ? ['pr', 'diff', target] : ['pr', 'diff'], { cwd: ctx.cwd });
+      const pr = await pi.exec('gh', target ? ['pr', 'diff', '--', target] : ['pr', 'diff'], { cwd: ctx.cwd });
       scopeText = pr.stdout
         ? `Pull request diff (${target || 'current branch'}):\n${pr.stdout}`
         : `Could not resolve the PR diff${pr.stderr ? ` — ${pr.stderr.trim().slice(0, 300)}` : ''}.`;
@@ -998,6 +1002,7 @@ async function runFanoutTool(
   signal: AbortSignal | undefined,
   onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
 ): Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown>; usage?: unknown }> {
+  validateDelegateInputs({ sessionId: params.sessionId, model: params.model, pr: params.pr });
   const detection = await detectAll();
   const { resolved, unknown, skipped } = resolveHarnessList(params.harness ?? 'all', {
     knownHarnesses: HARNESS_NAMES,
@@ -1120,8 +1125,9 @@ export default function (pi: ExtensionAPI) {
       'Pass harness (claude|codex|opencode|amp|devin) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
       'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
       'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
-      'sessionId resumes a previous delegated session instead of starting fresh.',
-      'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission).',
+      "sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run's details (letters, digits, . _ : - only).",
+      'pr must be a PR number, an http(s) PR URL, or owner/repo#123.',
+      'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
     ],
     parameters: Type.Object({
       harness: Type.Optional(
@@ -1154,7 +1160,8 @@ export default function (pi: ExtensionAPI) {
       ),
       allowDangerous: Type.Optional(
         Type.Boolean({
-          description: 'Escalate to danger permission (unrestricted). Only with explicit user approval.',
+          description:
+            'Escalate to danger permission (unrestricted). Always requires interactive human confirmation; refused without a UI.',
         }),
       ),
       pr: Type.Optional(Type.String({ description: 'GitHub PR number/URL (alternative to scope pr).' })),
@@ -1168,6 +1175,9 @@ export default function (pi: ExtensionAPI) {
       ctx: ExtensionContext,
     ) {
       const config = loadConfig();
+      // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
+      // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
+      if (params.allowDangerous === true) await confirmDangerousToolCall(ctx, params);
       if (params.harness && isFanoutSpec(params.harness)) {
         return runFanoutTool(pi, ctx, config, params, signal, onUpdate);
       }
@@ -1640,6 +1650,14 @@ export default function (pi: ExtensionAPI) {
    *  harness list regardless of completion order. */
   const runFanoutCommand = async (ctx: ExtensionContext, parsed: ReturnType<typeof parseDelegateCommand>) => {
     const harnessSpec = parsed.harness as string;
+    try {
+      validateDelegateInputs({ sessionId: parsed.sessionId, model: parsed.model, pr: parsed.pr });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (ctx.hasUI) ctx.ui.notify(msg, 'error');
+      else process.stderr.write(`${msg}\n`);
+      return;
+    }
     const detection = await detectAll();
     const { resolved, unknown, skipped } = resolveHarnessList(harnessSpec, {
       knownHarnesses: HARNESS_NAMES,

@@ -187,3 +187,16 @@ test('isNativeDangerPermission: non-danger natives are not gated', () => {
   // Legacy spellings stay gated regardless of which harness is selected.
   assert.equal(isNativeDangerPermission(getHarness('opencode'), 'bypassPermissions'), true);
 });
+
+test('codex buildArgs: resume puts every flag before `--` and the session id/prompt after it', () => {
+  const codex = getHarness('codex');
+  assert.ok(codex);
+  const args = codex.buildArgs({
+    prompt: 'go on',
+    cwd: '/tmp',
+    permission: 'edit',
+    model: 'gpt-5',
+    resumeSessionId: 'abc-123',
+  });
+  assert.deepEqual(args, ['exec', 'resume', '--json', '--model', 'gpt-5', '--', 'abc-123', 'go on']);
+});
