@@ -40,7 +40,7 @@ import { type FeedEntry, progressWindow } from './progress.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
 import { type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { confirmDangerousToolCall, confirmToolAddDirs } from './validate.ts';
+import { confirmDangerousCommand, confirmDangerousToolCall, confirmToolAddDirs } from './validate.ts';
 
 export default function (pi: ExtensionAPI) {
   const ui: RunUiState = { activeRunId: 0, activeOverlay: null };
@@ -277,6 +277,8 @@ export default function (pi: ExtensionAPI) {
       verify?: string;
       template?: DelegateTemplate;
       isDanger: boolean;
+      /** Only ever true after `confirmDangerousCommand` approved this invocation's --allow-dangerous. */
+      allowDangerous?: boolean;
     },
   ): Promise<{
     result: Awaited<ReturnType<typeof delegate>> | null;
@@ -284,6 +286,7 @@ export default function (pi: ExtensionAPI) {
     cancelled: boolean;
   }> => {
     const { harnessName, mode, task, scope, model, budget, sessionId, pr, addDirs, verify, template, isDanger } = opts;
+    const allowDangerous = opts.allowDangerous === true;
     const modeForDisplay = mode ?? 'general';
 
     const feed: FeedEntry[] = [];
@@ -355,6 +358,7 @@ export default function (pi: ExtensionAPI) {
       pr,
       addDirs,
       verify,
+      allowDangerous, // never from config.allowDangerous — only a confirmed --allow-dangerous
       signal: ac.signal,
       onStream: t => {
         liveTail = (liveTail + t).slice(-400);
@@ -524,10 +528,30 @@ export default function (pi: ExtensionAPI) {
         );
       else
         ctx.ui.notify?.(
-          'Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=…] [--model=…] [--scope=…] [--pr=…] [--budget=…] [--verify=…] [--resume=…] <prompt>',
+          'Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=…] [--model=…] [--scope=…] [--pr=…] [--budget=…] [--verify=…] [--resume=…] [--allow-dangerous] <prompt>',
           'warning',
         );
       return;
+    }
+
+    // --allow-dangerous: honored for this invocation only, and only once a human confirms it in an
+    // interactive dialog — headless refuses (fail closed). Escalates a non-danger template too (the
+    // engine's existing allowDangerous semantics), so the same confirm applies either way.
+    let allowDangerous = false;
+    if (parsed.allowDangerous) {
+      try {
+        await confirmDangerousCommand(ctx, {
+          harnesses: [harnessName],
+          mode: parsed.mode ?? loadConfig().defaultMode,
+          task: resolved.task,
+        });
+        allowDangerous = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
+        else process.stderr.write(`${msg}\n`);
+        return;
+      }
     }
 
     const outcome = await runOneDelegation(ctx, {
@@ -542,7 +566,8 @@ export default function (pi: ExtensionAPI) {
       addDirs: parsed.addDirs,
       verify: parsed.verify,
       template,
-      isDanger,
+      isDanger: isDanger || allowDangerous,
+      allowDangerous,
     });
     if (outcome.cancelled || !outcome.result) {
       const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
@@ -595,7 +620,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand('delegate', {
     description:
-      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--pr=<n|url>] [--budget=<usd>] [--verify=<cmd>] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report.',
+      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--pr=<n|url>] [--budget=<usd>] [--verify=<cmd>] [--resume=<id>] [--allow-dangerous] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless.',
     handler: makeHandler(),
   });
   pi.registerCommand('claude', {

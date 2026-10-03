@@ -81,34 +81,68 @@ export function validateDelegateInputs(inputs: ValidatableInputs): void {
   if (first) throw new Error(first);
 }
 
+type ConfirmCtx = Pick<ExtensionContext, 'hasUI'> & { ui?: { confirm?: ExtensionContext['ui']['confirm'] } };
+
+/**
+ * The one danger-confirmation primitive shared by the tool and command paths: with a UI, ask via
+ * `ctx.ui.confirm` (a decline or a throwing dialog counts as "no"); without one there is nobody to
+ * ask, so fail closed. Resolves only on an explicit approval; throws the caller's message otherwise.
+ */
+async function askDangerConfirmation(
+  ctx: ConfirmCtx,
+  opts: { task: string; body: string; noUiError: string; declinedError: string },
+): Promise<void> {
+  if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') throw new Error(opts.noUiError);
+  const task = opts.task.length > 200 ? `${opts.task.slice(0, 199)}…` : opts.task;
+  let ok = false;
+  try {
+    ok = await ctx.ui.confirm('Allow dangerous delegation?', `${opts.body}\n\nTask: ${task}`);
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new Error(opts.declinedError);
+}
+
 /**
  * Gate a model-requested `allowDangerous: true` on the `delegate` tool behind a human: a tool
  * param is model-settable (prompt-injection reachable), and `danger` means an unrestricted
  * harness, so the model alone must never be able to grant it. With a UI, ask via
  * `ctx.ui.confirm`; without one there is nobody to ask, so fail closed with a clear error. The
- * `/delegate` command path never calls this — a human typed it.
+ * `/delegate` command path uses `confirmDangerousCommand` instead.
  */
 export async function confirmDangerousToolCall(
-  ctx: Pick<ExtensionContext, 'hasUI'> & { ui?: { confirm?: ExtensionContext['ui']['confirm'] } },
+  ctx: ConfirmCtx,
   summary: { harness?: string; mode?: string; task: string },
 ): Promise<void> {
   const target = `${summary.harness ?? 'default harness'} ${summary.mode ?? 'default mode'}`;
-  if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') {
-    throw new Error(
-      `allowDangerous requested for ${target}, but there is no interactive UI to confirm it with — refusing (danger permission needs a human's explicit approval; run it from an interactive session)`,
-    );
-  }
-  const task = summary.task.length > 200 ? `${summary.task.slice(0, 199)}…` : summary.task;
-  let ok = false;
-  try {
-    ok = await ctx.ui.confirm(
-      'Allow dangerous delegation?',
-      `The agent wants to run ${target} with DANGER permission (unrestricted: no sandbox, no approval prompts).\n\nTask: ${task}`,
-    );
-  } catch {
-    ok = false;
-  }
-  if (!ok) throw new Error(`allowDangerous for ${target} was declined by the user`);
+  await askDangerConfirmation(ctx, {
+    task: summary.task,
+    body: `The agent wants to run ${target} with DANGER permission (unrestricted: no sandbox, no approval prompts).`,
+    noUiError: `allowDangerous requested for ${target}, but there is no interactive UI to confirm it with — refusing (danger permission needs a human's explicit approval; run it from an interactive session)`,
+    declinedError: `allowDangerous for ${target} was declined by the user`,
+  });
+}
+
+/**
+ * Gate a human-typed `/delegate --allow-dangerous` behind the same interactive confirm. A human
+ * typed the flag, but it's one token away from an unrestricted run (and also escalates a
+ * non-danger template), so it's confirmed once more naming exactly what will run — one prompt
+ * covering every harness of a fan-out. Headless sessions never honor it: there's no one to
+ * confirm with, so it fails closed exactly like the tool path.
+ */
+export async function confirmDangerousCommand(
+  ctx: ConfirmCtx,
+  summary: { harnesses: string[]; mode: string; task: string },
+): Promise<void> {
+  const n = summary.harnesses.length;
+  const names = summary.harnesses.join(', ');
+  const target = `${names} ${summary.mode}`;
+  await askDangerConfirmation(ctx, {
+    task: summary.task,
+    body: `--allow-dangerous: run "${summary.mode}" on ${n > 1 ? `all ${n} harnesses (${names})` : names} with DANGER permission — full, unrestricted permissions (no sandbox, no approval prompts). Applies to this invocation only.`,
+    noUiError: `--allow-dangerous for ${target} needs interactive confirmation, but there is no UI — refusing (a headless /delegate never runs with danger permission)`,
+    declinedError: `--allow-dangerous for ${target} was declined — nothing was run`,
+  });
 }
 
 /** realpath of `p`, or — when `p` doesn't exist yet — realpath of its nearest existing ancestor

@@ -232,7 +232,8 @@ export async function delegate(
   // not spawn the process and surface a cryptic native failure. See config.ts's resolveTransport.
   const transport = resolveTransport(config, harnessName, harness);
 
-  // permission: normalized, danger requires explicit per-call allowDangerous:true. Resolved (and
+  // permission: normalized, danger requires explicit per-call allowDangerous:true (tool: model-set,
+  // human-confirmed in execute(); command: --allow-dangerous, human-confirmed in the handler). Resolved (and
   // the danger refusal thrown) before acquireSlot() — it's pure, so a refused run never occupies
   // (or, for fan-out, waits for) a concurrency slot it can't use.
   let permission: NormalizedPermission = template.permission;
@@ -241,7 +242,7 @@ export async function delegate(
   if (template.permission === 'danger' || isNativeDanger) {
     if (opts.allowDangerous !== true) {
       throw new Error(
-        `template "${mode}" requires danger permission — pass allowDangerous:true to run it (never a default)`,
+        `template "${mode}" requires danger permission — never a default: pass allowDangerous:true on the delegate tool, or --allow-dangerous on /delegate (both ask you to confirm interactively)`,
       );
     }
     permission = 'danger';

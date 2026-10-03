@@ -30,7 +30,7 @@ import { NotifyBatcher } from './notify.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
 import { loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { validateDelegateInputs } from './validate.ts';
+import { confirmDangerousCommand, validateDelegateInputs } from './validate.ts';
 /** How long the fan-out overlay lingers on the finished board after the last run resolves, so a
  *  user who looked away still catches the final state instead of it clearing instantly. */
 export const FANOUT_LINGER_MS = 3000;
@@ -199,6 +199,8 @@ export interface FanoutSpec {
   addDirs?: string[];
   verify?: string;
   isDanger: boolean;
+  /** Only ever true after `confirmDangerousCommand` approved this invocation's --allow-dangerous. */
+  allowDangerous?: boolean;
 }
 export interface FanoutOutcome {
   harnessName: string;
@@ -277,6 +279,7 @@ export async function runFanoutConcurrent(
       pr: spec.pr,
       addDirs: spec.addDirs,
       verify: spec.verify,
+      allowDangerous: spec.allowDangerous === true, // never from config — only a confirmed --allow-dangerous
       signal: ac.signal,
       waitForSlot: true,
       onAcquired: () => setRow({ status: 'running', startedAt: Date.now() }),
@@ -384,6 +387,7 @@ export async function runFanoutCommand(
   parsed: ReturnType<typeof parseDelegateCommand>,
 ): Promise<void> {
   const harnessSpec = parsed.harness as string;
+  const modeForReport = parsed.mode ?? loadConfig().defaultMode;
   try {
     const resumeErr = fanoutResumeError(harnessSpec, parsed.sessionId);
     if (resumeErr) throw new Error(resumeErr);
@@ -394,6 +398,11 @@ export async function runFanoutCommand(
       addDirs: parsed.addDirs,
       cwd: ctx.cwd,
     });
+    // Headless never honors --allow-dangerous: refuse before even probing harness binaries. (With a
+    // UI the single confirm happens below, once the harness list is actually resolved.)
+    if (parsed.allowDangerous && !ctx.hasUI) {
+      await confirmDangerousCommand(ctx, { harnesses: [harnessSpec], mode: modeForReport, task: parsed.task });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (ctx.hasUI) ctx.ui.notify(msg, 'error');
@@ -414,7 +423,6 @@ export async function runFanoutCommand(
     return;
   }
 
-  const modeForReport = parsed.mode ?? loadConfig().defaultMode;
   const batcher = new NotifyBatcher((text, level) => {
     if (ctx.hasUI) ctx.ui.notify(text, level);
     else process.stdout.write(`${text}\n`);
@@ -453,6 +461,27 @@ export async function runFanoutCommand(
       verify: parsed.verify,
       isDanger,
     });
+  }
+
+  // --allow-dangerous: ONE confirm naming every harness that will actually run — never one per
+  // harness, and never a run before it's approved. A decline (or no UI) runs nothing.
+  if (parsed.allowDangerous && specs.length > 0) {
+    try {
+      await confirmDangerousCommand(ctx, {
+        harnesses: specs.map(s => s.harnessName),
+        mode: modeForReport,
+        task: specs[0].task,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
+      else process.stderr.write(`${msg}\n`);
+      return;
+    }
+    for (const s of specs) {
+      s.allowDangerous = true;
+      s.isDanger = true; // escalated — the overlay shows the danger banner
+    }
   }
 
   const outcomes = specs.length > 0 ? await runFanoutConcurrent(pi, ui, ctx, parsed.mode, specs) : [];

@@ -20,6 +20,12 @@ export interface DelegateCommandArgs {
   verify?: string;
   /** Extra directories the harness may access (--add-dir=, repeatable). */
   addDirs?: string[];
+  /**
+   * `--allow-dangerous` (or `--allow-dangerous=true`): a human asking to run this one invocation
+   * with danger permission. Only ever honored after an interactive confirm in the command handler
+   * — never inherited from config, never applied headless. Absent unless explicitly true.
+   */
+  allowDangerous?: boolean;
 }
 
 export type ClaudeCommandArgs = DelegateCommandArgs;
@@ -42,7 +48,7 @@ export function parseDelegateCommand(
   const flags: Record<string, string> = {};
   const addDirs: string[] = [];
   // supports quoted values ("…"/'…') so multi-word flags like --verify="bun test" survive intact
-  const rest = raw.replace(
+  let rest = raw.replace(
     /--([a-zA-Z-]+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g,
     (_m, k: string, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
       const value = dq ?? sq ?? bare ?? '';
@@ -53,6 +59,13 @@ export function parseDelegateCommand(
       return '';
     },
   );
+  // bare boolean flag(s): `--allow-dangerous` with no `=value`. Run after the `--key=value` pass, so
+  // a quoted flag value (e.g. --verify="echo --allow-dangerous") is already gone and can't match.
+  let allowDangerousBare = false;
+  rest = rest.replace(/(^|\s)--allow-dangerous(?=\s|$)/g, (_m, lead: string) => {
+    allowDangerousBare = true;
+    return lead;
+  });
 
   let harness = flags.harness?.toLowerCase();
   let mode = flags.mode;
@@ -86,6 +99,8 @@ export function parseDelegateCommand(
   if (flags.pr) out.pr = flags.pr;
   if (flags.verify) out.verify = flags.verify;
   if (addDirs.length > 0) out.addDirs = addDirs;
+  // `=true` is tolerated; any other explicit value (`=false`, `=yes`, …) means off — fail closed
+  if (allowDangerousBare || flags['allow-dangerous']?.toLowerCase() === 'true') out.allowDangerous = true;
   return out;
 }
 
