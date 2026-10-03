@@ -463,7 +463,7 @@ test('delegate: a host-enforced budget stops the run and records budget exceeded
         assert.equal(run.result.stopReason, 'budget_exceeded');
         assert.equal((run.details.budget as { exceeded: boolean }).exceeded, true);
         const transcript = readFileSync(run.details.file as string, 'utf8');
-        assert.ok(transcript.includes('(host-enforced) · budget exceeded'));
+        assert.ok(transcript.includes('(host-enforced, best-effort) · budget exceeded'));
       },
       { sleepAfterSec: 20 },
     );

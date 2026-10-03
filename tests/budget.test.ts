@@ -27,6 +27,7 @@ test('describeBudget: a host-stopped run is recorded as budget exceeded', () => 
   assert.equal(b?.enforcement, 'host');
   assert.equal(b?.exceeded, true);
   assert.match(b?.message ?? '', /budget exceeded: opencode reported \$0\.600 against a \$0\.500 cap — run stopped/);
+  assert.match(b?.message ?? '', /best-effort: .*can overshoot the cap/);
 });
 
 test('describeBudget: host-enforced and within budget is silent; native is never flagged unenforced', () => {
@@ -64,7 +65,7 @@ test('buildTranscript: records the budget line and its message', () => {
     output: 'partial',
     budget,
   });
-  assert.ok(t.includes('- budget: $0.500 (host-enforced) · budget exceeded'));
+  assert.ok(t.includes('- budget: $0.500 (host-enforced, best-effort) · budget exceeded'));
   assert.ok(t.includes('run stopped'));
 });
 

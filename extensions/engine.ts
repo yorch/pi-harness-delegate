@@ -378,7 +378,8 @@ export async function delegate(
       : await runVerify(pi, ctx.cwd, verifyPlan.command)
     : undefined;
 
-  // How maxBudgetUsd fared: native (claude), host-enforced from streamed cost (the runner kills the
+  // How maxBudgetUsd fared: native (claude), host-enforced best-effort from streamed cost, checked
+  // only at the step/turn boundaries the harness reports, so it can overshoot (the runner kills the
   // run — `result.budgetExceeded`), or unenforceable (no native flag and no cost reported) — the
   // last two always surface a message, never silently.
   const budget = describeBudget({

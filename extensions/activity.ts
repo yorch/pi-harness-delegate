@@ -172,8 +172,9 @@ export function formatVerifySection(v: VerifyResult): string {
 /** How a run's `maxBudgetUsd` was (or wasn't) enforced, and whether it was exceeded. */
 export interface BudgetNote {
   limitUsd: number;
-  /** `native`: the harness CLI enforces it itself. `host`: the runner killed/would kill the run from
-   *  the harness's streamed cost. `unenforced`: neither — no native flag and no cost reported. */
+  /** `native`: the harness CLI enforces it itself. `host`: best-effort — the runner kills the run
+   *  when the harness's streamed cost (checked only at the step/turn boundaries it reports) is over
+   *  the cap, so spend can overshoot by up to one step/turn. `unenforced`: neither — no native flag and no cost reported. */
   enforcement: 'native' | 'host' | 'unenforced';
   exceeded: boolean;
   /** Human-readable warning, or null when there's nothing to warn about. */
@@ -209,7 +210,7 @@ export function describeBudget(opts: {
       limitUsd,
       enforcement: 'host',
       exceeded: true,
-      message: `⛔ budget exceeded: ${harness} reported ${cost} against a ${limit} cap — run stopped`,
+      message: `⛔ budget exceeded: ${harness} reported ${cost} against a ${limit} cap — run stopped (best-effort: cost is only checked at each step/turn the harness reports, so spend can overshoot the cap)`,
     };
   }
   if (costUsd === null) {
@@ -225,7 +226,8 @@ export function describeBudget(opts: {
 
 /** One transcript header line for a budget note. */
 export function formatBudgetLine(b: BudgetNote): string {
-  const how = b.enforcement === 'native' ? 'native' : b.enforcement === 'host' ? 'host-enforced' : 'NOT enforced';
+  const how =
+    b.enforcement === 'native' ? 'native' : b.enforcement === 'host' ? 'host-enforced, best-effort' : 'NOT enforced';
   return `- budget: $${b.limitUsd.toFixed(3)} (${how})${b.exceeded ? ' · budget exceeded' : ''}`;
 }
 
