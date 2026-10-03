@@ -201,7 +201,13 @@ export async function delegate(
 }> {
   // argv-bound inputs (sessionId/model/pr) are validated here, the one entry both the tool and
   // the /delegate command share — see validate.ts for the argument-injection rationale.
-  validateDelegateInputs({ sessionId: opts.sessionId, model: opts.model, pr: opts.pr, addDirs: opts.addDirs });
+  validateDelegateInputs({
+    sessionId: opts.sessionId,
+    model: opts.model,
+    pr: opts.pr,
+    addDirs: opts.addDirs,
+    cwd: ctx.cwd,
+  });
   const config = loadConfig();
   const harnessName = opts.harness ?? config.defaultHarness ?? 'claude';
   const harness = getHarness(harnessName);

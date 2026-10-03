@@ -73,6 +73,7 @@ export async function runFanoutTool(
     model: params.model,
     pr: params.pr,
     addDirs: params.addDirs,
+    cwd: ctx.cwd,
   });
   const detection = await detectAll();
   const { resolved, unknown, skipped } = resolveHarnessList(params.harness ?? 'all', {
@@ -391,6 +392,7 @@ export async function runFanoutCommand(
       model: parsed.model,
       pr: parsed.pr,
       addDirs: parsed.addDirs,
+      cwd: ctx.cwd,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

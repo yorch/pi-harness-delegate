@@ -47,10 +47,17 @@ export function prError(pr: string): string | null {
   return bad;
 }
 
-/** Returns an error message, or null when `dir` is an acceptable extra directory path. */
-export function addDirError(dir: string): string | null {
-  if (dir.length === 0 || dir.length > 4096 || dir.startsWith('-') || CONTROL_RE.test(dir))
-    return `invalid addDirs entry ${JSON.stringify(dir.slice(0, 80))} — must be a non-empty path, not starting with "-"`;
+/**
+ * Returns an error message, or null when `dir` is an acceptable extra directory path. Judged on its
+ * *resolved* form, which is what actually reaches argv (`mergeAddDirs` resolves every entry against
+ * cwd): an absolute path can't be parsed as a flag, so a legitimate relative dir like `-foo`
+ * (→ `<cwd>/-foo`) is fine. Empty, oversized, and control-character entries are still rejected.
+ */
+export function addDirError(dir: string, cwd: string = process.cwd()): string | null {
+  const bad = `invalid addDirs entry ${JSON.stringify(dir.slice(0, 80))} — must be a non-empty path without control characters`;
+  if (dir.length === 0 || dir.length > 4096 || CONTROL_RE.test(dir)) return bad;
+  const abs = resolve(cwd, dir);
+  if (!isAbsolute(abs) || abs.startsWith('-')) return bad;
   return null;
 }
 
@@ -59,6 +66,8 @@ export interface ValidatableInputs {
   model?: string;
   pr?: string;
   addDirs?: string[];
+  /** What relative `addDirs` resolve against (the run's cwd). */
+  cwd?: string;
 }
 
 /** Throws a clear Error on the first invalid argv-bound input; returns normally otherwise. */
@@ -67,7 +76,7 @@ export function validateDelegateInputs(inputs: ValidatableInputs): void {
     inputs.sessionId !== undefined ? sessionIdError(inputs.sessionId) : null,
     inputs.model !== undefined ? modelError(inputs.model) : null,
     inputs.pr !== undefined ? prError(inputs.pr) : null,
-    ...(inputs.addDirs ?? []).map(addDirError),
+    ...(inputs.addDirs ?? []).map(d => addDirError(d, inputs.cwd)),
   ];
   const first = errors.find((e): e is string => e !== null);
   if (first) throw new Error(first);

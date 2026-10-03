@@ -44,11 +44,20 @@ test('prError: number, http(s) URL, or owner/repo#n only', () => {
     assert.ok(prError(pr), JSON.stringify(pr));
 });
 
-test('addDirError: rejects flag-shaped and empty entries', () => {
+test('addDirError: judged on the resolved path — a relative "-foo" dir is fine; empty/control chars are not', () => {
   assert.equal(addDirError('/abs/dir'), null);
   assert.equal(addDirError('../rel'), null);
-  assert.ok(addDirError('-x'));
+  // resolves to <cwd>/-foo, an absolute path that can't be parsed as a flag
+  assert.equal(addDirError('-foo', '/repo'), null);
+  assert.equal(addDirError('--add-dir', '/repo'), null);
   assert.ok(addDirError(''));
+  assert.ok(addDirError('a\nb'));
+  assert.ok(addDirError('x'.repeat(4097)));
+});
+
+test('mergeAddDirs: a "-foo" relative dir reaches argv as an absolute path, never flag-shaped', async () => {
+  const { mergeAddDirs } = await import('../extensions/engine.ts');
+  assert.deepEqual(mergeAddDirs('/repo', undefined, ['-foo']), ['/repo/-foo']);
 });
 
 test('validateDelegateInputs: throws the first problem, passes clean input through', () => {
@@ -57,7 +66,8 @@ test('validateDelegateInputs: throws the first problem, passes clean input throu
   assert.throws(() => validateDelegateInputs({ sessionId: '--x' }), /invalid sessionId/);
   assert.throws(() => validateDelegateInputs({ model: '-o' }), /invalid model/);
   assert.throws(() => validateDelegateInputs({ pr: '--repo=x' }), /invalid pr/);
-  assert.throws(() => validateDelegateInputs({ addDirs: ['/ok', '-bad'] }), /invalid addDirs/);
+  assert.throws(() => validateDelegateInputs({ addDirs: ['/ok', 'bad\u0000'] }), /invalid addDirs/);
+  assert.doesNotThrow(() => validateDelegateInputs({ addDirs: ['-ok'], cwd: '/repo' }));
 });
 
 test('confirmDangerousToolCall: fails closed with no UI', async () => {
