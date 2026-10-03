@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -73,8 +73,7 @@ test('safeSegmentName neutralizes path separators', () => {
 });
 
 test('pruneOutputs keeps the newest N transcripts', () => {
-  const dir = join(tmpdir(), `pcd-prune-${Date.now()}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'pcd-prune-'));
   try {
     for (let i = 0; i < 5; i++) {
       writeFileSync(join(dir, `00${i}-a.md`), 'x');
@@ -87,8 +86,7 @@ test('pruneOutputs keeps the newest N transcripts', () => {
 });
 
 test('pruneOutputs maxCount 0 keeps everything', () => {
-  const dir = join(tmpdir(), `pcd-noprune-${Date.now()}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'pcd-noprune-'));
   try {
     for (let i = 0; i < 3; i++) writeFileSync(join(dir, `${i}.md`), 'x');
     pruneOutputs(dir, 0);

@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { acpView, runAcpHarness } from '../extensions/acp-runner.ts';
 import { devinHarness } from '../extensions/harnesses/devin.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
+import { readPid, waitForProcessExit } from './helpers/wait.ts';
 
 /**
  * A fake ACP agent (spawned via `node -e <script>`, not the real `devin` binary) that speaks the
@@ -113,19 +114,6 @@ function tmpPidFile(name: string): string {
   return join(tmpdir(), `acp-runner-test-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.pid`);
 }
 
-async function waitForProcessExit(pid: number, timeoutMs = 1000): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      process.kill(pid, 0); // still alive
-    } catch {
-      return true; // ESRCH — process is gone
-    }
-    await new Promise(r => setTimeout(r, 10));
-  }
-  return false;
-}
-
 test('acpView: falls back to stdout-shaped fields for an ACP-only harness (Devin needs zero changes)', () => {
   const view = acpView(devinHarness);
   assert.equal(view.buildArgs, devinHarness.buildArgs);
@@ -224,20 +212,6 @@ test('runAcpHarness: writing to an agent that already exited fails the run clean
     );
   }
 });
-
-async function readPid(pidFile: string, timeoutMs = 5000): Promise<number> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const pid = Number(readFileSync(pidFile, 'utf8'));
-      if (Number.isInteger(pid) && pid > 0) return pid;
-    } catch {
-      // not written yet
-    }
-    await new Promise(r => setTimeout(r, 10));
-  }
-  throw new Error(`no pid written to ${pidFile}`);
-}
 
 test('runAcpHarness: a successful run resolves and kills the agent itself (ACP agents never exit on their own)', async () => {
   const pidFile = tmpPidFile('success');
@@ -374,7 +348,7 @@ test('runAcpHarness: streamed text is capped at 5MB with a truncation marker, an
 test('runAcpHarness: activities are capped at 5000 (stored and forwarded)', async () => {
   const { MAX_ACTIVITIES } = await import('../extensions/stream-caps.ts');
   let forwarded = 0;
-  const res = await runAcpHarness({
+  await runAcpHarness({
     harness: fakeHarness('flood-tools', String(MAX_ACTIVITIES + 250)),
     prompt: 'hi',
     cwd: process.cwd(),

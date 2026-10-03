@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -19,7 +19,7 @@ async function withSandbox<T>(
   opts: { maxConcurrent?: number; templates?: Record<string, string> },
   fn: (s: Sandbox) => Promise<T>,
 ): Promise<T> {
-  const root = join(tmpdir(), `delegate-engine-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const root = mkdtempSync(join(tmpdir(), 'delegate-engine-'));
   const agentDir = join(root, 'agent');
   const cwd = join(root, 'project');
   mkdirSync(agentDir, { recursive: true });
