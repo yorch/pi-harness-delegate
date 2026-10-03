@@ -179,6 +179,30 @@ export interface ScopeSection {
   data?: string;
 }
 
+const PR_SLUG = '[A-Za-z0-9_.-]{1,100}';
+const PR_SHORTHAND_LABEL_RE = new RegExp(`^${PR_SLUG}/${PR_SLUG}#\\d{1,10}$`);
+const PR_URL_LABEL_RE = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})(?:[/?#]|$)/;
+const PR_SLUG_RE = new RegExp(`^${PR_SLUG}$`);
+
+/**
+ * A normalized, instruction-safe label for a PR target, for the scope heading (which sits outside
+ * the untrusted fence). `target` is caller-supplied — validation only rejects leading `-` and
+ * control characters, and a PR URL may carry any `\S*` tail — so the raw string never reaches the
+ * prompt: only `#<n>` or `owner/repo#<n>` built from strictly-charset parts, `current branch` for
+ * none, or a fixed fallback.
+ */
+export function prLabel(target: string): string {
+  if (!target) return 'current branch';
+  if (/^\d{1,10}$/.test(target)) return `#${target}`;
+  if (PR_SHORTHAND_LABEL_RE.test(target)) return target;
+  const m = PR_URL_LABEL_RE.exec(target);
+  if (m) {
+    const [, owner, repo, n] = m;
+    return PR_SLUG_RE.test(owner) && PR_SLUG_RE.test(repo) ? `${owner}/${repo}#${n}` : `#${n}`;
+  }
+  return 'requested PR';
+}
+
 /** A random hex nonce that does not occur anywhere in `content` (so the content can't forge it).
  *  `random` is injectable only so tests can force a collision; it defaults to 8 random bytes. */
 export function untrustedNonce(content: string, random: () => string = () => randomBytes(8).toString('hex')): string {
@@ -355,8 +379,8 @@ export async function delegate(
     } else if (opts.scope === 'pr' || opts.pr) {
       const target = opts.pr ?? '';
       const pr = await pi.exec('gh', target ? ['pr', 'diff', '--', target] : ['pr', 'diff'], { cwd: ctx.cwd });
-      // `target` is validated (no leading '-') but still caller-supplied — keep it on one line.
-      const label = target ? target.replace(/\s+/g, ' ').slice(0, 200) : 'current branch';
+      // `target` is caller-supplied — only a normalized form of it reaches the (unfenced) heading.
+      const label = prLabel(target);
       const stderr = pr.stderr?.trim().slice(0, 300);
       scope = pr.stdout
         ? { heading: `Pull request diff (${label}):`, data: pr.stdout }
