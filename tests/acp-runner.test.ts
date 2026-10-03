@@ -17,7 +17,8 @@ const FAKE_AGENT_SCRIPT = `
 const readline = require('node:readline');
 const fs = require('node:fs');
 const [, mode, pidFile] = process.argv;
-if (pidFile) fs.writeFileSync(pidFile, String(process.pid));
+// flood-tools reuses the pidFile slot for its event count
+if (pidFile && mode !== 'flood-tools') fs.writeFileSync(pidFile, String(process.pid));
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
@@ -76,6 +77,19 @@ rl.on('line', (line) => {
           : [{ optionId: 'allow', kind: 'allow_once', name: 'Allow' }, { optionId: 'allow-all', kind: 'allow_always', name: 'Always' }];
         send({ jsonrpc: '2.0', id: 'srv-1', method: 'session/request_permission', params: { sessionId: 'fake-session', toolCall: { toolCallId: 'w1' }, options } });
       }
+      return;
+    }
+    if (mode === 'flood-text' || mode === 'flood-tools') {
+      // an agent streaming without bound — the runner's caps (stream-caps.ts) must hold
+      const update = (u) => JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: u } }) + '\\n';
+      let out = '';
+      if (mode === 'flood-text') {
+        const chunk = 'x'.repeat(1024 * 1024 + 7); // not a divisor of 5MB, so one chunk straddles the cap
+        for (let i = 0; i < 7; i++) out += update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } });
+      } else {
+        for (let i = 0; i < Number(pidFile); i++) out += update({ sessionUpdate: 'tool_call', toolCallId: 't' + i, kind: 'read', rawInput: {} });
+      }
+      process.stdout.write(out, () => send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } }));
       return;
     }
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call', toolCallId: 'real-1', kind: 'read', rawInput: {} } } });
@@ -336,4 +350,39 @@ test('runAcpHarness: a configOptions "mode" category is accepted as session-mode
     timeoutMs: 20_000,
   });
   assert.equal(res.streamedText, 'NEW ANSWER');
+});
+
+test('runAcpHarness: streamed text is capped at 5MB with a truncation marker, and only kept text is forwarded', async () => {
+  const { MAX_STREAMED_CHARS } = await import('../extensions/stream-caps.ts');
+  let forwarded = 0;
+  const res = await runAcpHarness({
+    harness: fakeHarness('flood-text'),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'readonly',
+    timeoutMs: 30_000,
+    onStream: t => {
+      forwarded += t.length;
+    },
+  });
+  assert.ok(res.streamedText.startsWith('x'.repeat(1000)));
+  assert.match(res.streamedText, /\[truncated \d+ chars\]$/);
+  assert.equal(res.streamedText.replace(/ \[truncated \d+ chars\]$/, '').length, MAX_STREAMED_CHARS);
+  assert.equal(forwarded, res.streamedText.length, 'onStream sees exactly what was kept');
+});
+
+test('runAcpHarness: activities are capped at 5000 (stored and forwarded)', async () => {
+  const { MAX_ACTIVITIES } = await import('../extensions/stream-caps.ts');
+  let forwarded = 0;
+  const res = await runAcpHarness({
+    harness: fakeHarness('flood-tools', String(MAX_ACTIVITIES + 250)),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'readonly',
+    timeoutMs: 30_000,
+    onActivity: () => {
+      forwarded++;
+    },
+  });
+  assert.equal(forwarded, MAX_ACTIVITIES);
 });
