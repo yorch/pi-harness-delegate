@@ -101,7 +101,7 @@ function formatCost(cost: number | null): string {
   return cost !== null ? `$${cost.toFixed(3)}` : '$—';
 }
 
-interface DelegateOptions {
+export interface DelegateOptions {
   harness?: string;
   task: string;
   mode?: string;
@@ -623,7 +623,8 @@ function buildPrompt(
   return prompt;
 }
 
-async function delegate(
+/** The shared single-run engine. Exported for tests only — pi loads this module's default export. */
+export async function delegate(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   opts: DelegateOptions,
@@ -658,32 +659,9 @@ async function delegate(
   // not spawn the process and surface a cryptic native failure. See config.ts's resolveTransport.
   const transport = resolveTransport(config, harnessName, harness);
 
-  // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
-  // exactly as before; fan-out passes waitForSlot:true to queue instead.
-  const release = await acquireSlot({
-    harness: harnessName,
-    mode,
-    config,
-    wait: opts.waitForSlot ?? false,
-    signal: opts.signal,
-  });
-  opts.onAcquired?.();
-
-  let scopeText: string | null = opts.scope ?? null;
-  if (opts.scope === 'diff') {
-    const diff = await pi.exec('git', ['diff', 'HEAD'], { cwd: ctx.cwd });
-    scopeText = diff.stdout
-      ? `Current git diff (working tree vs HEAD):\n${diff.stdout}`
-      : 'No git diff vs HEAD (working tree clean).';
-  } else if (opts.scope === 'pr' || opts.pr) {
-    const target = opts.pr ?? '';
-    const pr = await pi.exec('gh', target ? ['pr', 'diff', target] : ['pr', 'diff'], { cwd: ctx.cwd });
-    scopeText = pr.stdout
-      ? `Pull request diff (${target || 'current branch'}):\n${pr.stdout}`
-      : `Could not resolve the PR diff${pr.stderr ? ` — ${pr.stderr.trim().slice(0, 300)}` : ''}.`;
-  }
-
-  // permission: normalized, danger requires explicit per-call allowDangerous:true
+  // permission: normalized, danger requires explicit per-call allowDangerous:true. Resolved (and
+  // the danger refusal thrown) before acquireSlot() — it's pure, so a refused run never occupies
+  // (or, for fan-out, waits for) a concurrency slot it can't use.
   let permission: NormalizedPermission = template.permission;
   const nativePerm = template.nativePermission;
   const isNativeDanger = isNativeDangerPermission(harness, nativePerm);
@@ -704,12 +682,44 @@ async function delegate(
   const nativePermissionForRun = resolveNativePermission(template.permission, permission, nativePerm);
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
-  const prompt = buildPrompt(template, task, scopeText, ctx.cwd, harnessName);
 
+  // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
+  // exactly as before; fan-out passes waitForSlot:true to queue instead.
+  const release = await acquireSlot({
+    harness: harnessName,
+    mode,
+    config,
+    wait: opts.waitForSlot ?? false,
+    signal: opts.signal,
+  });
+
+  // Everything from here until the harness exits holds the slot — any throw (scope resolution,
+  // prompt building, the runner itself) must release it, or the slot leaks for the rest of the
+  // process's life. `finally` below is the single release point for that whole span.
   const activityEvents: ActivityEvent[] = [];
   let streamedFull = '';
   let result: import('./runner.ts').HarnessResult;
   try {
+    // A cancel that landed while we were waiting on (or just after winning) the slot — don't
+    // spawn anything for a run the caller has already given up on.
+    if (opts.signal?.aborted) throw new Error('cancelled');
+    opts.onAcquired?.();
+
+    let scopeText: string | null = opts.scope ?? null;
+    if (opts.scope === 'diff') {
+      const diff = await pi.exec('git', ['diff', 'HEAD'], { cwd: ctx.cwd });
+      scopeText = diff.stdout
+        ? `Current git diff (working tree vs HEAD):\n${diff.stdout}`
+        : 'No git diff vs HEAD (working tree clean).';
+    } else if (opts.scope === 'pr' || opts.pr) {
+      const target = opts.pr ?? '';
+      const pr = await pi.exec('gh', target ? ['pr', 'diff', target] : ['pr', 'diff'], { cwd: ctx.cwd });
+      scopeText = pr.stdout
+        ? `Pull request diff (${target || 'current branch'}):\n${pr.stdout}`
+        : `Could not resolve the PR diff${pr.stderr ? ` — ${pr.stderr.trim().slice(0, 300)}` : ''}.`;
+    }
+    const prompt = buildPrompt(template, task, scopeText, ctx.cwd, harnessName);
+
     const baseRunOpts = {
       harness,
       prompt,
@@ -739,7 +749,6 @@ async function delegate(
         ? await runAcpHarness({ ...baseRunOpts, harness: acpView(harness) })
         : await runHarness(baseRunOpts);
   } catch (err) {
-    release();
     if (streamedFull.length > 0) {
       try {
         saveOutput(
@@ -771,8 +780,9 @@ async function delegate(
       }
     }
     throw err;
+  } finally {
+    release();
   }
-  release();
 
   if (result.isError && !result.result && !result.streamedText)
     throw new Error(`${harnessName} reported an error and produced no output`);
