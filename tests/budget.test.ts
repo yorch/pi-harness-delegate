@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { acpView, runAcpHarness } from '../extensions/acp-runner.ts';
 import { buildTranscript, describeBudget, formatBudgetLine } from '../extensions/activity.ts';
 import { claudeHarness } from '../extensions/harnesses/claude.ts';
 import { opencodeHarness } from '../extensions/harnesses/opencode.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
-import { isOverBudget, runHarness } from '../extensions/runner.ts';
+import { isCostOverBudget, isOverBudget, runHarness } from '../extensions/runner.ts';
 
 test('describeBudget: undefined when no budget was set', () => {
   assert.equal(
@@ -111,4 +112,103 @@ test('runHarness: a native-budget harness is never killed by the host check', as
   });
   assert.equal(res.budgetExceeded, undefined);
   assert.equal(res.isError, false);
+});
+
+test('isCostOverBudget: only the delta over the baseline counts', () => {
+  assert.equal(isCostOverBudget(opencodeHarness, 0.5, 5.2, 5), false);
+  assert.equal(isCostOverBudget(opencodeHarness, 0.5, 5.6, 5), true);
+  assert.equal(isCostOverBudget(opencodeHarness, 0.5, 0.6), true);
+  assert.equal(isCostOverBudget(opencodeHarness, 0.5, null), false);
+});
+
+/**
+ * A fake opencode ACP agent. `costs` are the session-cumulative `usage_update.cost.amount` values
+ * sent after `session/prompt`; `replayCost` (on `session/load`) simulates a replayed prior-turn
+ * total. With `hang`, the prompt response is never sent — only a host-side kill ends the run.
+ */
+function fakeOpencodeAcp(opts: { costs: number[]; replayCost?: number; hang?: boolean }): Harness {
+  const script = `
+const readline = require('node:readline');
+const opts = ${JSON.stringify(opts)};
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const upd = (u) => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's1', update: u } });
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: 1 } });
+  else if (msg.method === 'session/new') send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's1', modes: {} } });
+  else if (msg.method === 'session/load') {
+    upd({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'OLD' } });
+    if (opts.replayCost !== undefined) upd({ sessionUpdate: 'usage_update', size: 1000, used: 10, cost: { amount: opts.replayCost, currency: 'USD' } });
+    send({ jsonrpc: '2.0', id: msg.id, result: { modes: {} } });
+  } else if (msg.method === 'session/set_mode') send({ jsonrpc: '2.0', id: msg.id, result: {} });
+  else if (msg.method === 'session/prompt') {
+    upd({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'NEW' } });
+    for (const c of opts.costs) upd({ sessionUpdate: 'usage_update', size: 1000, used: 10, cost: { amount: c, currency: 'USD' } });
+    if (opts.hang) setTimeout(() => {}, 20000);
+    else send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } } });
+  }
+});`;
+  const view = acpView(opencodeHarness);
+  return { ...view, binary: process.execPath, buildArgs: () => ['-e', script] };
+}
+
+test('runAcpHarness: kills a fresh run mid-turn as soon as the streamed cost exceeds maxBudgetUsd', async () => {
+  const started = Date.now();
+  const res = await runAcpHarness({
+    harness: fakeOpencodeAcp({ costs: [0.2, 0.6], hang: true }),
+    prompt: 'p',
+    cwd: process.cwd(),
+    permission: 'edit',
+    maxBudgetUsd: 0.5,
+    timeoutMs: 30_000,
+  });
+  assert.ok(Date.now() - started < 10_000, 'must stop before the turn ends, not wait for the prompt response');
+  assert.equal(res.budgetExceeded, true);
+  assert.equal(res.stopReason, 'budget_exceeded');
+  assert.equal(res.totalCostUsd, 0.6);
+  assert.equal(res.sessionId, 's1');
+});
+
+test('runAcpHarness: a fresh run within budget completes normally', async () => {
+  const res = await runAcpHarness({
+    harness: fakeOpencodeAcp({ costs: [0.1, 0.3] }),
+    prompt: 'p',
+    cwd: process.cwd(),
+    permission: 'edit',
+    maxBudgetUsd: 0.5,
+    timeoutMs: 10_000,
+  });
+  assert.equal(res.budgetExceeded, undefined);
+  assert.equal(res.isError, false);
+  assert.equal(res.totalCostUsd, 0.3);
+});
+
+test('runAcpHarness: on resume, prior turns in a session-cumulative cost never count against the cap', async () => {
+  for (const replayCost of [undefined, 5]) {
+    const res = await runAcpHarness({
+      harness: fakeOpencodeAcp({ costs: [5.1, 5.3], replayCost }),
+      prompt: 'p',
+      cwd: process.cwd(),
+      permission: 'edit',
+      maxBudgetUsd: 0.5,
+      timeoutMs: 10_000,
+      resumeSessionId: 's1',
+    });
+    assert.equal(res.budgetExceeded, undefined, `replayCost=${replayCost}`);
+    assert.equal(res.isError, false);
+  }
+});
+
+test('runAcpHarness: on resume, new spend past the cap still stops the run', async () => {
+  const res = await runAcpHarness({
+    harness: fakeOpencodeAcp({ costs: [5.1, 5.7], replayCost: 5, hang: true }),
+    prompt: 'p',
+    cwd: process.cwd(),
+    permission: 'edit',
+    maxBudgetUsd: 0.5,
+    timeoutMs: 30_000,
+    resumeSessionId: 's1',
+  });
+  assert.equal(res.budgetExceeded, true);
+  assert.equal(res.stopReason, 'budget_exceeded');
 });

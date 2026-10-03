@@ -46,6 +46,10 @@ export interface ParseOutcome {
   streamedText?: string;
   activities?: ActivityEvent[];
   result?: StreamedResult | null;
+  /** The harness's own running cost total as of this line, when the line reports one mid-turn
+   *  (e.g. an ACP `usage_update`) without being a final result — lets the ACP runner enforce
+   *  `maxBudgetUsd` before the turn ends. Same semantics as `StreamedResult.totalCostUsd`. */
+  runningCostUsd?: number;
 }
 
 export interface StreamParseOutcome {

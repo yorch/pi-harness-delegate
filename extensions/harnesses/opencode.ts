@@ -249,7 +249,12 @@ function translateOpencodeAcpUpdate(update: Record<string, unknown>, state: Pars
       // docs/acp-harness-assessment.md §2 — and, per the same section, this is a running session
       // total already, latched from the *last* usage_update seen, never summed across a series.
       if (typeof update.size === 'number') hs.contextWindow = update.size;
-      if (isRecord(update.cost) && typeof update.cost.amount === 'number') hs.costUsd = update.cost.amount;
+      if (isRecord(update.cost) && typeof update.cost.amount === 'number') {
+        hs.costUsd = update.cost.amount;
+        // surfaced to acp-runner.ts so it can enforce maxBudgetUsd mid-turn, not only once the
+        // session/prompt response arrives (by which point the turn has already finished)
+        return { streamedText, activities, runningCostUsd: update.cost.amount };
+      }
       break;
     default:
       break;

@@ -30,13 +30,31 @@ export interface HarnessResult extends StreamedResult {
  * harness's own streamed running total (`totalCostUsd`) goes over the cap. A harness that reports
  * no cost (`null`) can never trip this — `delegate()` flags that budget as unenforced instead.
  */
-export function isOverBudget(harness: Harness, maxBudgetUsd: number | undefined, r: StreamedResult | null): boolean {
+export function isOverBudget(
+  harness: Harness,
+  maxBudgetUsd: number | undefined,
+  r: StreamedResult | null,
+  baselineUsd = 0,
+): boolean {
+  return r !== null && isCostOverBudget(harness, maxBudgetUsd, r.totalCostUsd, baselineUsd);
+}
+
+/**
+ * The cost-only core of `isOverBudget`. `baselineUsd` is subtracted first: a harness whose reported
+ * total is *session*-cumulative (opencode over ACP) already includes every prior turn's spend on a
+ * resume, so only the delta since this run started counts against this run's cap.
+ */
+export function isCostOverBudget(
+  harness: Harness,
+  maxBudgetUsd: number | undefined,
+  costUsd: number | null | undefined,
+  baselineUsd = 0,
+): boolean {
   return (
     maxBudgetUsd !== undefined &&
     harness.nativeBudget !== true &&
-    r !== null &&
-    typeof r.totalCostUsd === 'number' &&
-    r.totalCostUsd > maxBudgetUsd
+    typeof costUsd === 'number' &&
+    costUsd - baselineUsd > maxBudgetUsd
   );
 }
 
