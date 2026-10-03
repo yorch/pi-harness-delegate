@@ -517,6 +517,12 @@ export default function (pi: ExtensionAPI) {
       else process.stderr.write(`${msg}\n`);
       return;
     }
+    // non-fatal: e.g. a --flag= that sat inside "quoted" prompt text and so wasn't applied
+    if (parsed.notices && parsed.notices.length > 0) {
+      const msg = parsed.notices.join('\n');
+      if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
+      else process.stderr.write(`${msg}\n`);
+    }
 
     // fan-out: harness field is `all` or a comma list — resolve to detected harnesses and run
     // the engine once per harness instead of the single-harness flow below.

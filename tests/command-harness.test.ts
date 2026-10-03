@@ -208,3 +208,70 @@ test('parseDelegateCommand leaves --k=v inside quoted or backticked prose alone'
   // an unknown bare --word is prose, kept as-is
   assert.equal(parseDelegateCommand('review add a --dry-run option', MODES, HARNESSES).task, 'add a --dry-run option');
 });
+
+test('parseDelegateCommand --budget with an empty value or in the space form is an error, never "no cap"', () => {
+  for (const raw of ['--budget= review it', 'review it --budget=', 'review it --budget 5', 'review it --budget']) {
+    const r = parseDelegateCommand(raw, MODES, HARNESSES);
+    assert.equal(r.budget, undefined, raw);
+    assert.equal(r.errors?.length, 1, raw);
+    assert.match(r.errors?.[0] ?? '', /--budget/, raw);
+  }
+  // `--budget` as literal prompt text is still possible, backticked
+  const bt = parseDelegateCommand('review explain `--budget 5`', MODES, HARNESSES);
+  assert.equal(bt.errors, undefined);
+  assert.equal(bt.task, 'explain `--budget 5`');
+});
+
+test('parseDelegateCommand: balanced quotes — a recognized flag inside a quoted span is kept as text, with a notice', () => {
+  const r = parseDelegateCommand('review fix "bug --budget=5 and "more', MODES, HARNESSES);
+  assert.equal(r.budget, undefined);
+  assert.equal(r.errors, undefined);
+  assert.equal(r.task, 'fix "bug --budget=5 and "more');
+  assert.equal(r.notices?.length, 1);
+  assert.match(r.notices?.[0] ?? '', /--budget inside double quotes/);
+  // an unrecognized --word in quotes is ordinary prose: no notice
+  assert.equal(parseDelegateCommand('review add "--dry-run" support', MODES, HARNESSES).notices, undefined);
+  // backticks are the deliberate literal marker: no notice
+  assert.equal(parseDelegateCommand('review explain `--budget=5`', MODES, HARNESSES).notices, undefined);
+  // a quoted flag value is a flag, not prose: no notice
+  const v = parseDelegateCommand('review --verify="echo --allow-dangerous" go', MODES, HARNESSES);
+  assert.equal(v.notices, undefined);
+  assert.equal(v.verify, 'echo --allow-dangerous');
+  assert.equal(v.allowDangerous, undefined);
+});
+
+test('parseDelegateCommand: an odd quote count near flags is an error, and never smuggles --allow-dangerous', () => {
+  for (const raw of [
+    'review fix "bug --budget=5', // unclosed prose quote before a flag
+    'review fix "bug --verify="echo hi"', // stray quote pairs with the flag value's opening quote
+    'review fix "x --verify="echo --allow-dangerous ok"', // ...which would expose --allow-dangerous
+    'review fix `x --verify="echo --allow-dangerous ok"', // same with a stray backtick
+    'review --verify="echo --allow-dangerous" fix "it', // odd count after a well-formed flag
+  ]) {
+    const r = parseDelegateCommand(raw, MODES, HARNESSES);
+    assert.equal(r.allowDangerous, undefined, raw);
+    assert.equal(r.errors?.length, 1, raw);
+    assert.match(r.errors?.[0] ?? '', /unbalanced/, raw);
+  }
+  // a stray quote with no flag-shaped text at or after it can't change how anything pairs
+  const ok = parseDelegateCommand('review --budget=2 the 5" screen is broken', MODES, HARNESSES);
+  assert.equal(ok.errors, undefined);
+  assert.equal(ok.budget, 2);
+  assert.equal(ok.task, 'the 5" screen is broken');
+  assert.equal(parseDelegateCommand('review the 5" screen', MODES, HARNESSES).errors, undefined);
+});
+
+test('parseDelegateCommand: even quote counts keep the existing flag/prose split (incl. --verify with a dangerous-looking value)', () => {
+  const r = parseDelegateCommand(
+    'review --verify="echo --allow-dangerous" explain "--mode=plan" and "x"',
+    MODES,
+    HARNESSES,
+  );
+  assert.equal(r.errors, undefined);
+  assert.equal(r.verify, 'echo --allow-dangerous');
+  assert.equal(r.allowDangerous, undefined);
+  assert.equal(r.mode, 'review');
+  assert.equal(r.task, 'explain "--mode=plan" and "x"');
+  // the real bare flag outside quotes still works
+  assert.equal(parseDelegateCommand('review "quoted" --allow-dangerous go', MODES, HARNESSES).allowDangerous, true);
+});

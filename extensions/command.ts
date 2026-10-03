@@ -29,6 +29,9 @@ export interface DelegateCommandArgs {
   /** Flag values that were given but are unusable (e.g. `--budget=0`) — the handler reports these
    *  and runs nothing, rather than silently dropping the flag. Absent when there are none. */
   errors?: string[];
+  /** Non-fatal heads-ups the handler shows before running — e.g. a recognized `--flag=` that sat
+   *  inside a double-quoted span and so was kept as prompt text, not applied. Absent when none. */
+  notices?: string[];
 }
 
 export type ClaudeCommandArgs = DelegateCommandArgs;
@@ -83,10 +86,30 @@ function normalizeHarnessSpec(spec: string): string | undefined {
 /**
  * One pass over the raw command: a backticked or double-quoted prose span is skipped verbatim (so
  * `explain "--mode=x"` or `` `--allow-dangerous` `` in the prompt is never eaten as a flag); a
- * `--key=value` (value bare, "double" or 'single' quoted) or bare `--allow-dangerous` token that
- * starts a word is a flag. Every other `--word` stays in the text untouched.
+ * `--key=value` (value bare, "double" or 'single' quoted, or empty) or bare `--allow-dangerous` /
+ * `--budget` token that starts a word is a flag. Every other `--word` stays in the text untouched.
  */
-const FLAG_OR_PROSE = /`[^`]*`|"[^"]*"|(^|\s)--([a-zA-Z][a-zA-Z-]*)(?:=(?:"([^"]*)"|'([^']*)'|(\S+))|(?=\s|$))/g;
+const FLAG_OR_PROSE = /`[^`]*`|"[^"]*"|(^|\s)--([a-zA-Z][a-zA-Z-]*)(?:=(?:"([^"]*)"|'([^']*)'|(\S*))|(?=\s|$))/g;
+
+/** Every flag `parseDelegateCommand` acts on — used to notice one stranded inside quoted prose. */
+const RECOGNIZED_FLAGS = new Set([
+  'harness',
+  'mode',
+  'model',
+  'scope',
+  'budget',
+  'resume',
+  'pr',
+  'verify',
+  'add-dir',
+  'allow-dangerous',
+]);
+
+/** A recognized flag token starting a word inside a prose span (quote/backtick counts as a word start). */
+const FLAG_IN_PROSE = /(?:^|[\s"`])--([a-zA-Z][a-zA-Z-]*)(?==|[\s"`]|$)/g;
+
+/** Prose spans as FLAG_OR_PROSE pairs them; whatever delimiter is left over afterwards is unmatched. */
+const PROSE_SPAN = /`[^`]*`|"[^"]*"/g;
 
 export function parseDelegateCommand(
   raw: string,
@@ -96,7 +119,9 @@ export function parseDelegateCommand(
   const flags: Record<string, string> = {};
   const addDirs: string[] = [];
   const errors: string[] = [];
+  const notices: string[] = [];
   let allowDangerousBare = false;
+  let budgetWithoutValue = false;
   const rest = raw.replace(
     FLAG_OR_PROSE,
     (
@@ -107,10 +132,29 @@ export function parseDelegateCommand(
       sq: string | undefined,
       bare: string | undefined,
     ) => {
-      if (k === undefined) return m; // quoted/backticked prose — leave it alone
+      if (k === undefined) {
+        // quoted/backticked prose — left alone. A double-quoted span holding a recognized flag is
+        // most likely an accident (`fix "bug --budget=5 and "more`): say so instead of dropping it
+        // silently. Backticks are the deliberate "this is literal" marker, so they stay quiet.
+        if (m.startsWith('"')) {
+          for (const [, name] of m.matchAll(FLAG_IN_PROSE)) {
+            if (!RECOGNIZED_FLAGS.has(name)) continue;
+            notices.push(
+              `--${name} inside double quotes was kept as prompt text, not applied — move it outside the quotes to use it as a flag`,
+            );
+          }
+        }
+        return m;
+      }
       const hasValue = dq !== undefined || sq !== undefined || bare !== undefined;
       if (!hasValue) {
-        // bare boolean flag: only `--allow-dangerous`; any other bare `--word` is prose
+        // bare boolean flag: only `--allow-dangerous`. A bare `--budget` (e.g. the space form
+        // `--budget 5`) is an explicit cap we can't honor — an error, never silently "no cap".
+        // Any other bare `--word` is prose.
+        if (k === 'budget') {
+          budgetWithoutValue = true;
+          return m;
+        }
         if (k !== 'allow-dangerous') return m;
         allowDangerousBare = true;
         return lead ?? '';
@@ -123,6 +167,25 @@ export function parseDelegateCommand(
       return lead ?? '';
     },
   );
+
+  // An unmatched `"` or backtick makes the pairing above a guess: in `fix "x --verify="echo ok"` the
+  // stray quote pairs with the flag's own opening quote, so the real flag is eaten as prose and
+  // whatever followed it is parsed as flags instead. Text before the first delimiter is outside any
+  // span however the quotes pair, so only a flag-shaped token at or after it is in play; when one
+  // is, refuse rather than guess — the result must not depend on quote parity.
+  const strayDelimiter = /["`]/.test(rest.replace(PROSE_SPAN, ''));
+  const firstDelimiter = raw.search(/["`]/);
+  const ambiguous = strayDelimiter && firstDelimiter >= 0 && /--[a-zA-Z]/.test(raw.slice(firstDelimiter));
+  if (ambiguous) {
+    errors.push(
+      'unbalanced " or ` in the command — flags around it can\'t be told apart from prompt text; close the quote (or remove it) and try again',
+    );
+  }
+  if (budgetWithoutValue && flags.budget === undefined) {
+    errors.push(
+      '--budget needs a value: use --budget=<usd> (or wrap the text in backticks if it is part of the prompt)',
+    );
+  }
 
   let harness = flags.harness !== undefined ? normalizeHarnessSpec(flags.harness) : undefined;
   let mode = flags.mode;
@@ -157,8 +220,11 @@ export function parseDelegateCommand(
   if (flags.verify) out.verify = flags.verify;
   if (addDirs.length > 0) out.addDirs = addDirs;
   // `=true` is tolerated; any other explicit value (`=false`, `=yes`, …) means off — fail closed
-  if (allowDangerousBare || flags['allow-dangerous']?.toLowerCase() === 'true') out.allowDangerous = true;
+  // never grant danger off an ambiguous parse — the error above stops the run anyway, but fail closed
+  if (!ambiguous && (allowDangerousBare || flags['allow-dangerous']?.toLowerCase() === 'true'))
+    out.allowDangerous = true;
   if (errors.length > 0) out.errors = errors;
+  if (notices.length > 0) out.notices = [...new Set(notices)];
   return out;
 }
 
