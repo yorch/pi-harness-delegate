@@ -121,7 +121,14 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
+/** Test-only knobs — production callers pass only `opts`. */
+export interface AcpRunnerInternals {
+  /** Overrides `HANDSHAKE_TIMEOUT_MS` so a hung-handshake test doesn't take 30s. */
+  handshakeTimeoutMs?: number;
+}
+
+export function runAcpHarness(opts: RunHarnessOptions, internals: AcpRunnerInternals = {}): Promise<HarnessResult> {
+  const handshakeTimeoutMs = internals.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     // Already cancelled (e.g. the user hit cancel while this run was still being set up) —
     // never spawn a process just to kill it.
@@ -396,7 +403,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
           protocolVersion: PROTOCOL_VERSION,
           clientCapabilities: {}, // no fs/terminal proxying — decline those requests if asked (see handleServerRequest)
         },
-        HANDSHAKE_TIMEOUT_MS,
+        handshakeTimeoutMs,
       );
       if (settled) return;
       // The client "should disconnect" (spec text) if the agent didn't echo back the version we
@@ -424,11 +431,11 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
         sessionResult = await sendRequest(
           'session/load',
           { sessionId: opts.resumeSessionId, ...sessionParams },
-          HANDSHAKE_TIMEOUT_MS,
+          handshakeTimeoutMs,
         );
         sessionId = opts.resumeSessionId;
       } else {
-        sessionResult = await sendRequest('session/new', sessionParams, HANDSHAKE_TIMEOUT_MS);
+        sessionResult = await sendRequest('session/new', sessionParams, handshakeTimeoutMs);
         sessionId =
           isRecord(sessionResult) && typeof sessionResult.sessionId === 'string' ? sessionResult.sessionId : null;
       }
@@ -454,7 +461,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
             `cannot verify the "${opts.permission}" permission tier would be honored over ACP`,
         );
       }
-      await sendRequest('session/set_mode', { sessionId, modeId }, HANDSHAKE_TIMEOUT_MS);
+      await sendRequest('session/set_mode', { sessionId, modeId }, handshakeTimeoutMs);
       if (settled) return;
       promptSent = true;
       costBaseline = opts.resumeSessionId ? prePromptCost : 0;

@@ -28,11 +28,22 @@ rl.on('line', (line) => {
     send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion, agentCapabilities: {} } });
     return;
   }
+  // a response to a request *we* (the fake agent) sent — echo what the client answered as message
+  // text, then finish the pending prompt, so a test can assert on the client's reply
+  if (msg.id === 'srv-1' && !msg.method) {
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(msg.result ?? { error: msg.error }) } } } });
+    send({ jsonrpc: '2.0', id: global.promptId, result: { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1, cachedReadTokens: 0 } } });
+    return;
+  }
   if (msg.method === 'session/new') {
+    if (mode === 'hang-new') return; // never answers — only the handshake timeout ends this
     if (mode === 'fail-handshake') {
       send({ jsonrpc: '2.0', id: msg.id, error: { code: -1, message: 'boom' } });
     } else if (mode === 'no-modes') {
       send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fake-session' } });
+    } else if (mode === 'config-modes') {
+      // opencode's dialect: no \`modes\` field, a configOptions entry with category "mode" instead
+      send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fake-session', configOptions: [{ id: 'mode', category: 'mode', type: 'select', currentValue: 'build', options: [] }] } });
     } else {
       // Real Devin/opencode/omp all advertise mode support one way or another on session/new —
       // see supportsSessionModes()'s two dialects (docs/acp-harness-assessment.md §4).
@@ -54,6 +65,19 @@ rl.on('line', (line) => {
     return;
   }
   if (msg.method === 'session/prompt') {
+    if (mode === 'hang-prompt') return; // the turn never ends — only timeout/abort can stop it
+    if (mode === 'perm-reject' || mode === 'perm-none' || mode === 'fs-read') {
+      global.promptId = msg.id;
+      if (mode === 'fs-read') {
+        send({ jsonrpc: '2.0', id: 'srv-1', method: 'fs/read_text_file', params: { sessionId: 'fake-session', path: '/etc/passwd' } });
+      } else {
+        const options = mode === 'perm-reject'
+          ? [{ optionId: 'allow', kind: 'allow_once', name: 'Allow' }, { optionId: 'nope-always', kind: 'reject_always', name: 'Never' }, { optionId: 'nope', kind: 'reject_once', name: 'No' }]
+          : [{ optionId: 'allow', kind: 'allow_once', name: 'Allow' }, { optionId: 'allow-all', kind: 'allow_always', name: 'Always' }];
+        send({ jsonrpc: '2.0', id: 'srv-1', method: 'session/request_permission', params: { sessionId: 'fake-session', toolCall: { toolCallId: 'w1' }, options } });
+      }
+      return;
+    }
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call', toolCallId: 'real-1', kind: 'read', rawInput: {} } } });
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'tool_call_update', toolCallId: 'real-1', status: 'completed' } } });
     send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'NEW ANSWER' } } } });
@@ -185,4 +209,131 @@ test('runAcpHarness: writing to an agent that already exited fails the run clean
       /exited|finished without|session ended/,
     );
   }
+});
+
+async function readPid(pidFile: string, timeoutMs = 5000): Promise<number> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    } catch {
+      // not written yet
+    }
+    await new Promise(r => setTimeout(r, 10));
+  }
+  throw new Error(`no pid written to ${pidFile}`);
+}
+
+test('runAcpHarness: a successful run resolves and kills the agent itself (ACP agents never exit on their own)', async () => {
+  const pidFile = tmpPidFile('success');
+  // the fake agent never exits by itself — resolving at all proves the runner didn't wait for 'close'
+  const res = await runAcpHarness({
+    harness: fakeHarness('default', pidFile),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'readonly',
+    timeoutMs: 20_000,
+  });
+  assert.equal(res.streamedText, 'NEW ANSWER');
+  assert.equal(res.isError, false);
+  assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed after success');
+});
+
+test('runAcpHarness: the overall timeout kills a hung turn', async () => {
+  const pidFile = tmpPidFile('timeout');
+  await assert.rejects(
+    runAcpHarness({
+      harness: fakeHarness('hang-prompt', pidFile),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'readonly',
+      timeoutMs: 500,
+    }),
+    /timed out after 500ms/,
+  );
+  assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed on timeout');
+});
+
+test('runAcpHarness: aborting the signal mid-turn kills the agent and rejects as cancelled', async () => {
+  const pidFile = tmpPidFile('abort');
+  const ac = new AbortController();
+  const run = runAcpHarness({
+    harness: fakeHarness('hang-prompt', pidFile),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'readonly',
+    timeoutMs: 20_000,
+    signal: ac.signal,
+  });
+  const pid = await readPid(pidFile);
+  ac.abort();
+  await assert.rejects(run, /cancelled/);
+  assert.ok(await waitForProcessExit(pid), 'agent process must be killed on abort');
+});
+
+test('runAcpHarness: a hung handshake step fails at the handshake timeout, not the overall one, and kills the agent', async () => {
+  const pidFile = tmpPidFile('hang-new');
+  const started = Date.now();
+  await assert.rejects(
+    runAcpHarness(
+      {
+        harness: fakeHarness('hang-new', pidFile),
+        prompt: 'hi',
+        cwd: process.cwd(),
+        permission: 'readonly',
+        timeoutMs: 60_000,
+      },
+      { handshakeTimeoutMs: 300 },
+    ),
+    /session\/new timed out after 300ms/,
+  );
+  assert.ok(Date.now() - started < 10_000, 'must not wait for the overall timeoutMs');
+  assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed');
+});
+
+test('runAcpHarness: session/request_permission is answered with a reject option, preferring reject_once', async () => {
+  const res = await runAcpHarness({
+    harness: fakeHarness('perm-reject'),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'edit',
+    timeoutMs: 20_000,
+  });
+  assert.deepEqual(JSON.parse(res.streamedText), { outcome: { outcome: 'selected', optionId: 'nope' } });
+});
+
+test('runAcpHarness: session/request_permission with no reject option is answered cancelled, never allowed', async () => {
+  const res = await runAcpHarness({
+    harness: fakeHarness('perm-none'),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'edit',
+    timeoutMs: 20_000,
+  });
+  assert.deepEqual(JSON.parse(res.streamedText), { outcome: { outcome: 'cancelled' } });
+});
+
+test('runAcpHarness: any other server-initiated request gets a JSON-RPC error (no fs/terminal proxying)', async () => {
+  const res = await runAcpHarness({
+    harness: fakeHarness('fs-read'),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'edit',
+    timeoutMs: 20_000,
+  });
+  const reply = JSON.parse(res.streamedText) as { error: { code: number; message: string } };
+  assert.equal(reply.error.code, -32601);
+  assert.match(reply.error.message, /fs\/read_text_file not supported/);
+});
+
+test('runAcpHarness: a configOptions "mode" category is accepted as session-mode support (opencode dialect)', async () => {
+  const res = await runAcpHarness({
+    harness: fakeHarness('config-modes'),
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'readonly',
+    timeoutMs: 20_000,
+  });
+  assert.equal(res.streamedText, 'NEW ANSWER');
 });
