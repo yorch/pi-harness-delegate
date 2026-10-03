@@ -740,3 +740,38 @@ test('/delegate --budget that cannot be honored is reported and runs nothing', a
     }
   });
 });
+
+test('fan-out comparison rows report real prompt tokens on both the tool and the command path', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const line = JSON.stringify({
+      type: 'result',
+      result: 'ok',
+      total_cost_usd: 0.01,
+      num_turns: 1,
+      session_id: 's',
+      usage: { input_tokens: 12_000, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    });
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [line], async () => {
+      const { tools, commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+      // `claude,` normalizes away on the command path; the tool path keeps it a (one-harness) fan-out
+      const out = (await tools
+        .get('delegate')
+        ?.execute('t', { harness: 'claude,', mode: 'tinker', task: 'x' }, undefined, undefined, ctx)) as {
+        content: { text: string }[];
+      };
+      assert.match(out.content[0].text, /12k tok/);
+      const orig = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (() => true) as typeof process.stdout.write;
+      try {
+        await commands.get('delegate')?.handler('claude,claude tinker do it', ctx);
+      } finally {
+        process.stdout.write = orig;
+      }
+      const report = takePendingReport();
+      assert.ok(report);
+      assert.match(report.content, /12k tok/);
+    });
+  });
+});

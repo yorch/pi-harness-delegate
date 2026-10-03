@@ -66,6 +66,34 @@ function supportsSessionModes(sessionResult: unknown): boolean {
   return false;
 }
 
+/**
+ * The cost to report for *this* run of a session whose harness reports a session-cumulative running
+ * total (opencode over ACP: `usage_update.cost.amount`). On a fresh session that total is this run's
+ * spend as-is. On a resume it also includes every prior turn — reporting it unchanged would make
+ * `/delegate status`'s spend rollup count those turns again on every resume — so the delta since
+ * `baselineUsd` (the same baseline the host budget check uses; see `costBaseline` in
+ * `runAcpHarness`) is reported instead.
+ *
+ * When the baseline wasn't replayed before the prompt (`baselineFromReplay: false`) it is the first
+ * running total seen *after* the prompt, so the delta under-counts that first step — and with only
+ * one post-prompt sample it's necessarily 0, which would be a fake "measured $0". That case is
+ * reported as `null` (unmeasured), per the honest-metrics convention. Pure.
+ */
+export function resumedRunCost(opts: {
+  totalCostUsd: number | null;
+  resumed: boolean;
+  baselineUsd: number | undefined;
+  baselineFromReplay: boolean;
+  postPromptCostSamples: number;
+}): number | null {
+  const { totalCostUsd, resumed, baselineUsd, baselineFromReplay, postPromptCostSamples } = opts;
+  if (!resumed || totalCostUsd === null) return totalCostUsd;
+  // no cost reported during this run at all — whatever total we hold is prior turns' spend
+  if (baselineUsd === undefined || postPromptCostSamples === 0) return null;
+  if (!baselineFromReplay && postPromptCostSamples < 2) return null;
+  return Math.max(0, totalCostUsd - baselineUsd);
+}
+
 /** Placeholder for a run the host stops mid-turn before the harness produced anything result-shaped. */
 function emptyResult(): StreamedResult {
   return {
@@ -112,6 +140,10 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     });
 
     const proc = spawn(opts.harness.binary, args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    // A write to a child that already exited surfaces as an async EPIPE 'error' on stdin — not as a
+    // throw from write() (writeLine's try/catch can't see it). Unhandled, that event would crash the
+    // host process; the run itself already ends through the 'close'/timeout/abort paths.
+    proc.stdin.on('error', () => {});
 
     const state: ParseState = { streamedText: '', activities: [], result: null, _harness: {} };
     let stderr = '';
@@ -129,6 +161,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     // never killing a resumed run for spend it didn't incur.
     let prePromptCost: number | undefined;
     let costBaseline: number | undefined;
+    let postPromptCostSamples = 0;
     const startAt = Date.now();
     const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
     const MAX_ACTIVITIES = 5000;
@@ -145,6 +178,14 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       const ttft = firstTokenAt !== null ? firstTokenAt - startAt : r.ttftMs;
       resolve({
         ...r,
+        // a resumed session's running total includes prior turns — report only this run's share
+        totalCostUsd: resumedRunCost({
+          totalCostUsd: r.totalCostUsd,
+          resumed: Boolean(opts.resumeSessionId),
+          baselineUsd: costBaseline,
+          baselineFromReplay: prePromptCost !== undefined,
+          postPromptCostSamples,
+        }),
         ttftMs: ttft,
         streamedText: state.streamedText,
         harness: opts.harness.name,
@@ -261,6 +302,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       if (typeof outcome.runningCostUsd === 'number') {
         if (!promptSent) prePromptCost = outcome.runningCostUsd;
         else {
+          postPromptCostSamples++;
           costBaseline ??= outcome.runningCostUsd;
           if (!settled && isCostOverBudget(opts.harness, opts.maxBudgetUsd, outcome.runningCostUsd, costBaseline)) {
             proc.kill('SIGKILL');

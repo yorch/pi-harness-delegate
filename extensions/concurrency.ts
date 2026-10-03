@@ -39,6 +39,23 @@ export interface AcquireSlotOptions {
   /** Aborts a `wait: true` poll early. */
   signal?: AbortSignal;
   pollIntervalMs?: number;
+  /** Source of the poll jitter (see `pollDelayMs`) — injectable so tests stay deterministic. */
+  random?: () => number;
+}
+
+/** Max extra delay added to each poll, as a fraction of `pollIntervalMs`. */
+export const POLL_JITTER_FRACTION = 0.25;
+
+/**
+ * One poll's wait: `pollIntervalMs` plus up to `POLL_JITTER_FRACTION` of it, at random. Without the
+ * jitter, every waiter of a fan-out (all launched in the same tick) re-checks in lockstep, so they
+ * keep hitting `acquireRunWithinLimits`'s write-then-recheck together — exactly the tight multi-way
+ * race that makes contenders all back off at once (a transient under-admission). Spreading the
+ * re-checks out breaks the lockstep. Pure given `random`.
+ */
+export function pollDelayMs(pollIntervalMs: number, random: () => number = Math.random): number {
+  const r = Math.min(1, Math.max(0, random()));
+  return pollIntervalMs + Math.floor(pollIntervalMs * POLL_JITTER_FRACTION * r);
 }
 
 function abortError(): Error {
@@ -77,21 +94,22 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * that race is handled exactly like losing the check above: throw (wait:false) or poll (wait:true).
  */
 export async function acquireSlot(opts: AcquireSlotOptions): Promise<() => void> {
-  const { harness, mode, config, wait, signal, pollIntervalMs = 200 } = opts;
+  const { harness, mode, config, wait, signal, pollIntervalMs = 200, random = Math.random } = opts;
+  const pause = () => sleep(pollDelayMs(pollIntervalMs, random), signal);
   for (;;) {
     if (signal?.aborted) throw abortError();
     const maxGlobal = getMaxConcurrent(config);
     const globalCount = activeCount();
     if (maxGlobal > 0 && globalCount >= maxGlobal) {
       if (!wait) throw new ConcurrencyLimitError('another delegate run is already in progress (global limit)');
-      await sleep(pollIntervalMs, signal);
+      await pause();
       continue;
     }
     const perHarnessLimit = getMaxConcurrent(config, harness);
     const perHarnessCount = activeCount(harness);
     if (perHarnessLimit > 0 && perHarnessCount >= perHarnessLimit) {
       if (!wait) throw new ConcurrencyLimitError(`another ${harness} run is already in progress`);
-      await sleep(pollIntervalMs, signal);
+      await pause();
       continue;
     }
 
@@ -100,7 +118,7 @@ export async function acquireSlot(opts: AcquireSlotOptions): Promise<() => void>
       // the check above passed, but another racer's write landed first and used up the slot —
       // handled exactly like hitting the cap on the check itself.
       if (!wait) throw new ConcurrencyLimitError(`another delegate run claimed the last available slot for ${harness}`);
-      await sleep(pollIntervalMs, signal);
+      await pause();
       continue;
     }
 

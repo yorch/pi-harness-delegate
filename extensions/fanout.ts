@@ -6,13 +6,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { OverlayHandle } from '@earendil-works/pi-tui';
-import {
-  buildFanoutReport,
-  type FanoutRunSummary,
-  formatMetrics,
-  formatToolUse,
-  orderFanoutResults,
-} from './activity.ts';
+import { buildFanoutReport, type FanoutRunSummary, formatToolUse, orderFanoutResults } from './activity.ts';
 import { fanoutResumeError, type parseDelegateCommand, resolveDefaults, resolveHarnessList } from './command.ts';
 import { type DelegateConfig, loadConfig } from './config.ts';
 import {
@@ -21,6 +15,7 @@ import {
   injectReport,
   isProjectTrusted,
   runDelegateForTool,
+  runMetrics,
   summarize,
   type ToolProgressUpdate,
 } from './engine.ts';
@@ -130,13 +125,7 @@ export async function runFanoutTool(
       return {
         harness: h,
         ok: !run.result.isError,
-        metrics: formatMetrics({
-          numTurns: run.result.numTurns,
-          totalCostUsd: run.result.totalCostUsd,
-          promptTokens: 0,
-          contextPercent: typeof run.details.contextPercent === 'number' ? run.details.contextPercent : null,
-          durationMs: run.result.durationMs,
-        }),
+        metrics: runMetrics(run.details),
         cost: run.result.totalCostUsd,
         body: summary.text,
         file: (run.details.file as string) ?? undefined,
@@ -496,13 +485,7 @@ export async function runFanoutCommand(
     }
     const { content, details, result, verify } = outcome.result;
     const summary = summarize(content);
-    const metrics = formatMetrics({
-      numTurns: result.numTurns,
-      totalCostUsd: result.totalCostUsd,
-      promptTokens: 0,
-      contextPercent: typeof details.contextPercent === 'number' ? details.contextPercent : null,
-      durationMs: typeof details.durationMs === 'number' ? details.durationMs : null,
-    });
+    const metrics = runMetrics(details);
     batcher.success(`${outcome.harnessName} ${parsed.mode ?? 'general'} — ${metrics}`);
     return {
       harness: outcome.harnessName,

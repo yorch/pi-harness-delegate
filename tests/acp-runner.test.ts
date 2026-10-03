@@ -168,3 +168,21 @@ test('runAcpHarness: an agent that never advertises session-mode support fails i
     /session-mode support/,
   );
 });
+
+test('runAcpHarness: writing to an agent that already exited fails the run cleanly (stdin EPIPE is handled)', async () => {
+  // closes its stdin, then answers initialize and lingers briefly — the runner's next write
+  // (session/new) lands on a pipe with no reader. Whether that surfaces as an async EPIPE 'error'
+  // event is runtime/timing dependent (bun doesn't reliably emit one here), so this is a smoke test
+  // that the run fails cleanly either way — the `proc.stdin.on('error')` guard is the insurance.
+  const script =
+    "process.stdin.once('data', d => { const m = JSON.parse(String(d).split('\\n')[0]); process.stdin.destroy(); " +
+    "process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } }) + '\\n'); " +
+    'setTimeout(() => process.exit(0), 300); });';
+  const harness: Harness = { ...devinHarness, binary: process.execPath, buildArgs: () => ['-e', script] };
+  for (let i = 0; i < 5; i++) {
+    await assert.rejects(
+      runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
+      /exited|finished without|session ended/,
+    );
+  }
+});

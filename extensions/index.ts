@@ -17,7 +17,7 @@
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { Container, Markdown, type OverlayHandle, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
-import { formatMetrics, formatToolUse, ToolCallIndex } from './activity.ts';
+import { formatToolUse, ToolCallIndex } from './activity.ts';
 import {
   aliasUsage,
   delegateUsage,
@@ -34,6 +34,7 @@ import {
   injectReport,
   isProjectTrusted,
   runDelegateForTool,
+  runMetrics,
   summarize,
   type ToolProgressUpdate,
   takePendingReport,
@@ -592,25 +593,7 @@ export default function (pi: ExtensionAPI) {
     const file = (details.file as string) ?? null;
     const sessionId = (details.sessionId as string) ?? null;
     const resumeHint = sessionId ? ` · resume: /delegate --resume=${sessionId} <prompt>` : '';
-    const usage = details.usage as
-      | {
-          inputTokens?: number;
-          outputTokens?: number;
-          cacheCreationInputTokens?: number;
-          cacheReadInputTokens?: number;
-        }
-      | undefined;
-    const promptTokens = usage
-      ? (usage.inputTokens ?? 0) + (usage.cacheCreationInputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0)
-      : 0;
-    const metrics = formatMetrics({
-      numTurns: typeof details.numTurns === 'number' ? details.numTurns : null,
-      totalCostUsd: typeof details.totalCostUsd === 'number' ? details.totalCostUsd : null,
-      promptTokens,
-      contextPercent: typeof details.contextPercent === 'number' ? (details.contextPercent as number) : null,
-      durationMs:
-        typeof details.durationMs === 'number' && details.durationMs !== null ? (details.durationMs as number) : null,
-    });
+    const metrics = runMetrics(details);
     injectReport(ctx, {
       harness: details.harness as string,
       mode: details.mode as string,
