@@ -68,6 +68,12 @@ interface PendingRequest {
 
 export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
   return new Promise((resolve, reject) => {
+    // Already cancelled (e.g. the user hit cancel while this run was still being set up) —
+    // never spawn a process just to kill it.
+    if (opts.signal?.aborted) {
+      reject(new Error('cancelled'));
+      return;
+    }
     const args = opts.harness.buildArgs({
       prompt: opts.prompt,
       cwd: opts.cwd,
@@ -100,6 +106,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       rejectAllPending(new Error('session ended'));
       const ttft = firstTokenAt !== null ? firstTokenAt - startAt : r.ttftMs;
       resolve({ ...r, ttftMs: ttft, streamedText: state.streamedText, harness: opts.harness.name });
@@ -108,6 +115,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       rejectAllPending(err);
       reject(err);
     };
@@ -265,14 +273,13 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     }, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     timer.unref?.();
 
-    opts.signal?.addEventListener(
-      'abort',
-      () => {
-        proc.kill('SIGKILL');
-        fail(new Error('cancelled'));
-      },
-      { once: true },
-    );
+    // Removed again in finish()/fail() — a long-lived signal (e.g. one shared by a fan-out, or the
+    // tool call's own) must not accumulate a dead listener per run.
+    function onAbort(): void {
+      proc.kill('SIGKILL');
+      fail(new Error('cancelled'));
+    }
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     // Drive the handshake. `session/prompt` has no separate timeout — it's the actual work,
     // bounded by the overall `timer` above like everything else.
