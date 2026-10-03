@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -194,6 +194,32 @@ test('acquireSlot: one shared AbortController cancels every still-queued waiter,
     // released explicitly, exactly like a real "still-running when cancel was pressed" harness
     assert.equal(activeCount(), 1);
     release();
+    assert.equal(activeCount(), 0);
+  });
+});
+
+test('acquireSlot: in-process counters never absorb another process’s registry entries', async () => {
+  await withAgentDir(async dir => {
+    const { acquireSlot, activeCount, inProcessActiveCount } = await import('../extensions/concurrency.ts');
+    const { countActiveRuns } = await import('../extensions/run-registry.ts');
+    // a run owned by a different (live) pid — what another pi process would have written
+    const runs = join(dir, 'delegate', 'runs');
+    mkdirSync(runs, { recursive: true });
+    const foreign = join(runs, `${process.ppid}-claude-foreign.json`);
+    writeFileSync(foreign, JSON.stringify({ pid: process.ppid, harness: 'claude', mode: 'review', startedAt: 0 }));
+    assert.equal(countActiveRuns('claude'), 1);
+
+    const release = await acquireSlot({ harness: 'claude', mode: 'review', config: makeConfig(5), wait: false });
+    assert.equal(inProcessActiveCount('claude'), 1, 'only our own run counts in-process');
+    assert.equal(inProcessActiveCount(), 1);
+    assert.equal(activeCount('claude'), 2, 'combined view still sees both');
+    release();
+    assert.equal(inProcessActiveCount('claude'), 0);
+    assert.equal(inProcessActiveCount(), 0);
+
+    // once the foreign run ends, nothing of it lingers in our counters
+    rmSync(foreign, { force: true });
+    assert.equal(activeCount('claude'), 0);
     assert.equal(activeCount(), 0);
   });
 });
