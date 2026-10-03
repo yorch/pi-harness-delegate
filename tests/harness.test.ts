@@ -5,6 +5,7 @@ import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
 import { parseCodexLine } from '../extensions/harnesses/codex.ts';
 import { parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
 import {
+  classifyNativePermission,
   getHarness,
   HARNESS_NAMES,
   isNativeDangerPermission,
@@ -181,11 +182,51 @@ test('isNativeDangerPermission: non-danger natives are not gated', () => {
   // `build` alone is opencode's EDIT token; gating it would block legitimate edit templates.
   assert.equal(isNativeDangerPermission(getHarness('opencode'), 'build'), false);
   assert.equal(isNativeDangerPermission(getHarness('devin'), 'ask'), false);
-  assert.equal(isNativeDangerPermission(getHarness('devin'), 'smart'), false);
   assert.equal(isNativeDangerPermission(getHarness('claude'), 'plan'), false);
   assert.equal(isNativeDangerPermission(getHarness('amp'), undefined), false);
   // Legacy spellings stay gated regardless of which harness is selected.
   assert.equal(isNativeDangerPermission(getHarness('opencode'), 'bypassPermissions'), true);
+});
+
+test('isNativeDangerPermission: every allowlisted native value is non-danger on its own harness', () => {
+  const safe: Record<string, string[]> = {
+    claude: ['plan', 'acceptEdits', 'manual', 'default'],
+    codex: ['read-only', 'workspace-write'],
+    opencode: ['plan', 'build'],
+    amp: ['always-ask', 'write'],
+    devin: ['plan', 'accept-edits', 'ask'],
+  };
+  for (const [name, values] of Object.entries(safe)) {
+    for (const v of values) assert.equal(isNativeDangerPermission(getHarness(name), v), false, `${name}:${v}`);
+    // each harness's own normalized readonly/edit tokens are on its allowlist
+    const map = getHarness(name)?.permissionMap;
+    for (const tier of ['readonly', 'edit'] as const) {
+      assert.equal(isNativeDangerPermission(getHarness(name), map?.[tier].join(' ')), false, `${name}:${tier}`);
+    }
+  }
+});
+
+test('isNativeDangerPermission: unlisted native values fail closed as danger', () => {
+  // Permissive modes the old denylist let through as `edit`.
+  assert.equal(isNativeDangerPermission(getHarness('claude'), 'auto'), true);
+  assert.equal(isNativeDangerPermission(getHarness('claude'), 'dontAsk'), true);
+  assert.equal(isNativeDangerPermission(getHarness('devin'), 'smart'), true);
+  // Anything never heard of, a custom opencode agent, case variants, another harness's safe value.
+  assert.equal(isNativeDangerPermission(getHarness('claude'), 'totally-new-mode'), true);
+  assert.equal(isNativeDangerPermission(getHarness('opencode'), 'my-custom-agent'), true);
+  assert.equal(isNativeDangerPermission(getHarness('claude'), 'PLAN'), true);
+  assert.equal(isNativeDangerPermission(getHarness('codex'), 'acceptEdits'), true);
+  // No harness resolved: nothing is known safe.
+  assert.equal(isNativeDangerPermission(undefined, 'plan'), true);
+});
+
+test('classifyNativePermission: none / safe / danger / unlisted', () => {
+  assert.equal(classifyNativePermission(getHarness('claude'), undefined), 'none');
+  assert.equal(classifyNativePermission(getHarness('claude'), '  '), 'none');
+  assert.equal(classifyNativePermission(getHarness('claude'), ' plan '), 'safe');
+  assert.equal(classifyNativePermission(getHarness('amp'), 'yolo'), 'danger');
+  assert.equal(classifyNativePermission(getHarness('codex'), 'bypassPermissions'), 'danger');
+  assert.equal(classifyNativePermission(getHarness('devin'), 'smart'), 'unlisted');
 });
 
 test('codex buildArgs: resume puts every flag before `--` and the session id/prompt after it', () => {

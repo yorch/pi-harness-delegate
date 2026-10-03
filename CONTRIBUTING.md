@@ -19,8 +19,11 @@ bun run lint        # Biome check (2 spaces, 120 cols, single quotes)
 bun run lint:fix    # auto-fix
 bun run typecheck   # tsc --noEmit (extensions/, tests/, scripts/)
 bun test            # bun:test (node:test compatible)
+bun run test:coverage  # tests + per-file line/function coverage (text table + coverage/lcov.info)
 bun run verify      # lint + typecheck + test (also runs in CI/release)
 ```
+
+Coverage is informational only — no thresholds, and it is not part of `verify` or CI. `coverage/` is git-ignored.
 
 CI runs `lint` + `typecheck` + `test` as separate steps (the same set `verify` bundles) + `check-packables` + changeset presence on every push/PR (`.github/workflows/ci.yml`).
 

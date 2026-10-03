@@ -4,6 +4,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -16,8 +17,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 test('config: delegate key preferred over claudeDelegate', async () => {
-  const dir = join(tmpdir(), `cfg-test-${Date.now()}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-test-'));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   try {
@@ -41,8 +41,7 @@ test('config: delegate key preferred over claudeDelegate', async () => {
 });
 
 test('config: legacy claudeDelegate migrates', async () => {
-  const dir = join(tmpdir(), `cfg-legacy-${Date.now()}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-legacy-'));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   try {
@@ -74,8 +73,7 @@ test('config: outputsDir partitioned', async () => {
 });
 
 async function loadConfigFromSettings(settings: unknown): Promise<import('../extensions/config.ts').DelegateConfig> {
-  const dir = join(tmpdir(), `cfg-transport-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-transport-'));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   try {
@@ -214,8 +212,7 @@ async function withSettingsDir<T>(
   write: ((dir: string) => void) | undefined,
   fn: (dir: string) => Promise<T> | T,
 ): Promise<T> {
-  const dir = join(tmpdir(), `cfg-source-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-source-'));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   try {
@@ -553,4 +550,22 @@ test('nonDefaultConfig: omits everything still at its default, keeps real overri
   assert.deepEqual(nonDefaultConfig(defaultDelegateConfig()), {});
   const cfg = { ...defaultDelegateConfig(), defaultHarness: 'codex', harnesses: { codex: { model: 'm' } } };
   assert.deepEqual(nonDefaultConfig(cfg), { defaultHarness: 'codex', harnesses: { codex: { model: 'm' } } });
+});
+
+test('parseMaxConcurrent / parsePerHarness: one parser for both the delegate and legacy keys', async () => {
+  const { parseMaxConcurrent, parsePerHarness } = await import('../extensions/config.ts');
+  assert.equal(parseMaxConcurrent(0), 0);
+  assert.equal(parseMaxConcurrent(3), 3);
+  assert.equal(parseMaxConcurrent(-1), undefined);
+  assert.equal(parseMaxConcurrent('4'), undefined);
+  assert.equal(parseMaxConcurrent(null), undefined);
+  assert.equal(parseMaxConcurrent({}), undefined);
+  assert.deepEqual(parseMaxConcurrent({ global: 2 }), { global: 2 });
+  assert.deepEqual(parseMaxConcurrent({ global: -2, perHarness: { claude: 1, codex: -1, amp: 'x' } }), {
+    perHarness: { claude: 1 },
+  });
+  assert.equal(parseMaxConcurrent({ global: 'x', perHarness: { codex: -1 } }), undefined);
+  assert.equal(parsePerHarness(undefined), undefined);
+  assert.equal(parsePerHarness({ claude: -1 }), undefined);
+  assert.deepEqual(parsePerHarness({ claude: 0, codex: 2 }), { claude: 0, codex: 2 });
 });

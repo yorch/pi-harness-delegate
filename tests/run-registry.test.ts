@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -11,8 +11,7 @@ import { test } from 'node:test';
 // resetting the env var and deleting `dir` before the test body executes a single line, silently
 // pointing every test at the real ~/.pi/agent instead of an isolated tmp dir.
 function withAgentDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = join(tmpdir(), `run-registry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'run-registry-'));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   return fn(dir).finally(() => {

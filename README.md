@@ -160,7 +160,17 @@ All frontmatter keys (one `key: value` per line; only `name` is required):
 | `addDirs` | Comma-separated extra directories the harness may access (merged with the call's `addDirs`/`--add-dir`) |
 | `harness` | Informational: which harness a template targets (shown by `/delegate list`) |
 
-**Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, use the native key (`permissionMode: dontAsk`, `sandbox: ...`) — it overrides `permission` for that harness.
+**Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, put the native value in `permission:` (e.g. `permission: ask` in a `devin/` template) — it is passed to that harness as-is. Legacy `permissionMode:`/`sandbox:` keys only map onto the normalized tiers (`plan` → `readonly`, `bypassPermissions` → `danger`, anything else → `edit`).
+
+Native values are checked against a per-harness **allowlist** of readonly/edit-equivalent modes; anything else — the harness's own danger mode *or a value not on the list* — is treated as `danger` and needs `allowDangerous` / `--allow-dangerous` (fail closed). Once confirmed, an unlisted value still runs as declared rather than being swapped for the harness's danger mode.
+
+| Harness | Native values treated as non-danger |
+| --- | --- |
+| `claude` | `plan`, `acceptEdits`, `manual`, `default` (`auto`, `dontAsk`, `bypassPermissions` → danger) |
+| `codex` | `read-only`, `workspace-write` |
+| `opencode` | `plan`, `build` (custom agents, `build --auto` → danger) |
+| `amp`/`omp` | `always-ask`, `write` |
+| `devin` | `plan`, `accept-edits`, `ask` (`smart`, `bypass` → danger) |
 
 **Verify:** `verify` is a shell command run **on the host** (never handed to the harness) right after it exits — e.g. `verify: bun test` on an `implement`/`docs`/`general` template turns "the harness says it's done" into an actual pass/fail. It's report-only: a failing verify is appended as its own section in the transcript and injected report, and surfaced in the tool result's `details.verify` (`{command, exitCode, ok}`), but it never changes whether the run itself is reported as an error — that stays whatever the harness reported. No template ships one by default — there's no universally-correct check command, so nothing is invented for you.
 
@@ -267,6 +277,7 @@ One deliberate, narrow exception: pi's own `Usage` (the footer/session token+cos
 - `/delegate --allow-dangerous` (and the `/claude`, `/codex`, … aliases) is the human-typed counterpart: it also asks you to confirm (`Allow dangerous delegation?`, naming the harness(es), mode, and that it runs with full, unrestricted permissions) — a fan-out gets one prompt covering every harness — and a decline runs nothing. In a non-interactive session it is refused outright, since there's no one to confirm with. It applies to that invocation only.
 - Likewise, when the **model** passes `addDirs` on the `delegate` tool, entries that resolve (after `..` and symlinks) outside the working directory need your interactive confirmation (`Allow access outside the project?`) and are refused in a non-interactive session. Entries inside the working directory, template `addDirs:`, and `/delegate --add-dir` are not gated.
 - Values that end up on a harness's command line (`sessionId`/`--resume`, `model`, `pr`) are validated first — notably, nothing starting with `-` is accepted, so a prompt-injected value can't masquerade as a CLI flag.
+- External content in the delegated prompt — the `git diff` for `diff`, the `gh pr diff` body for `pr`/`--pr`, and `gh`'s error output if the PR can't be fetched — is wrapped in an **untrusted-data block**: a backtick fence longer than any backtick run inside it, between `BEGIN/END UNTRUSTED DATA <nonce>` markers with a fresh random nonce, plus an instruction that the content is data to analyze, not instructions. A malicious PR can't close the block early or forge its end marker, and the PR is named in the prompt only as `owner/repo#n`/`#n`, never by its raw URL. A free-text `--scope` (e.g. `src/a.ts, src/b`, or a template's `defaultScope`) is delimited the same way between `BEGIN/END SCOPE <nonce>` markers, but framed as a restriction the harness must honor — it can narrow the task, never add to it. Your own task text stays the instruction and isn't fenced. This is a mitigation, not a guarantee — models can still be swayed by injected text.
 
 Review what the harness is asked to do before granting broad permissions.
 

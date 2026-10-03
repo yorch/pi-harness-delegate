@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { DelegateConfig } from '../extensions/config.ts';
 
 function withAgentDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = join(tmpdir(), `concurrency-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'concurrency-test-'));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   return fn(dir).finally(() => {
@@ -31,8 +30,51 @@ function makeConfig(maxConcurrent: DelegateConfig['maxConcurrent']): DelegateCon
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+/** Yield to the event loop once — a condition-free "let other work run" with no wall-clock duration. */
+function yieldTurn(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+/**
+ * A manually-stepped replacement for acquireSlot's poll `sleep`. Each poll parks until `step()`, so
+ * a test can observe "the waiter has polled N times and is still blocked" deterministically instead
+ * of sleeping a fixed duration and hoping the waiter got far enough. Honors the abort signal.
+ */
+function manualPoller() {
+  let polls = 0;
+  let parked: Array<() => void> = [];
+  const pollWatchers: Array<{ n: number; resolve: () => void }> = [];
+  const sleep = (_ms: number, signal?: AbortSignal): Promise<void> =>
+    new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error('aborted'));
+      const onAbort = () => reject(new Error('aborted'));
+      signal?.addEventListener('abort', onAbort, { once: true });
+      parked.push(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      });
+      polls++;
+      for (const w of pollWatchers.splice(0)) {
+        if (polls >= w.n) w.resolve();
+        else pollWatchers.push(w);
+      }
+    });
+  return {
+    sleep,
+    get polls() {
+      return polls;
+    },
+    /** Resolves once at least `n` polls have parked in total. */
+    untilPolls(n: number): Promise<void> {
+      return polls >= n ? Promise.resolve() : new Promise(resolve => pollWatchers.push({ n, resolve }));
+    },
+    /** Wake every currently-parked poll. */
+    step(): void {
+      const wake = parked;
+      parked = [];
+      for (const w of wake) w();
+    },
+  };
 }
 
 test('acquireSlot: wait:false throws immediately at global capacity', async () => {
@@ -72,14 +114,21 @@ test('acquireSlot: wait:true queues until a slot frees instead of throwing', asy
     const release = await acquireSlot({ harness: 'claude', mode: 'review', config, wait: false });
 
     let acquired = false;
-    const waiter = acquireSlot({ harness: 'codex', mode: 'review', config, wait: true, pollIntervalMs: 20 }).then(r => {
-      acquired = true;
-      return r;
-    });
+    const poller = manualPoller();
+    const waiter = acquireSlot({ harness: 'codex', mode: 'review', config, wait: true, sleep: poller.sleep }).then(
+      r => {
+        acquired = true;
+        return r;
+      },
+    );
 
-    await sleep(60);
+    // two full polls that each found the slot held — the waiter queued instead of throwing
+    await poller.untilPolls(1);
+    poller.step();
+    await poller.untilPolls(2);
     assert.equal(acquired, false, 'waiter must not acquire while the slot is held');
     release();
+    poller.step();
     const releaseWaiter = await waiter;
     assert.equal(acquired, true);
     releaseWaiter();
@@ -111,11 +160,11 @@ test('acquireSlot: a bounded pool of concurrent waiters never exceeds the cap', 
         mode: 'review',
         config,
         wait: true,
-        pollIntervalMs: 5,
+        sleep: yieldTurn,
       });
       current++;
       peak = Math.max(peak, current);
-      await sleep(5 + (i % 4) * 3);
+      for (let t = 0; t < 1 + (i % 4); t++) await yieldTurn();
       current--;
       release();
     };
@@ -139,15 +188,17 @@ test('acquireSlot: respects active runs already reported by the cross-process re
     );
     // freeing one external slot lets a waiter through
     let acquired = false;
-    const waiter = acquireSlot({ harness: 'opencode', mode: 'review', config, wait: true, pollIntervalMs: 10 }).then(
+    const poller = manualPoller();
+    const waiter = acquireSlot({ harness: 'opencode', mode: 'review', config, wait: true, sleep: poller.sleep }).then(
       r => {
         acquired = true;
         return r;
       },
     );
-    await sleep(30);
+    await poller.untilPolls(1);
     assert.equal(acquired, false);
     releaseRun(external1);
+    poller.step();
     const release = await waiter;
     assert.equal(acquired, true);
     release();
@@ -181,11 +232,12 @@ test('acquireSlot: one shared AbortController cancels every still-queued waiter,
     const release = await acquireSlot({ harness: 'claude', mode: 'review', config, wait: false });
 
     const ac = new AbortController();
+    const poller = manualPoller();
     const waiters = ['codex', 'opencode', 'amp'].map(h =>
-      acquireSlot({ harness: h, mode: 'review', config, wait: true, signal: ac.signal, pollIntervalMs: 10 }),
+      acquireSlot({ harness: h, mode: 'review', config, wait: true, signal: ac.signal, sleep: poller.sleep }),
     );
 
-    await sleep(30);
+    await poller.untilPolls(3); // every waiter is parked in its poll, i.e. genuinely queued
     ac.abort();
     for (const waiter of waiters) {
       await assert.rejects(() => waiter, /aborted/i);
@@ -266,20 +318,24 @@ test('acquireSlot: a waiting poll draws its jitter from the injected random', as
     const config = makeConfig(1);
     const release = await acquireSlot({ harness: 'claude', mode: 'review', config, wait: false });
     let draws = 0;
+    const poller = manualPoller();
     const waiter = acquireSlot({
       harness: 'codex',
       mode: 'review',
       config,
       wait: true,
-      pollIntervalMs: 5,
+      sleep: poller.sleep,
       random: () => {
         draws++;
         return 0;
       },
     });
-    await sleep(40);
-    assert.ok(draws > 0, 'every poll pause goes through the injected random');
+    await poller.untilPolls(1);
+    poller.step();
+    await poller.untilPolls(2);
+    assert.equal(draws, poller.polls, 'every poll pause goes through the injected random');
     release();
+    poller.step();
     const release2 = await waiter;
     release2();
   });
@@ -301,7 +357,7 @@ test('acquireSlot: the jittered delay is what each poll actually sleeps for', as
       sleep: async ms => {
         slept.push(ms);
         if (slept.length === 3) release(); // free the slot after a few polls
-        await sleep(1);
+        await yieldTurn();
       },
     });
     const release2 = await waiter;

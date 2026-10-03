@@ -58,25 +58,47 @@ export const normalizeHarnessName = resolveHarnessName;
 const LEGACY_DANGER_TOKENS = new Set(['bypassPermissions', 'danger-full-access', 'danger']);
 
 /**
- * Does this native permission string mean "unrestricted" for this harness?
+ * How a template's native permission string (`permission: <native>` escape hatch) classifies on
+ * this harness:
+ * - `none` — no native permission declared.
+ * - `safe` — on the harness's `safeNativePermissions` allowlist (readonly/edit-equivalent).
+ * - `danger` — the harness's own danger mode (`permissionMap.danger`, joined) or a legacy danger
+ *   spelling: running it is exactly the harness's normalized danger tier.
+ * - `unlisted` — anything else. Treated as danger (fail closed): a permissive mode nobody listed
+ *   (claude `auto`, devin `smart`, a custom opencode agent, …) must not slip past the gate.
+ */
+export type NativePermissionClass = 'none' | 'safe' | 'danger' | 'unlisted';
+
+export function classifyNativePermission(
+  harness: Harness | undefined,
+  nativePermission: string | undefined,
+): NativePermissionClass {
+  const native = nativePermission?.trim();
+  if (!native) return 'none';
+  if (LEGACY_DANGER_TOKENS.has(native)) return 'danger';
+  const danger = harness?.permissionMap?.danger;
+  if (Array.isArray(danger) && danger.length > 0 && native === danger.join(' ')) return 'danger';
+  if (harness?.safeNativePermissions?.includes(native)) return 'safe';
+  return 'unlisted';
+}
+
+/**
+ * Does this native permission string require the danger gate on this harness?
  *
  * A template can declare any native mode via the escape hatch (`permission: <native>`), and
  * `normalizePermission` files anything unrecognised under `nativePermission` with a normalized
- * tier of `edit`. Without this check, a template declaring `yolo` (amp) or `bypass` (devin) would
- * skip the `allowDangerous` gate entirely and run the harness unsandboxed while `delegate()`
- * recorded the run as `edit` — breaking the invariant that danger is only ever reachable through
- * an explicit per-call `allowDangerous: true`.
+ * tier of `edit`. This used to be a denylist (the harness's own danger mode + legacy spellings),
+ * so a permissive mode that wasn't listed ran unsandboxed while recorded as `edit`. It is now an
+ * allowlist: only values in the harness's `safeNativePermissions` pass as non-danger; everything
+ * else needs an explicit per-call `allowDangerous: true`, preserving the invariant that danger is
+ * never reachable without one.
  *
- * Matches the harness's own `permissionMap.danger`, joined, so a multi-token danger mode is
- * compared as a whole: opencode's danger is `['build', '--auto']`, and bare `build` is its *edit*
- * token — treating each token separately would wrongly gate legitimate `edit` templates.
+ * Multi-token danger modes compare joined: opencode's danger is `['build', '--auto']`, and bare
+ * `build` is its *edit* token (on the allowlist).
  */
 export function isNativeDangerPermission(harness: Harness | undefined, nativePermission: string | undefined): boolean {
-  if (!nativePermission) return false;
-  const native = nativePermission.trim();
-  if (LEGACY_DANGER_TOKENS.has(native)) return true;
-  const danger = harness?.permissionMap?.danger;
-  return Array.isArray(danger) && danger.length > 0 && native === danger.join(' ');
+  const cls = classifyNativePermission(harness, nativePermission);
+  return cls === 'danger' || cls === 'unlisted';
 }
 
 /**

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -8,6 +8,7 @@ import { claudeHarness } from '../extensions/harnesses/claude.ts';
 import { devinHarness } from '../extensions/harnesses/devin.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
 import { runHarness } from '../extensions/runner.ts';
+import { readPid, waitForProcessExit } from './helpers/wait.ts';
 
 /** A stdout harness that runs `node -e <script>` instead of a real CLI, parsed as Claude stream-json. */
 function nodeHarness(base: Harness, script: string): Harness {
@@ -36,17 +37,23 @@ for (const [label, run, base] of [
   ['runAcpHarness', runAcpHarness, devinHarness],
 ] as const) {
   test(`${label}: an already-aborted signal rejects without ever spawning the harness`, async () => {
-    const marker = markerPath();
-    const harness = nodeHarness(base, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`);
+    // spawn needs the argv `buildArgs` returns, so zero calls proves no process was ever started —
+    // no need to sleep and then check the child didn't leave a trace.
+    let built = 0;
+    const harness: Harness = {
+      ...nodeHarness(base, 'process.exit(0)'),
+      buildArgs: () => {
+        built++;
+        return ['-e', 'process.exit(0)'];
+      },
+    };
     const ac = new AbortController();
     ac.abort();
     await assert.rejects(
       run({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', signal: ac.signal }),
       /cancelled/,
     );
-    await new Promise(r => setTimeout(r, 150));
-    assert.equal(existsSync(marker), false, 'the harness process must not have been started');
-    rmSync(marker, { force: true });
+    assert.equal(built, 0, 'the harness process must not have been started');
   });
 }
 
@@ -78,34 +85,6 @@ test('runAcpHarness: the abort listener is removed when the run ends', async () 
 
 // ── runHarness: kill paths, caps, spawn failure ───────────────────────────
 
-async function readPid(pidFile: string, timeoutMs = 5000): Promise<number> {
-  const { readFileSync } = await import('node:fs');
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const pid = Number(readFileSync(pidFile, 'utf8'));
-      if (Number.isInteger(pid) && pid > 0) return pid;
-    } catch {
-      // not written yet
-    }
-    await new Promise(r => setTimeout(r, 10));
-  }
-  throw new Error(`no pid written to ${pidFile}`);
-}
-
-async function waitForExit(pid: number, timeoutMs = 2000): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      process.kill(pid, 0);
-    } catch {
-      return true;
-    }
-    await new Promise(r => setTimeout(r, 10));
-  }
-  return false;
-}
-
 /** A child that records its pid and then never exits (and never prints a result). */
 const hangScript = (pidFile: string) =>
   `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
@@ -123,7 +102,7 @@ test('runHarness: the timeout kills a hung child and rejects with the timeout me
       }),
       /timed out after 400ms/,
     );
-    assert.ok(await waitForExit(await readPid(pidFile)), 'child must be killed on timeout');
+    assert.ok(await waitForProcessExit(await readPid(pidFile)), 'child must be killed on timeout');
   } finally {
     rmSync(pidFile, { force: true });
   }
@@ -144,7 +123,7 @@ test('runHarness: aborting the signal mid-run kills the child and rejects as can
     const pid = await readPid(pidFile);
     ac.abort();
     await assert.rejects(run, /cancelled/);
-    assert.ok(await waitForExit(pid), 'child must be killed on abort');
+    assert.ok(await waitForProcessExit(pid), 'child must be killed on abort');
   } finally {
     rmSync(pidFile, { force: true });
   }
