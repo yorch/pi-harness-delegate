@@ -104,7 +104,10 @@ export async function acquireSlot(opts: AcquireSlotOptions): Promise<() => void>
       continue;
     }
 
-    activeRuns.set(harness, perHarnessCount + 1);
+    // In-process counters count only this process's own runs — never seed them from
+    // `activeCount()` (which already folds in other processes' registry entries), or a foreign
+    // run gets baked into our local count and outlives that run's own release.
+    activeRuns.set(harness, (activeRuns.get(harness) ?? 0) + 1);
     globalActiveRuns++;
     const runHandle = claim.status === 'acquired' ? claim.handle : null;
     let released = false;

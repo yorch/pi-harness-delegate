@@ -148,3 +148,11 @@ test('resolveHarnessFilter: against the real registry, list and history-style lo
   assert.deepEqual(resolveHarnessFilter('amp', real), { kind: 'known', harness: 'amp' });
   assert.deepEqual(resolveHarnessFilter('not-a-harness', real), { kind: 'unknown', requested: 'not-a-harness' });
 });
+
+test('fanoutResumeError: a session id cannot be resumed across a fan-out', async () => {
+  const { fanoutResumeError } = await import('../extensions/command.ts');
+  assert.equal(fanoutResumeError('claude', 'abc'), null);
+  assert.equal(fanoutResumeError('all', undefined), null);
+  assert.match(fanoutResumeError('all', 'abc') ?? '', /cannot resume session "abc" across a fan-out/);
+  assert.match(fanoutResumeError('claude,codex', 'abc') ?? '', /single harness|one harness/);
+});

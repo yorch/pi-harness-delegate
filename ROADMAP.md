@@ -2,7 +2,7 @@
 
 Working document for planned and in-flight work. Forked from pi-claude-delegate. Statuses: `done` · `in progress` · `todo` · `future`.
 
-Current release: **0.3.0** (npm `latest`). Sections 1–7 describe the fork/rename work that shipped in this package's initial release; they were originally drafted against `pi-claude-delegate`'s version numbering, which this package never adopted (its own line is 0.1.0 → 0.3.0).
+Current release: **0.6.1** (npm `latest` — see `CHANGELOG.md` for the authoritative history). Sections 1–7 describe the fork/rename work that shipped in this package's initial release; they were originally drafted against `pi-claude-delegate`'s version numbering, which this package never adopted (its own line starts at 0.1.0). Notes in §§3–5 written at that time ("placeholder parser", assumed CLI flags) were superseded by §9's real-schema work and are kept only as history.
 
 ---
 
@@ -32,19 +32,19 @@ Extract `Harness` interface (`NormalizedPermission`, `detect`, `buildArgs`, `par
 
 `extensions/harnesses/codex.ts` — `codex exec --json <prompt> --sandbox <level>`, tolerant JSONL + plain-text fallback, synthesizes result if needed, detects via `codex --version`, permissionMap read-only/workspace-write/danger-full-access.
 
-**Known gap:** Codex CLI args drift; `--thread-id` for resume, `maxBudgetUsd` not natively supported (ignored). Needs live capture of real JSONL to refine parser.
+**Superseded (§9):** the assumed `--thread-id`/`--ask-for-approval` flags never existed on `codex exec`; resume is the `codex exec resume [--json] -- <id> <prompt>` subcommand, and the parser is wired from a real capture. `maxBudgetUsd` has no native codex flag.
 
 ## 4. OpenCode harness
 
 **Status:** done (initial release)
 
-`extensions/harnesses/opencode.ts` — `opencode run --format json <prompt>`, tolerant parser, detects via `opencode --version`, permission not yet CLI-flagged (gated upstream). Placeholder parser — refine with real transcript.
+`extensions/harnesses/opencode.ts` — `opencode run --format json <prompt>`, tolerant parser, detects via `opencode --version`, ~~permission not yet CLI-flagged; placeholder parser~~ — superseded by §9: permission tiers map onto opencode's built-in agents (`--agent plan|build`, `--auto`), parser wired from a real capture (opencode 1.18.16).
 
 ## 5. Amp harness (omp alias)
 
 **Status:** done (initial release)
 
-`extensions/harnesses/amp.ts` — `amp --output jsonl <prompt>`, tolerant parser, detects via `amp --version` (fallback `omp`), alias `omp:amp`. Placeholder — refine with real transcript.
+`extensions/harnesses/amp.ts` — originally assumed `amp --output jsonl <prompt>`; superseded by §9: the wired CLI is `<amp|omp> -p --mode json --approval-mode …` (omp 17.2.9 real capture), binary resolved from `PATH`, alias `omp:amp`.
 
 ## 6. Tests for harness layer
 
@@ -157,8 +157,10 @@ verified with real `devin 3000.6.7` runs (see the doc's §8 errata for what impl
   hint or bypass ships; resume via `session/load` works and is wired (`opts.resumeSessionId`); an ACP
   session doesn't exit on its own once a prompt turn completes, so the runner finishes and kills the
   process itself rather than waiting on it.
-- `templates/devin/*.md` mirror `templates/claude/*.md` without `model:` frontmatter — no verified way
-  to set Devin's model over this version's ACP surface.
+- `templates/devin/*.md` mirror `templates/claude/*.md` without `model:` frontmatter. (At the time there
+  was no verified way to set Devin's model; it is now wired via the `devin acp --model <MODEL>` CLI flag —
+  verified against `devin acp --help` — with the model that actually ran read back from
+  `_cognition.ai/agent_stopped`.)
 - `all`/a comma-list fan-out picks up Devin automatically once `devin` is installed (`detectAll()`).
 
 ## 14. ACP support assessment (research, not shipped)
@@ -314,9 +316,26 @@ reasonably read as read-only — gave arbitrary host command execution.
 - The regression test was verified to **fail against the pre-fix implementation**, not merely pass against
   the fixed one.
 
+## 20. Review findings: slot leak, argv injection, correctness
+
+**Status:** done (this branch)
+
+- **Concurrency slot leak** — any throw between `acquireSlot()` and the harness exiting (a refused
+  `danger` template, a failing `git diff`/`gh pr diff`) leaked the slot for the process's lifetime. Danger
+  refusal now happens before the slot; the rest is in one `try/finally`. The in-process counter also
+  stopped absorbing other processes' registry entries.
+- **Security** — the tool's `allowDangerous` needs interactive human confirmation (fails closed with no
+  UI); `sessionId`/`model`/`pr`/`addDirs` are validated against argv injection (`validate.ts`), and
+  `codex exec resume`/`gh pr diff` take their positionals after `--`. Transcripts are owner-only.
+- **Correctness** — runners never spawn on an already-aborted signal and drop their abort listeners;
+  opencode/amp report `totalCostUsd` only when a cost field was actually seen; a `sessionId` can't be
+  fanned out; run-registry entries are written atomically.
+- **Features** — `addDirs` end to end (tool param, repeatable `/delegate --add-dir=`, `addDirs:` template
+  frontmatter); `maxBudgetUsd` is host-enforced (run killed, recorded as `budget exceeded`) for harnesses
+  that stream a cost but have no native budget flag, and flagged as unenforced when neither applies.
+
 ## Future
 
-- Devin's `model` isn't wired over ACP — no verified way to set it on this version's ACP surface (`session/new`'s request has no model field; `configOptions` only appears in responses). Revisit if a `session/set_config_option`-shaped request turns up.
 - See [`docs/pi-subagents-assessment.md`](docs/pi-subagents-assessment.md) for the researched comparison against `pi-subagents` and its prioritized candidates. Its "clearly worth doing" display/inspection items shipped in §12 above. Its "questionable" bucket (per-template memory, tool-description verbosity, refine-style auto-tuning) stays parked pending observed need; its "not applicable" bucket (session fork, live steering, workflow sandbox, missions, per-child drill-in transcript viewer, steering) is blocked upstream on the harness CLIs, not on this repo.
 
 ---

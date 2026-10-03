@@ -65,6 +65,8 @@ function extractAmpText(o: Record<string, unknown>): string | undefined {
 interface AmpHarnessState {
   sessionId?: string;
   costAccum?: number;
+  /** True once any turn_end actually carried a numeric `usage.cost.total` — absent is not $0. */
+  costSeen?: boolean;
   inputAccum?: number;
   outputAccum?: number;
   cacheReadAccum?: number;
@@ -137,11 +139,10 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
     // real usage lives at message.usage on turn_end (per-turn, not cumulative — see accumulation below)
     if (typeStr === 'turn_end' && isRecord(msg?.usage)) {
       const u = msg.usage as Record<string, unknown>;
-      const cost =
-        isRecord(u.cost) && typeof (u.cost as Record<string, unknown>).total === 'number'
-          ? ((u.cost as Record<string, unknown>).total as number)
-          : 0;
-      hs.costAccum = (hs.costAccum ?? 0) + cost;
+      if (isRecord(u.cost) && typeof (u.cost as Record<string, unknown>).total === 'number') {
+        hs.costAccum = (hs.costAccum ?? 0) + ((u.cost as Record<string, unknown>).total as number);
+        hs.costSeen = true;
+      }
       hs.inputAccum = (hs.inputAccum ?? 0) + (typeof u.input === 'number' ? u.input : 0);
       hs.outputAccum = (hs.outputAccum ?? 0) + (typeof u.output === 'number' ? u.output : 0);
       hs.cacheReadAccum = (hs.cacheReadAccum ?? 0) + (typeof u.cacheRead === 'number' ? u.cacheRead : 0);
@@ -176,7 +177,7 @@ export function parseAmpLine(line: string, state: ParseState): ParseOutcome {
               : state.streamedText || (text ?? ''),
       isError: o.is_error === true || isErrorTurn,
       numTurns: measured ? (hs.turnCount as number) : null,
-      totalCostUsd: measured ? (hs.costAccum as number) : null,
+      totalCostUsd: hs.costSeen ? (hs.costAccum as number) : null,
       sessionId:
         typeof o.session_id === 'string' ? o.session_id : typeof o.id === 'string' ? o.id : (hs.sessionId ?? null),
       stopReason:

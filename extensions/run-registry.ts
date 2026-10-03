@@ -17,7 +17,7 @@
  * `acquireRun`/`countActiveRuns` directly.
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { agentDir } from './config.ts';
 
@@ -35,6 +35,23 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** A `.json.tmp` this old can't be an in-flight write — acquireRun renames it within microseconds. */
+export const STALE_TMP_MS = 60_000;
+
+/**
+ * Remove a leftover `<pid>-<harness>-<rand>.json.tmp` if its writer crashed between write and
+ * rename (embedded pid dead) or it's older than `STALE_TMP_MS`. A live writer's tmp is left alone.
+ */
+function reapTmp(full: string, name: string): void {
+  try {
+    const pid = Number(name.split('-', 1)[0]);
+    const dead = !Number.isInteger(pid) || pid <= 0 || !isAlive(pid);
+    if (dead || Date.now() - statSync(full).mtimeMs > STALE_TMP_MS) rmSync(full, { force: true });
+  } catch {
+    // best-effort (already renamed/removed by its writer, or unreadable)
+  }
+}
+
 export interface RunHandle {
   file: string;
 }
@@ -45,7 +62,17 @@ export function acquireRun(harness: string, mode: string): RunHandle | null {
     const dir = runsDir();
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${process.pid}-${harness}-${Math.random().toString(36).slice(2, 8)}.json`);
-    writeFileSync(file, JSON.stringify({ pid: process.pid, harness, mode, startedAt: Date.now() }));
+    // Write-then-rename so a concurrent countActiveRuns() never sees a half-written entry: it
+    // treats unparseable `.json` files as corrupt and deletes them, which would silently drop a
+    // live run's registration mid-write. `.tmp` files are invisible to it (it only reads `.json`).
+    const tmp = `${file}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ pid: process.pid, harness, mode, startedAt: Date.now() }));
+      renameSync(tmp, file);
+    } catch (err) {
+      rmSync(tmp, { force: true });
+      throw err;
+    }
     return { file };
   } catch {
     return null;
@@ -63,7 +90,7 @@ export function releaseRun(handle: RunHandle | null): void {
 }
 
 /** Count active runs across processes (optionally filtered to one harness), cleaning up
- *  entries left behind by dead processes. Returns 0 (never throws) if the registry is unreadable. */
+ *  entries — and abandoned `.json.tmp` writes — left behind by dead processes. Returns 0 (never throws) if the registry is unreadable. */
 export function countActiveRuns(harness?: string): number {
   let files: string[];
   try {
@@ -73,6 +100,12 @@ export function countActiveRuns(harness?: string): number {
   }
   let count = 0;
   for (const f of files) {
+    // only complete entries count — `<entry>.json.tmp` writes (see acquireRun) are skipped, but
+    // reaped once they're demonstrably abandoned (crashed writer), so they don't pile up forever
+    if (f.endsWith('.json.tmp')) {
+      reapTmp(join(runsDir(), f), f);
+      continue;
+    }
     if (!f.endsWith('.json')) continue;
     const full = join(runsDir(), f);
     try {

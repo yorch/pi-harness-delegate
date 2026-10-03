@@ -21,12 +21,63 @@ export interface RunHarnessOptions {
 export interface HarnessResult extends StreamedResult {
   streamedText: string;
   harness: string;
+  /** Set when the runner itself killed the run for exceeding `maxBudgetUsd` (host enforcement). */
+  budgetExceeded?: boolean;
+}
+
+/**
+ * Host-side `maxBudgetUsd` enforcement for a harness with no native budget flag: true once the
+ * harness's own streamed running total (`totalCostUsd`) goes over the cap. A harness that reports
+ * no cost (`null`) can never trip this — `delegate()` flags that budget as unenforced instead.
+ */
+export function isOverBudget(
+  harness: Harness,
+  maxBudgetUsd: number | undefined,
+  r: StreamedResult | null,
+  baselineUsd = 0,
+): boolean {
+  return r !== null && isCostOverBudget(harness, maxBudgetUsd, r.totalCostUsd, baselineUsd);
+}
+
+/**
+ * The cost-only core of `isOverBudget`. `baselineUsd` is subtracted first: a harness whose reported
+ * total is *session*-cumulative (opencode over ACP) already includes every prior turn's spend on a
+ * resume, so only the delta since this run started counts against this run's cap.
+ */
+export function isCostOverBudget(
+  harness: Harness,
+  maxBudgetUsd: number | undefined,
+  costUsd: number | null | undefined,
+  baselineUsd = 0,
+): boolean {
+  return (
+    maxBudgetUsd !== undefined &&
+    harness.nativeBudget !== true &&
+    typeof costUsd === 'number' &&
+    costUsd - baselineUsd > maxBudgetUsd
+  );
+}
+
+/** The result recorded for a run the host stopped over budget. */
+export function budgetStoppedResult(r: StreamedResult, streamedText: string): StreamedResult {
+  return {
+    ...r,
+    isError: true,
+    stopReason: 'budget_exceeded',
+    result: r.result || streamedText || '(stopped: budget exceeded)',
+  };
 }
 
 import { DEFAULT_TIMEOUT_MS } from './harnesses/types.ts';
 
 export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
   return new Promise((resolve, reject) => {
+    // Already cancelled (e.g. the user hit cancel while this run was still being set up) —
+    // never spawn a process just to kill it.
+    if (opts.signal?.aborted) {
+      reject(new Error('cancelled'));
+      return;
+    }
     const args = opts.harness.buildArgs({
       prompt: opts.prompt,
       cwd: opts.cwd,
@@ -48,17 +99,25 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
     const MAX_ACTIVITIES = 5000;
 
-    const finish = (r: StreamedResult) => {
+    const finish = (r: StreamedResult, budgetExceeded = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       const ttft = firstTokenAt !== null ? firstTokenAt - startAt : r.ttftMs;
-      resolve({ ...r, ttftMs: ttft, streamedText: state.streamedText, harness: opts.harness.name });
+      resolve({
+        ...r,
+        ttftMs: ttft,
+        streamedText: state.streamedText,
+        harness: opts.harness.name,
+        ...(budgetExceeded ? { budgetExceeded: true } : {}),
+      });
     };
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       reject(err);
     };
 
@@ -90,6 +149,10 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
         // merge streamedText into result if empty
         if (!outcome.result.result) outcome.result.result = state.streamedText;
         state.result = outcome.result;
+        if (!settled && isOverBudget(opts.harness, opts.maxBudgetUsd, state.result)) {
+          proc.kill('SIGKILL');
+          finish(budgetStoppedResult(state.result, state.streamedText), true);
+        }
       }
     });
 
@@ -120,13 +183,12 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     }, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     timer.unref?.();
 
-    opts.signal?.addEventListener(
-      'abort',
-      () => {
-        proc.kill('SIGKILL');
-        fail(new Error('cancelled'));
-      },
-      { once: true },
-    );
+    // Removed again in finish()/fail() — a long-lived signal (e.g. one shared by a fan-out, or the
+    // tool call's own) must not accumulate a dead listener per run.
+    function onAbort(): void {
+      proc.kill('SIGKILL');
+      fail(new Error('cancelled'));
+    }
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
   });
 }

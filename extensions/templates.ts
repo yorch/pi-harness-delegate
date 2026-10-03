@@ -30,6 +30,8 @@ export interface DelegateTemplate {
   defaultScope?: string;
   /** Host-run shell command executed after the harness exits to check its claims (e.g. `bun test`). */
   verify?: string;
+  /** Extra directories the harness may access (`addDirs: ../shared, /opt/lib` — comma-separated). */
+  addDirs?: string[];
   prompt: string;
   harness?: string;
 }
@@ -65,6 +67,15 @@ export function normalizePermission(
   return { permission: 'edit', permissionMode: 'acceptEdits' };
 }
 
+/** Comma-separated frontmatter list (`a, b`) — undefined when absent or empty. */
+function parseList(raw: string | undefined): string[] | undefined {
+  const items = (raw ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : undefined;
+}
+
 /** Parse a template file: frontmatter (---\nkey: value\n---) + markdown body. */
 export function parseTemplate(text: string): DelegateTemplate | null {
   const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text.trimStart());
@@ -98,6 +109,7 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     defaultTask: meta.defaultTask || undefined,
     defaultScope: meta.defaultScope || undefined,
     verify: meta.verify || undefined,
+    addDirs: parseList(meta.addDirs),
     prompt: m[2].trim(),
     harness: meta.harness || undefined,
   };

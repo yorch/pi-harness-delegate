@@ -242,3 +242,9 @@ test('describeSkippedProjectTemplates: silent when nothing applies, explains whe
   const onlyStale = describeSkippedProjectTemplates({ dirs: [], staleTrustFile: true });
   assert.ok(onlyStale.join('\n').includes('no longer grants trust'));
 });
+
+test('parseTemplate: addDirs frontmatter is a comma-separated list', () => {
+  const t = parseTemplate('---\nname: x\naddDirs: ../shared, /opt/lib ,\n---\nbody');
+  assert.deepEqual(t?.addDirs, ['../shared', '/opt/lib']);
+  assert.equal(parseTemplate('---\nname: y\n---\nbody')?.addDirs, undefined);
+});

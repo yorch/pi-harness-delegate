@@ -18,6 +18,14 @@ export interface DelegateCommandArgs {
   pr?: string;
   /** Host-run verification command override (--verify=); takes precedence over the template's. */
   verify?: string;
+  /** Extra directories the harness may access (--add-dir=, repeatable). */
+  addDirs?: string[];
+  /**
+   * `--allow-dangerous` (or `--allow-dangerous=true`): a human asking to run this one invocation
+   * with danger permission. Only ever honored after an interactive confirm in the command handler
+   * — never inherited from config, never applied headless. Absent unless explicitly true.
+   */
+  allowDangerous?: boolean;
 }
 
 export type ClaudeCommandArgs = DelegateCommandArgs;
@@ -38,14 +46,26 @@ export function parseDelegateCommand(
   knownHarnesses: ReadonlySet<string> = KNOWN_HARNESSES,
 ): DelegateCommandArgs {
   const flags: Record<string, string> = {};
+  const addDirs: string[] = [];
   // supports quoted values ("…"/'…') so multi-word flags like --verify="bun test" survive intact
-  const rest = raw.replace(
+  let rest = raw.replace(
     /--([a-zA-Z-]+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g,
     (_m, k: string, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
-      flags[k] = dq ?? sq ?? bare ?? '';
+      const value = dq ?? sq ?? bare ?? '';
+      // --add-dir is the one repeatable flag — every occurrence is kept, in order
+      if (k === 'add-dir') {
+        if (value) addDirs.push(value);
+      } else flags[k] = value;
       return '';
     },
   );
+  // bare boolean flag(s): `--allow-dangerous` with no `=value`. Run after the `--key=value` pass, so
+  // a quoted flag value (e.g. --verify="echo --allow-dangerous") is already gone and can't match.
+  let allowDangerousBare = false;
+  rest = rest.replace(/(^|\s)--allow-dangerous(?=\s|$)/g, (_m, lead: string) => {
+    allowDangerousBare = true;
+    return lead;
+  });
 
   let harness = flags.harness?.toLowerCase();
   let mode = flags.mode;
@@ -78,6 +98,9 @@ export function parseDelegateCommand(
   if (flags.resume) out.sessionId = flags.resume;
   if (flags.pr) out.pr = flags.pr;
   if (flags.verify) out.verify = flags.verify;
+  if (addDirs.length > 0) out.addDirs = addDirs;
+  // `=true` is tolerated; any other explicit value (`=false`, `=yes`, …) means off — fail closed
+  if (allowDangerousBare || flags['allow-dangerous']?.toLowerCase() === 'true') out.allowDangerous = true;
   return out;
 }
 
@@ -90,6 +113,16 @@ export function isFanoutSpec(harness: string | undefined): boolean {
   if (!harness) return false;
   const lower = harness.trim().toLowerCase();
   return lower === 'all' || lower.includes(',');
+}
+
+/**
+ * A session id belongs to exactly one harness's session store, so resuming "it" across a fan-out
+ * is meaningless — every other harness would either error out or silently start fresh under a
+ * foreign id. Returns the rejection message (null when fine); shared by the tool and command paths.
+ */
+export function fanoutResumeError(harnessSpec: string | undefined, sessionId: string | undefined): string | null {
+  if (!sessionId || !isFanoutSpec(harnessSpec)) return null;
+  return `cannot resume session "${sessionId}" across a fan-out (harness "${harnessSpec}") — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=${sessionId} …)`;
 }
 
 export type HarnessFilterResolution =

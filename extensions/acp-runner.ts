@@ -21,7 +21,13 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { DEFAULT_TIMEOUT_MS, type Harness, type ParseState, type StreamedResult } from './harnesses/types.ts';
-import type { HarnessResult, RunHarnessOptions } from './runner.ts';
+import {
+  budgetStoppedResult,
+  type HarnessResult,
+  isCostOverBudget,
+  isOverBudget,
+  type RunHarnessOptions,
+} from './runner.ts';
 
 /** Bound on the initial handshake (initialize / session/new / session/set_mode) so a hung agent
  *  doesn't wedge the whole `timeoutMs` budget before `session/prompt` — the actual work — even starts. */
@@ -60,6 +66,26 @@ function supportsSessionModes(sessionResult: unknown): boolean {
   return false;
 }
 
+/** Placeholder for a run the host stops mid-turn before the harness produced anything result-shaped. */
+function emptyResult(): StreamedResult {
+  return {
+    result: '',
+    isError: false,
+    numTurns: null,
+    totalCostUsd: null,
+    sessionId: null,
+    stopReason: null,
+    permissionDenials: [],
+    durationMs: null,
+    durationApiMs: null,
+    ttftMs: null,
+    model: null,
+    contextWindow: null,
+    maxOutputTokens: null,
+    usage: null,
+  };
+}
+
 interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
@@ -68,6 +94,12 @@ interface PendingRequest {
 
 export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
   return new Promise((resolve, reject) => {
+    // Already cancelled (e.g. the user hit cancel while this run was still being set up) —
+    // never spawn a process just to kill it.
+    if (opts.signal?.aborted) {
+      reject(new Error('cancelled'));
+      return;
+    }
     const args = opts.harness.buildArgs({
       prompt: opts.prompt,
       cwd: opts.cwd,
@@ -89,6 +121,14 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     // prompt's — set once session/prompt is actually sent, so replayed text/activities (and a
     // replay-skewed TTFT) never reach the caller. See the handshake IIFE below.
     let promptSent = false;
+    // Host budget accounting. opencode's ACP `usage_update.cost` is a *session* running total, so
+    // on a resume it already includes every prior turn — `costBaseline` is what the session had
+    // spent before this run's prompt, and only the delta counts against `maxBudgetUsd`. A fresh
+    // session starts at 0. On a resume it's the last cost replayed before the prompt (if any), else
+    // the first cost seen after it — which under-counts that first step, a deliberate bias toward
+    // never killing a resumed run for spend it didn't incur.
+    let prePromptCost: number | undefined;
+    let costBaseline: number | undefined;
     const startAt = Date.now();
     const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
     const MAX_ACTIVITIES = 5000;
@@ -96,18 +136,26 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     let nextId = 1;
     const pending = new Map<number, PendingRequest>();
 
-    const finish = (r: StreamedResult) => {
+    const finish = (r: StreamedResult, budgetExceeded = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       rejectAllPending(new Error('session ended'));
       const ttft = firstTokenAt !== null ? firstTokenAt - startAt : r.ttftMs;
-      resolve({ ...r, ttftMs: ttft, streamedText: state.streamedText, harness: opts.harness.name });
+      resolve({
+        ...r,
+        ttftMs: ttft,
+        streamedText: state.streamedText,
+        harness: opts.harness.name,
+        ...(budgetExceeded ? { budgetExceeded: true } : {}),
+      });
     };
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       rejectAllPending(err);
       reject(err);
     };
@@ -210,6 +258,29 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       }
 
       const outcome = opts.harness.parseLine(line, state);
+      if (typeof outcome.runningCostUsd === 'number') {
+        if (!promptSent) prePromptCost = outcome.runningCostUsd;
+        else {
+          costBaseline ??= outcome.runningCostUsd;
+          if (!settled && isCostOverBudget(opts.harness, opts.maxBudgetUsd, outcome.runningCostUsd, costBaseline)) {
+            proc.kill('SIGKILL');
+            const partial = state.result ?? opts.harness.extractResult(state) ?? emptyResult();
+            const latchedId = state._harness?.sessionId;
+            finish(
+              budgetStoppedResult(
+                {
+                  ...partial,
+                  totalCostUsd: outcome.runningCostUsd,
+                  sessionId: partial.sessionId ?? (typeof latchedId === 'string' ? latchedId : null),
+                },
+                state.streamedText,
+              ),
+              true,
+            );
+            return;
+          }
+        }
+      }
       // Discard streamed text/activities from anything that arrives before the new session/prompt
       // is sent — on a resume that's the replayed prior conversation, not the new turn's own output.
       if (promptSent && outcome.streamedText) {
@@ -235,6 +306,22 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       if (outcome.result) {
         if (!outcome.result.result) outcome.result.result = state.streamedText;
         state.result = outcome.result;
+        // Same host-side budget enforcement as runner.ts (see isOverBudget). Replayed history
+        // from a resume can't trip it — only once the new prompt is in flight.
+        if (
+          promptSent &&
+          !settled &&
+          isOverBudget(
+            opts.harness,
+            opts.maxBudgetUsd,
+            state.result,
+            // a resume that never saw a cost during this run has no evidence of new spend at all
+            costBaseline ?? (opts.resumeSessionId ? Number.POSITIVE_INFINITY : 0),
+          )
+        ) {
+          proc.kill('SIGKILL');
+          finish(budgetStoppedResult(state.result, state.streamedText), true);
+        }
       }
     });
 
@@ -265,14 +352,13 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     }, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     timer.unref?.();
 
-    opts.signal?.addEventListener(
-      'abort',
-      () => {
-        proc.kill('SIGKILL');
-        fail(new Error('cancelled'));
-      },
-      { once: true },
-    );
+    // Removed again in finish()/fail() — a long-lived signal (e.g. one shared by a fan-out, or the
+    // tool call's own) must not accumulate a dead listener per run.
+    function onAbort(): void {
+      proc.kill('SIGKILL');
+      fail(new Error('cancelled'));
+    }
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     // Drive the handshake. `session/prompt` has no separate timeout — it's the actual work,
     // bounded by the overall `timer` above like everything else.
@@ -345,6 +431,7 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       await sendRequest('session/set_mode', { sessionId, modeId }, HANDSHAKE_TIMEOUT_MS);
       if (settled) return;
       promptSent = true;
+      costBaseline = opts.resumeSessionId ? prePromptCost : 0;
       await sendRequest('session/prompt', { sessionId, prompt: [{ type: 'text', text: opts.prompt }] });
       if (settled) return;
       // The agent doesn't exit on its own once the turn is done — an ACP session can outlive a
