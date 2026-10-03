@@ -28,6 +28,7 @@ import {
   isOverBudget,
   type RunHarnessOptions,
 } from './runner.ts';
+import { appendActivities, appendStreamed } from './stream-caps.ts';
 
 /** Bound on the initial handshake (initialize / session/new / session/set_mode) so a hung agent
  *  doesn't wedge the whole `timeoutMs` budget before `session/prompt` — the actual work — even starts. */
@@ -163,8 +164,6 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     let costBaseline: number | undefined;
     let postPromptCostSamples = 0;
     const startAt = Date.now();
-    const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
-    const MAX_ACTIVITIES = 5000;
 
     let nextId = 1;
     const pending = new Map<number, PendingRequest>();
@@ -327,24 +326,9 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       // is sent — on a resume that's the replayed prior conversation, not the new turn's own output.
       if (promptSent && outcome.streamedText) {
         if (firstTokenAt === null) firstTokenAt = Date.now();
-        if (state.streamedText.length < MAX_STREAMED) {
-          const remaining = MAX_STREAMED - state.streamedText.length;
-          const chunk =
-            outcome.streamedText.length > remaining
-              ? `${outcome.streamedText.slice(0, remaining)} [truncated ${outcome.streamedText.length - remaining} chars]`
-              : outcome.streamedText;
-          state.streamedText += chunk;
-          opts.onStream?.(chunk);
-        }
+        appendStreamed(state, outcome.streamedText, opts.onStream); // capped — see stream-caps.ts
       }
-      if (promptSent && outcome.activities) {
-        for (const a of outcome.activities) {
-          if (state.activities.length < MAX_ACTIVITIES) {
-            state.activities.push(a);
-            opts.onActivity?.(a);
-          }
-        }
-      }
+      if (promptSent && outcome.activities) appendActivities(state, outcome.activities, opts.onActivity);
       if (outcome.result) {
         if (!outcome.result.result) outcome.result.result = state.streamedText;
         state.result = outcome.result;

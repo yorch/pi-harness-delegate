@@ -9,6 +9,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
+/** @param {string} msg @returns {never} */
 function fail(msg) {
   console.error(`check-packables: ${msg}`);
   process.exit(1);
@@ -30,7 +31,8 @@ if (version === '0.0.0') {
 
 // Run pack dry-run and inspect file list. Prefer `npm pack --dry-run --json`
 // (matches the publish tool); fall back to `bun pm pack` output if needed.
-let packOutput;
+/** @type {string} */
+let packOutput = '';
 try {
   packOutput = execSync('npm pack --dry-run --json 2>/dev/null', { encoding: 'utf8' });
 } catch (e) {
@@ -64,7 +66,7 @@ try {
     );
     process.exit(0);
   } catch {
-    fail(`Failed to run pack dry-run: ${e.message}`);
+    fail(`Failed to run pack dry-run: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -72,22 +74,27 @@ let parsed;
 try {
   parsed = JSON.parse(packOutput);
 } catch (e) {
-  fail(`Failed to parse pack output as JSON: ${e.message}\n${packOutput.slice(0, 2000)}`);
+  fail(
+    `Failed to parse pack output as JSON: ${e instanceof Error ? e.message : String(e)}\n${packOutput.slice(0, 2000)}`,
+  );
 }
 
 // npm pack --json returns [{id, name, version, files: [{path,size}]}]
 const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+/** @type {Array<{ path?: string } | string>} */
 const files = entry?.files ?? [];
+/** @param {{ path?: string } | string} f @returns {string} */
+const pathOf = f => (typeof f === 'string' ? f : (f.path ?? ''));
 if (!Array.isArray(files) || files.length === 0) {
   fail(`pack for ${name}@${version} produced no files`);
 }
 
-const hasExtensions = files.some(f => (f.path ?? f).startsWith('extensions/'));
-const hasTemplates = files.some(f => (f.path ?? f).startsWith('templates/'));
+const hasExtensions = files.some(f => pathOf(f).startsWith('extensions/'));
+const hasTemplates = files.some(f => pathOf(f).startsWith('templates/'));
 if (!hasExtensions) {
   const list = files
     .slice(0, 20)
-    .map(f => `  - ${f.path ?? f}`)
+    .map(f => `  - ${pathOf(f)}`)
     .join('\n');
   fail(
     `Tarball for ${name}@${version} contains no files under extensions/. ` +
@@ -98,7 +105,7 @@ if (!hasExtensions) {
 if (!hasTemplates) {
   const list = files
     .slice(0, 20)
-    .map(f => `  - ${f.path ?? f}`)
+    .map(f => `  - ${pathOf(f)}`)
     .join('\n');
   fail(`Tarball for ${name}@${version} contains no files under templates/. ` + `First 20 files in tarball:\n${list}`);
 }

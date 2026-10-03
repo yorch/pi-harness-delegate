@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { Theme } from '@earendil-works/pi-coding-agent';
 import { fmtElapsed, renderEntry, truncateFeed } from '../extensions/progress.ts';
 
 test('fmtElapsed formats mm:ss', () => {
@@ -16,7 +17,7 @@ test('renderEntry styles by kind', () => {
     fg: (c: string, s: string) => `${c}:${s}`,
     bg: (_c: string, s: string) => s,
     bold: (s: string) => s,
-  };
+  } as unknown as Theme; // only fg is used by renderEntry
   assert.equal(renderEntry({ kind: 'tool', text: 'Bash: ls', ok: true }, theme), 'accent:▶ muted:Bash: lssuccess: ✓');
   assert.equal(renderEntry({ kind: 'tool', text: 'Bash: rm', ok: false }, theme), 'accent:▶ muted:Bash: rmerror: ✗');
   assert.equal(renderEntry({ kind: 'tool', text: 'Read: a.ts' }, theme), 'accent:▶ muted:Read: a.ts');

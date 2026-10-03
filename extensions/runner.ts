@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Harness, ParseState, StreamedResult } from './harnesses/types.ts';
+import { appendActivities, appendStreamed } from './stream-caps.ts';
 
 export interface RunHarnessOptions {
   harness: Harness;
@@ -96,8 +97,6 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     let settled = false;
     let firstTokenAt: number | null = null;
     const startAt = Date.now();
-    const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
-    const MAX_ACTIVITIES = 5000;
 
     const finish = (r: StreamedResult, budgetExceeded = false) => {
       if (settled) return;
@@ -126,25 +125,9 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       const outcome = opts.harness.parseLine(line, state);
       if (outcome.streamedText) {
         if (firstTokenAt === null) firstTokenAt = Date.now();
-        // Cap streamedText to prevent OOM on compromised harness
-        if (state.streamedText.length < MAX_STREAMED) {
-          const remaining = MAX_STREAMED - state.streamedText.length;
-          const chunk =
-            outcome.streamedText.length > remaining
-              ? `${outcome.streamedText.slice(0, remaining)} [truncated ${outcome.streamedText.length - remaining} chars]`
-              : outcome.streamedText;
-          state.streamedText += chunk;
-          opts.onStream?.(chunk);
-        }
+        appendStreamed(state, outcome.streamedText, opts.onStream); // capped — see stream-caps.ts
       }
-      if (outcome.activities) {
-        for (const a of outcome.activities) {
-          if (state.activities.length < MAX_ACTIVITIES) {
-            state.activities.push(a);
-            opts.onActivity?.(a);
-          }
-        }
-      }
+      if (outcome.activities) appendActivities(state, outcome.activities, opts.onActivity);
       if (outcome.result) {
         // merge streamedText into result if empty
         if (!outcome.result.result) outcome.result.result = state.streamedText;

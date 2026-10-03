@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseStreamLines } from '../extensions/stream-parse.ts';
+import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
+import type { ActivityEvent, ParseState, StreamedResult } from '../extensions/harnesses/types.ts';
+
+/** Feed lines through `parseClaudeLine` the way runner.ts does, collecting text/result/activity.
+ *  (Ported from the removed deprecated `stream-parse.ts` wrapper — same assertions, direct parser.) */
+function parseStreamLines(lines: Iterable<string>): {
+  streamedText: string;
+  result: StreamedResult | null;
+  activities: ActivityEvent[];
+} {
+  const state: ParseState = { streamedText: '', activities: [], result: null };
+  for (const line of lines) {
+    const out = parseClaudeLine(line, state);
+    if (out.streamedText) state.streamedText += out.streamedText;
+    if (out.activities) state.activities.push(...out.activities);
+    if (out.result) state.result = out.result;
+  }
+  return { streamedText: state.streamedText, result: state.result, activities: state.activities };
+}
 
 test('extracts text deltas and the final result', () => {
   const lines = [
