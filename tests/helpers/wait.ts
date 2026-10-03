@@ -19,15 +19,19 @@ export async function waitFor<T>(
   }
 }
 
-/** True once `pid` no longer exists (ESRCH). Rejects (via the hang guard) if it never exits. */
+/** True once `pid` no longer exists (ESRCH). Rejects (via the hang guard) if it never exits. Only
+ *  ESRCH means gone — EPERM means the pid exists but isn't ours to signal, i.e. still alive. */
 export async function waitForProcessExit(pid: number, timeoutMs?: number): Promise<boolean> {
   return waitFor(
     () => {
       try {
         process.kill(pid, 0); // still alive
         return undefined;
-      } catch {
-        return true; // gone
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') return true; // gone
+        if (code === 'EPERM') return undefined; // exists, owned by someone else — alive
+        throw err;
       }
     },
     { timeoutMs, label: `process ${pid} to exit` },
