@@ -14,7 +14,13 @@
  * Legacy: { claudeDelegate: {...} } is auto-migrated.
  */
 
-import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
+import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
+import {
+  type ExtensionAPI,
+  type ExtensionContext,
+  getMarkdownTheme,
+  type ToolDefinition,
+} from '@earendil-works/pi-coding-agent';
 import { Container, Markdown, type OverlayHandle, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { formatToolUse, ToolCallIndex } from './activity.ts';
@@ -36,7 +42,6 @@ import {
   runDelegateForTool,
   runMetrics,
   summarize,
-  type ToolProgressUpdate,
   takePendingReport,
 } from './engine.ts';
 import { closeWhenMounted, type RunUiState, runFanoutCommand, runFanoutTool } from './fanout.ts';
@@ -50,79 +55,97 @@ import { type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
 import { confirmDangerousCommand, confirmDangerousToolCall, confirmToolAddDirs } from './validate.ts';
 
+/** Tool-result `details` for the `delegate` tool (and its partial progress updates). */
+type DelegateToolDetails = Record<string, unknown>;
+
+const DELEGATE_TOOL_DESCRIPTION =
+  'Delegate a task to any harness (claude, codex, opencode, amp, devin) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude) — pass "all" or a comma list (e.g. "claude,codex") to fan out the same task to several harnesses and get back one comparison report. mode selects a template: review, plan, implement, security-audit, docs, general, or custom — some templates run a host-side check (e.g. "bun test") after the harness exits and report pass/fail as separate evidence; that is configured on the template, not a parameter here. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session.';
+
+const DELEGATE_TOOL_GUIDELINES: readonly string[] = [
+  'delegate runs a harness headless in the working directory and returns a streamed report with cost, token usage, and a session id for follow-ups.',
+  'Pass harness (claude|codex|opencode|amp|devin) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
+  'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
+  'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
+  'sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run\'s details (letters, digits, . _ : - only). It cannot be combined with a fan-out harness ("all" or a comma list) — a session belongs to one harness.',
+  'pr must be a PR number, an http(s) pull-request URL (https://<host>/<owner>/<repo>/pull/<n>), or owner/repo#123.',
+  'addDirs inside the working directory are accepted as-is; any entry outside it asks the human to confirm interactively and is refused in a non-interactive session.',
+  'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
+];
+
+const DELEGATE_TOOL_PARAMS = Type.Object({
+  harness: Type.Optional(
+    Type.String({
+      description:
+        'Harness to use: claude, codex, opencode, amp (aliases: omp), devin. "all" or a comma list (e.g. "claude,codex") fans out to each detected harness. Defaults to config defaultHarness.',
+    }),
+  ),
+  task: Type.String({ description: 'The task/intent to delegate. Be specific.' }),
+  mode: Type.Optional(
+    Type.String({
+      description:
+        'Template/mode to run: review, plan, implement, security-audit, docs, general, or custom. Defaults to config defaultMode.',
+    }),
+  ),
+  scope: Type.Optional(
+    Type.String({
+      description:
+        'Restrict the work: diff (git diff), pr (PR diff), comma/space-separated path list, or omit for whole repo.',
+    }),
+  ),
+  model: Type.Optional(Type.String({ description: 'Model (e.g. sonnet, opus, gpt-5). Defaults to template/config.' })),
+  maxBudgetUsd: Type.Optional(Type.Number({ description: 'Hard spend cap in USD for the run.' })),
+  sessionId: Type.Optional(
+    Type.String({
+      description: 'Resume an existing delegated session (pass its session id from a previous run details).',
+    }),
+  ),
+  allowDangerous: Type.Optional(
+    Type.Boolean({
+      description:
+        'Escalate to danger permission (unrestricted). Always requires interactive human confirmation; refused without a UI.',
+    }),
+  ),
+  pr: Type.Optional(
+    Type.String({ description: 'GitHub PR number, http(s) PR URL, or owner/repo#123 (alternative to scope pr).' }),
+  ),
+  addDirs: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        'Extra directories the harness may access. Relative paths resolve against the working directory. Any entry that resolves (after symlinks) outside the working directory requires interactive human confirmation and is refused without a UI. Not every harness supports this (opencode ignores it; codex ignores it on resume).',
+    }),
+  ),
+  // Deliberately no `verify` param — see the trust-model comment on DelegateToolParams/runVerify.
+});
+
+/** The text parts of a tool result, joined — images (never produced by this tool) are skipped. */
+function textOf(content: readonly (TextContent | ImageContent)[] | undefined): string {
+  return (content ?? []).flatMap(c => (c.type === 'text' ? [c.text] : [])).join('\n');
+}
+
 export default function (pi: ExtensionAPI) {
   const ui: RunUiState = { activeRunId: 0, activeOverlay: null };
 
   // ── Tools ────────────────────────────────────────────────────────────────
-  const delegateToolDef = {
-    name: 'delegate',
-    label: 'Delegate',
-    description:
-      'Delegate a task to any harness (claude, codex, opencode, amp, devin) running headless in the repo and return its streamed report (cost, token usage, context %, session id). harness selects the backend (default from config, fallback claude) — pass "all" or a comma list (e.g. "claude,codex") to fan out the same task to several harnesses and get back one comparison report. mode selects a template: review, plan, implement, security-audit, docs, general, or custom — some templates run a host-side check (e.g. "bun test") after the harness exits and report pass/fail as separate evidence; that is configured on the template, not a parameter here. scope restricts work: diff for current git diff, pr for PR diff, path list, or whole repo. sessionId continues a prior session.',
-    promptSnippet: 'Delegate a subtask to a harness and return its report',
-    promptGuidelines: [
-      'delegate runs a harness headless in the working directory and returns a streamed report with cost, token usage, and a session id for follow-ups.',
-      'Pass harness (claude|codex|opencode|amp|devin) + focused task string + intent and constraints. Use scope: diff for current git diff, pr for PR diff, path list, or omit for whole repo.',
-      'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
-      'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
-      'sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run\'s details (letters, digits, . _ : - only). It cannot be combined with a fan-out harness ("all" or a comma list) — a session belongs to one harness.',
-      'pr must be a PR number, an http(s) pull-request URL (https://<host>/<owner>/<repo>/pull/<n>), or owner/repo#123.',
-      'addDirs inside the working directory are accepted as-is; any entry outside it asks the human to confirm interactively and is refused in a non-interactive session.',
-      'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
-    ],
-    parameters: Type.Object({
-      harness: Type.Optional(
-        Type.String({
-          description:
-            'Harness to use: claude, codex, opencode, amp (aliases: omp), devin. "all" or a comma list (e.g. "claude,codex") fans out to each detected harness. Defaults to config defaultHarness.',
-        }),
-      ),
-      task: Type.String({ description: 'The task/intent to delegate. Be specific.' }),
-      mode: Type.Optional(
-        Type.String({
-          description:
-            'Template/mode to run: review, plan, implement, security-audit, docs, general, or custom. Defaults to config defaultMode.',
-        }),
-      ),
-      scope: Type.Optional(
-        Type.String({
-          description:
-            'Restrict the work: diff (git diff), pr (PR diff), comma/space-separated path list, or omit for whole repo.',
-        }),
-      ),
-      model: Type.Optional(
-        Type.String({ description: 'Model (e.g. sonnet, opus, gpt-5). Defaults to template/config.' }),
-      ),
-      maxBudgetUsd: Type.Optional(Type.Number({ description: 'Hard spend cap in USD for the run.' })),
-      sessionId: Type.Optional(
-        Type.String({
-          description: 'Resume an existing delegated session (pass its session id from a previous run details).',
-        }),
-      ),
-      allowDangerous: Type.Optional(
-        Type.Boolean({
-          description:
-            'Escalate to danger permission (unrestricted). Always requires interactive human confirmation; refused without a UI.',
-        }),
-      ),
-      pr: Type.Optional(
-        Type.String({ description: 'GitHub PR number, http(s) PR URL, or owner/repo#123 (alternative to scope pr).' }),
-      ),
-      addDirs: Type.Optional(
-        Type.Array(Type.String(), {
-          description:
-            'Extra directories the harness may access. Relative paths resolve against the working directory. Any entry that resolves (after symlinks) outside the working directory requires interactive human confirmation and is refused without a UI. Not every harness supports this (opencode ignores it; codex ignores it on resume).',
-        }),
-      ),
-      // Deliberately no `verify` param — see the trust-model comment on DelegateToolParams/runVerify.
-    }),
-    async execute(
-      _toolCallId: string,
-      params: DelegateToolParams,
-      signal: AbortSignal | undefined,
-      onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
-      ctx: ExtensionContext,
-    ) {
+
+  /**
+   * Build one registration of the `delegate` tool. The primary tool and the deprecated
+   * `claude_delegate` alias are the same definition — same schema, guidelines, execute path and
+   * renderers — differing only in the fields `spec` sets (name/label/description/snippet) and, for
+   * the alias, a pinned harness applied before anything else in `execute`.
+   */
+  const makeDelegateTool = (
+    name: string,
+    spec: { label: string; description: string; promptSnippet: string; forceHarness?: string },
+  ): ToolDefinition<typeof DELEGATE_TOOL_PARAMS, DelegateToolDetails> => ({
+    name,
+    label: spec.label,
+    description: spec.description,
+    promptSnippet: spec.promptSnippet,
+    promptGuidelines: [...DELEGATE_TOOL_GUIDELINES],
+    parameters: DELEGATE_TOOL_PARAMS,
+    async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
+      // the deprecated alias pins its harness; everything below sees the effective params
+      const params: DelegateToolParams = spec.forceHarness ? { ...rawParams, harness: spec.forceHarness } : rawParams;
       const config = loadConfig();
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
@@ -161,15 +184,14 @@ export default function (pi: ExtensionAPI) {
         : `${details.harness} ${details.mode} (${result.numTurns ?? '—'} turn(s), ${formatCost(result.totalCostUsd)})${resumed}`;
       const body = result.isError ? `\n${summary.text}` : `\n\n${summary.text}`;
       const footer = summary.truncated ? `\nFull output: ${details.file}` : `\nTranscript: ${details.file}`;
-      (details as Record<string, unknown>).markdown = summary.text;
+      details.markdown = summary.text;
       return {
         content: [{ type: 'text', text: `${head}${body}${footer}` }],
         details,
         usage: result.usage ? mapClaudeUsage({ ...result.usage, totalCostUsd: result.totalCostUsd }) : undefined,
       };
     },
-    renderCall(args: unknown, theme: { fg: (c: string, s: string) => string; bg: (c: string, s: string) => string }) {
-      const params = args as { harness?: string; mode?: string; task?: string };
+    renderCall(params, theme) {
       const harness = params.harness ?? 'delegate';
       const mode = params.mode ?? 'general';
       const task = params.task ?? '';
@@ -178,19 +200,12 @@ export default function (pi: ExtensionAPI) {
         theme.bg('toolPendingBg', s),
       );
     },
-    renderResult(
-      result: { content?: { type: string; text: string }[]; details?: Record<string, unknown> },
-      options: { isPartial: boolean },
-      theme: { fg: (c: string, s: string) => string; bg: (c: string, s: string) => string },
-    ) {
+    renderResult(result, options, theme) {
       if (options.isPartial) {
-        const text = (result.content ?? [])
-          .filter(c => c.type === 'text')
-          .map(c => c.text)
-          .join('\n');
+        const text = textOf(result.content);
         return new Text(text, 1, 1, s => theme.bg('toolPendingBg', s));
       }
-      const details = (result.details ?? {}) as Record<string, unknown>;
+      const details: DelegateToolDetails = result.details ?? {};
       const harness = typeof details.harness === 'string' ? details.harness : 'delegate';
       const mode = typeof details.mode === 'string' ? details.mode : 'delegate';
       const cost = typeof details.totalCostUsd === 'number' ? details.totalCostUsd : null;
@@ -213,10 +228,7 @@ export default function (pi: ExtensionAPI) {
       const md = typeof details.markdown === 'string' && details.markdown ? details.markdown : null;
       if (md) container.addChild(new Markdown(md, 1, 1, getMarkdownTheme()));
       else {
-        const text = (result.content ?? [])
-          .filter(c => c.type === 'text')
-          .map(c => c.text)
-          .join('\n');
+        const text = textOf(result.content);
         container.addChild(new Text(text, 1, 1));
       }
       const foot: string[] = [];
@@ -225,46 +237,25 @@ export default function (pi: ExtensionAPI) {
       if (foot.length > 0) container.addChild(new Text(theme.fg('dim', foot.join('   ')), 1, 1));
       return container;
     },
-  };
+  });
 
-  // SAFETY: delegateToolDef satisfies registerTool params via TypeBox, widened for alias registration
-  pi.registerTool(delegateToolDef as unknown as Parameters<typeof pi.registerTool>[0]); // SAFETY: delegateToolDef satisfies registerTool params
+  pi.registerTool(
+    makeDelegateTool('delegate', {
+      label: 'Delegate',
+      description: DELEGATE_TOOL_DESCRIPTION,
+      promptSnippet: 'Delegate a subtask to a harness and return its report',
+    }),
+  );
 
   // deprecated alias
-  pi.registerTool({
-    name: 'claude_delegate',
-    label: 'Claude Delegate (deprecated)',
-    description:
-      'Deprecated alias for delegate{harness:claude}. Use delegate tool with harness:claude instead. ' +
-      (delegateToolDef as { description: string }).description,
-    promptSnippet: 'Delegate a subtask to Claude Code (deprecated alias)',
-    // SAFETY: delegateToolDef promptGuidelines is string[] from literal, safe to spread
-    promptGuidelines: [...(delegateToolDef as unknown as { promptGuidelines: string[] }).promptGuidelines], // SAFETY: promptGuidelines is string[]
-    parameters: (delegateToolDef as { parameters: unknown }).parameters as never,
-    async execute(
-      toolCallId: string,
-      params: DelegateToolParams,
-      signal: AbortSignal | undefined,
-      onUpdate: never,
-      ctx: ExtensionContext,
-    ) {
-      return (
-        // SAFETY: deprecated alias delegates to primary tool, shape identical
-        (
-          delegateToolDef as unknown as {
-            // SAFETY: alias shape identical
-            execute: (a: string, b: unknown, c: unknown, d: unknown, e: unknown) => Promise<unknown>;
-          }
-        ).execute(toolCallId, { ...params, harness: 'claude' }, signal, onUpdate, ctx)
-      );
-    },
-    // SAFETY: delegateToolDef renderCall matches expected signature
-    renderCall: (delegateToolDef as unknown as { renderCall: (a: unknown, b: unknown) => unknown }).renderCall, // SAFETY: matches signature
-    // SAFETY: delegateToolDef renderResult matches expected signature
-    renderResult: (delegateToolDef as unknown as { renderResult: (a: unknown, b: unknown, c: unknown) => unknown }) // SAFETY: matches signature
-      .renderResult,
-    // SAFETY: final alias tool matches registerTool overload
-  } as unknown as Parameters<typeof pi.registerTool>[0]); // SAFETY: alias tool matches overload
+  pi.registerTool(
+    makeDelegateTool('claude_delegate', {
+      label: 'Claude Delegate (deprecated)',
+      description: `Deprecated alias for delegate{harness:claude}. Use delegate tool with harness:claude instead. ${DELEGATE_TOOL_DESCRIPTION}`,
+      promptSnippet: 'Delegate a subtask to Claude Code (deprecated alias)',
+      forceHarness: 'claude',
+    }),
+  );
 
   // ── Commands ─────────────────────────────────────────────────────────────
 

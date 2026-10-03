@@ -4,6 +4,7 @@
  * index.ts with no behavior change; the command path's overlay state is passed in as `RunUiState`.
  */
 
+import type { Usage } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { OverlayHandle } from '@earendil-works/pi-tui';
 import { buildFanoutReport, type FanoutRunSummary, formatToolUse, orderFanoutResults } from './activity.ts';
@@ -66,7 +67,7 @@ export async function runFanoutTool(
   params: DelegateToolParams,
   signal: AbortSignal | undefined,
   onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
-): Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown>; usage?: unknown }> {
+): Promise<{ content: { type: 'text'; text: string }[]; details: Record<string, unknown>; usage?: Usage }> {
   const resumeErr = fanoutResumeError(params.harness, params.sessionId);
   if (resumeErr) throw new Error(resumeErr);
   validateDelegateInputs({

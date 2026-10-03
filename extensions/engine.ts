@@ -582,7 +582,7 @@ export function injectReport(
 }
 
 export interface ToolProgressUpdate {
-  content: { type: string; text: string }[];
+  content: { type: 'text'; text: string }[];
   details: { progress: number };
 }
 

@@ -149,6 +149,25 @@ async function loadExtension(exec: (cmd: string, args: string[]) => Promise<unkn
   return { tools, commands };
 }
 
+test('delegate tool: claude_delegate is the same definition as delegate, differing only where intended', async () => {
+  const { tools } = await loadExtension();
+  const primary = tools.get('delegate') as unknown as Record<string, unknown>;
+  const alias = tools.get('claude_delegate') as unknown as Record<string, unknown>;
+  assert.ok(primary && alias);
+  assert.equal(primary.label, 'Delegate');
+  assert.equal(alias.label, 'Claude Delegate (deprecated)');
+  assert.equal(primary.promptSnippet, 'Delegate a subtask to a harness and return its report');
+  assert.equal(alias.promptSnippet, 'Delegate a subtask to Claude Code (deprecated alias)');
+  assert.equal(
+    alias.description,
+    `Deprecated alias for delegate{harness:claude}. Use delegate tool with harness:claude instead. ${primary.description}`,
+  );
+  assert.deepEqual(alias.promptGuidelines, primary.promptGuidelines);
+  assert.equal(alias.parameters, primary.parameters);
+  assert.equal(typeof alias.renderCall, 'function');
+  assert.equal(typeof alias.renderResult, 'function');
+});
+
 test('delegate tool: allowDangerous with no UI is refused before anything runs', async () => {
   await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
     const { tools } = await loadExtension(async () => {
