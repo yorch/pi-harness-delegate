@@ -136,7 +136,7 @@ const warnedUntrustedProjects = new Set<string>();
 
 export function warnIfProjectTemplatesSkipped(ctx: ExtensionContext, trusted: boolean): void {
   if (trusted || warnedUntrustedProjects.has(ctx.cwd)) return;
-  const lines = describeSkippedProjectTemplates(projectTemplatePresence(ctx.cwd));
+  const lines = describeSkippedProjectTemplates(projectTemplatePresence(ctx.cwd, HARNESS_NAMES));
   if (lines.length === 0) return;
   warnedUntrustedProjects.add(ctx.cwd);
   const msg = lines.join('\n');

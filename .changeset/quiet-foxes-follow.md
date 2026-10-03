@@ -10,6 +10,6 @@ Review follow-ups:
 - The progress window's `+N earlier` marker no longer pushes the feed one line past its limit.
 - Fan-out comparison rows report the real prompt-token count instead of omitting it.
 - Resumed opencode ACP runs report only that run's spend, so `/delegate status` no longer counts earlier turns again.
-- The untrusted-project warning now also fires for per-harness project templates (`.pi/delegate/templates/<harness>/`).
+- The untrusted-project warning now also fires for per-harness project templates (`.pi/delegate/templates/<harness>/`) — only real harness partitions count, so an `archive/` or alias (`omp/`) subdirectory the loader never reads doesn't trigger it.
 - Robustness: jittered concurrency-slot polling; an ACP agent that exits early can no longer crash pi through an unhandled stdin `EPIPE`.
 - Removed the internal deprecated `run-claude.ts` / `stream-parse.ts` wrappers (unused outside tests).
