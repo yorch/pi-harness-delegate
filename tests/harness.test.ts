@@ -200,3 +200,43 @@ test('codex buildArgs: resume puts every flag before `--` and the session id/pro
   });
   assert.deepEqual(args, ['exec', 'resume', '--json', '--model', 'gpt-5', '--', 'abc-123', 'go on']);
 });
+
+function freshState(): import('../extensions/harnesses/types.ts').ParseState {
+  return { streamedText: '', activities: [], result: null, _harness: {} };
+}
+
+test('opencode: step_finish without a cost field reports totalCostUsd null, not $0', () => {
+  const state = freshState();
+  const out = parseOpencodeLine(
+    JSON.stringify({ type: 'step_finish', sessionID: 's1', part: { tokens: { input: 10, output: 5 } } }),
+    state,
+  );
+  assert.equal(out.result?.totalCostUsd, null);
+  assert.equal(out.result?.usage?.inputTokens, 10, 'tokens are still measured');
+  // a later step that does report cost makes the total measured
+  const out2 = parseOpencodeLine(JSON.stringify({ type: 'step_finish', part: { cost: 0.25, tokens: {} } }), state);
+  assert.equal(out2.result?.totalCostUsd, 0.25);
+});
+
+test('opencode: a real $0 step_finish cost stays a measured 0', () => {
+  const out = parseOpencodeLine(JSON.stringify({ type: 'step_finish', part: { cost: 0, tokens: {} } }), freshState());
+  assert.equal(out.result?.totalCostUsd, 0);
+});
+
+test('amp: turn_end without usage.cost reports totalCostUsd null, not $0', () => {
+  const state = freshState();
+  const out = parseAmpLine(
+    JSON.stringify({ type: 'turn_end', message: { content: [], usage: { input: 3, output: 4 } } }),
+    state,
+  );
+  assert.equal(out.result?.totalCostUsd, null);
+  assert.equal(out.result?.numTurns, 1);
+  const out2 = parseAmpLine(
+    JSON.stringify({
+      type: 'turn_end',
+      message: { content: [], usage: { input: 1, output: 1, cost: { total: 0.5 } } },
+    }),
+    state,
+  );
+  assert.equal(out2.result?.totalCostUsd, 0.5);
+});

@@ -55,6 +55,8 @@ function extractOpencodeText(o: Record<string, unknown>): string | undefined {
 interface OpencodeHarnessState {
   sessionId?: string;
   costAccum?: number;
+  /** True once any step_finish actually carried a numeric `cost` — a step without one is not a $0 step. */
+  costSeen?: boolean;
   inputAccum?: number;
   outputAccum?: number;
   cacheReadAccum?: number;
@@ -124,7 +126,10 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
     if (typeStr === 'step_finish' && part) {
       const tokens = isRecord(part.tokens) ? (part.tokens as Record<string, unknown>) : null;
       const cache = tokens && isRecord(tokens.cache) ? (tokens.cache as Record<string, unknown>) : null;
-      hs.costAccum = (hs.costAccum ?? 0) + (typeof part.cost === 'number' ? part.cost : 0);
+      if (typeof part.cost === 'number') {
+        hs.costAccum = (hs.costAccum ?? 0) + part.cost;
+        hs.costSeen = true;
+      }
       hs.inputAccum = (hs.inputAccum ?? 0) + (tokens && typeof tokens.input === 'number' ? tokens.input : 0);
       hs.outputAccum = (hs.outputAccum ?? 0) + (tokens && typeof tokens.output === 'number' ? tokens.output : 0);
       hs.cacheReadAccum = (hs.cacheReadAccum ?? 0) + (cache && typeof cache.read === 'number' ? cache.read : 0);
@@ -151,7 +156,8 @@ export function parseOpencodeLine(line: string, state: ParseState): ParseOutcome
             : state.streamedText + (streamedText ?? ''),
       isError: o.is_error === true,
       numTurns: typeof o.num_turns === 'number' ? o.num_turns : measured ? (hs.stepCount as number) : null,
-      totalCostUsd: measured
+      // Only a cost field actually seen counts — steps without one stay unmeasured (null), never $0.
+      totalCostUsd: hs.costSeen
         ? (hs.costAccum as number)
         : typeof o.total_cost_usd === 'number'
           ? o.total_cost_usd
