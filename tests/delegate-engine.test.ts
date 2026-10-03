@@ -841,3 +841,34 @@ test('fan-out comparison rows report real prompt tokens on both the tool and the
     });
   });
 });
+
+test('/delegate command: parser notices are shown — notify(warning) with UI, stderr headless — and the run proceeds', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const handler = commands.get('delegate')?.handler;
+      assert.ok(handler);
+      const quoted = 'claude tinker fix "bug --budget=5 and "more';
+
+      // UI: the notice is surfaced as a warning notification
+      const { ctx } = uiCtx(cwd, true);
+      const levels: Array<[string, string | undefined]> = [];
+      ctx.ui.notify = (msg: string, level?: string) => levels.push([msg, level]) as never;
+      await handler(quoted, ctx);
+      const warning = levels.find(([m]) => /--budget inside double quotes/.test(m));
+      assert.ok(warning, levels.map(([m]) => m).join(' | '));
+      assert.equal(warning[1], 'warning');
+      assert.ok(readArgs(argsFile), 'a notice is non-fatal: the harness still ran');
+      assert.ok(!readArgs(argsFile)?.includes('--max-budget-usd'), 'the quoted flag was not applied');
+      rmSync(argsFile, { force: true });
+      takePendingReport();
+
+      // headless: the same notice goes to stderr
+      const err = await captureStderr(() => handler(quoted, { cwd, hasUI: false, isProjectTrusted: () => true }));
+      assert.match(err, /--budget inside double quotes was kept as prompt text/);
+      assert.ok(readArgs(argsFile), 'headless run proceeds too');
+      takePendingReport();
+    });
+  });
+});
