@@ -723,6 +723,24 @@ test('/delegate fan-out danger banner uses the default mode when none is given',
   });
 });
 
+test('/delegate fan-out danger banner follows a native danger mode, not a token list', async () => {
+  // opencode's `build --auto` is danger only by its own permissionMap — absent from the legacy
+  // token list — so a fan-out path that went back to a hardcoded list would show no banner here
+  await withSandbox({ templates: { auto: EDIT_TEMPLATE.replace('name: tinker', 'name: auto') } }, async ({ cwd }) => {
+    const ocTpl = join(cwd, '.pi', 'delegate', 'templates', 'opencode');
+    mkdirSync(ocTpl, { recursive: true });
+    writeFileSync(join(ocTpl, 'auto.md'), '---\nname: auto\ndescription: t\npermission: build --auto\n---\nGo.\n');
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude', 'opencode'], [CLAUDE_RESULT], async () => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const { ctx, banners } = bannerCtx(cwd);
+      await commands.get('delegate')?.handler('claude,opencode auto do it', ctx);
+      assert.deepEqual(banners, [true]);
+      takePendingReport();
+    });
+  });
+});
+
 test('/delegate --budget that cannot be honored is reported and runs nothing', async () => {
   await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
     const { commands } = await loadExtension(async () => {
