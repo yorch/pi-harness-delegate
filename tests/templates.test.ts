@@ -231,6 +231,26 @@ test('projectTemplatePresence: finds trusted-only content that would be skipped'
   }
 });
 
+test('projectTemplatePresence: per-harness project template dirs count as skipped content too', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-presence-partitioned-'));
+  try {
+    // only a partitioned override — nothing at the shared root
+    const claudeDir = join(dir, '.pi', 'delegate', 'templates', 'claude');
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, 'review.md'), '---\nname: review\npermission: edit\n---\nx');
+    // an empty partition is not content
+    mkdirSync(join(dir, '.pi', 'delegate', 'templates', 'codex'), { recursive: true });
+    assert.deepEqual(projectTemplatePresence(dir).dirs, [claudeDir]);
+    // ...and it actually is what an untrusted load skips
+    assert.notEqual(
+      loadTemplates(dir, 'claude', true).get('review')?.permission,
+      loadTemplates(dir, 'claude', false).get('review')?.permission,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('describeSkippedProjectTemplates: silent when nothing applies, explains when it does', () => {
   assert.deepEqual(describeSkippedProjectTemplates({ dirs: [], staleTrustFile: false }), []);
 

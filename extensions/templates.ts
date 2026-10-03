@@ -230,7 +230,18 @@ export function projectTemplatePresence(cwd: string): {
   /** A leftover `.pi/trusted` file — strong evidence the user relied on the removed mechanism. */
   staleTrustFile: boolean;
 } {
-  const candidates = [projectTemplatesDir(cwd), legacyProjectTemplatesDir(cwd)];
+  // the per-harness partitions (`.pi/delegate/templates/<harness>/`) load too — see loadTemplates —
+  // so they count as skipped content just like the shared root does
+  let partitions: string[] = [];
+  try {
+    partitions = readdirSync(projectTemplatesDir(cwd), { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => projectTemplatesDir(cwd, e.name))
+      .sort();
+  } catch {
+    // absent or unreadable
+  }
+  const candidates = [projectTemplatesDir(cwd), ...partitions, legacyProjectTemplatesDir(cwd)];
   const dirs: string[] = [];
   for (const dir of candidates) {
     try {
