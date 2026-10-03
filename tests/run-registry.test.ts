@@ -177,3 +177,24 @@ test('run-registry: entries are written atomically — no .tmp left behind, in-f
     assert.equal(countActiveRuns(), 0);
   });
 });
+
+test('run-registry: abandoned .json.tmp files (dead writer pid, or older than 60s) are reaped', async () => {
+  await withAgentDir(async dir => {
+    const { existsSync, utimesSync } = await import('node:fs');
+    const { countActiveRuns, STALE_TMP_MS } = await import('../extensions/run-registry.ts');
+    const runs = join(dir, 'delegate', 'runs');
+    mkdirSync(runs, { recursive: true });
+    const deadWriter = join(runs, '999999999-claude-abc123.json.tmp');
+    const oldLiveWriter = join(runs, `${process.pid}-codex-old123.json.tmp`);
+    const garbageName = join(runs, 'notapid-x.json.tmp');
+    const freshLiveWriter = join(runs, `${process.pid}-codex-new123.json.tmp`);
+    for (const f of [deadWriter, oldLiveWriter, garbageName, freshLiveWriter]) writeFileSync(f, '{"pid": 1');
+    const old = (Date.now() - STALE_TMP_MS - 5_000) / 1000;
+    utimesSync(oldLiveWriter, old, old);
+    assert.equal(countActiveRuns(), 0);
+    assert.ok(!existsSync(deadWriter), 'tmp from a dead writer pid is reaped');
+    assert.ok(!existsSync(oldLiveWriter), 'tmp older than STALE_TMP_MS is reaped even if its pid is alive');
+    assert.ok(!existsSync(garbageName), 'tmp with no parseable pid is reaped');
+    assert.ok(existsSync(freshLiveWriter), "a live writer's fresh tmp is left alone");
+  });
+});

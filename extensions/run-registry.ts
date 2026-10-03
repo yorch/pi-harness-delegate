@@ -17,7 +17,7 @@
  * `acquireRun`/`countActiveRuns` directly.
  */
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { agentDir } from './config.ts';
 
@@ -32,6 +32,23 @@ function isAlive(pid: number): boolean {
   } catch (err) {
     // ESRCH: no such process. EPERM: exists but we can't signal it — still alive.
     return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** A `.json.tmp` this old can't be an in-flight write — acquireRun renames it within microseconds. */
+export const STALE_TMP_MS = 60_000;
+
+/**
+ * Remove a leftover `<pid>-<harness>-<rand>.json.tmp` if its writer crashed between write and
+ * rename (embedded pid dead) or it's older than `STALE_TMP_MS`. A live writer's tmp is left alone.
+ */
+function reapTmp(full: string, name: string): void {
+  try {
+    const pid = Number(name.split('-', 1)[0]);
+    const dead = !Number.isInteger(pid) || pid <= 0 || !isAlive(pid);
+    if (dead || Date.now() - statSync(full).mtimeMs > STALE_TMP_MS) rmSync(full, { force: true });
+  } catch {
+    // best-effort (already renamed/removed by its writer, or unreadable)
   }
 }
 
@@ -73,7 +90,7 @@ export function releaseRun(handle: RunHandle | null): void {
 }
 
 /** Count active runs across processes (optionally filtered to one harness), cleaning up
- *  entries left behind by dead processes. Returns 0 (never throws) if the registry is unreadable. */
+ *  entries — and abandoned `.json.tmp` writes — left behind by dead processes. Returns 0 (never throws) if the registry is unreadable. */
 export function countActiveRuns(harness?: string): number {
   let files: string[];
   try {
@@ -83,7 +100,12 @@ export function countActiveRuns(harness?: string): number {
   }
   let count = 0;
   for (const f of files) {
-    // only complete entries — in-flight `<entry>.json.tmp` writes (see acquireRun) are skipped
+    // only complete entries count — `<entry>.json.tmp` writes (see acquireRun) are skipped, but
+    // reaped once they're demonstrably abandoned (crashed writer), so they don't pile up forever
+    if (f.endsWith('.json.tmp')) {
+      reapTmp(join(runsDir(), f), f);
+      continue;
+    }
     if (!f.endsWith('.json')) continue;
     const full = join(runsDir(), f);
     try {
