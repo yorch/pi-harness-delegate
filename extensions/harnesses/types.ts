@@ -95,6 +95,10 @@ export interface Harness {
   /** Normalized -> native CLI arg fragments, used by the 'stdout' transport's buildArgs/nativePermission. */
   permissionMap?: Record<NormalizedPermission, string[]>;
   permissionHint?: (permission: NormalizedPermission) => string[];
+  /** True when `buildArgs` passes `maxBudgetUsd` to a native CLI budget flag (claude's
+   *  `--max-budget-usd`). Otherwise the runners enforce it host-side from the streamed
+   *  `totalCostUsd` — possible only when the harness actually reports cost. */
+  nativeBudget?: boolean;
   /** Which transports this harness's binary actually supports — the ceiling `config.harnesses.<name>.transport`
    *  is validated against (see config.ts's `resolveTransport`), independent of what a user configures.
    *  Omitted -> `[transport ?? 'stdout']` (today's single-transport harnesses). A harness legally offering

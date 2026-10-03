@@ -314,7 +314,7 @@ async function withFakeBinaries<T>(
   const binDir = mkdtempSync(join(tmpdir(), 'fake-bin-'));
   const argsFile = join(binDir, 'args.txt');
   const body = stdoutLines.map(l => `printf '%s\\n' '${l.replace(/'/g, `'\\''`)}'`).join('\n');
-  const script = `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE"\n${body}\n${opts.sleepAfterSec ? `sleep ${opts.sleepAfterSec}\n` : ''}`;
+  const script = `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE"\n${body}\n${opts.sleepAfterSec ? `exec sleep ${opts.sleepAfterSec}\n` : ''}`;
   for (const name of names) {
     writeFileSync(join(binDir, name), script);
     chmodSync(join(binDir, name), 0o755);
@@ -370,4 +370,64 @@ test('mergeAddDirs: undefined when nothing is declared, so harness args stay unc
   const { mergeAddDirs } = await import('../extensions/index.ts');
   assert.equal(mergeAddDirs('/repo'), undefined);
   assert.deepEqual(mergeAddDirs('/repo', ['a'], ['/repo/a', 'b']), ['/repo/a', '/repo/b']);
+});
+
+test('delegate: a budget on a harness that reports no cost is flagged as unenforced, in result and transcript', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/index.ts');
+    const { readFileSync } = await import('node:fs');
+    const lines = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't-1' }),
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: 'codex says hi' } }),
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+    ];
+    await withFakeBinaries(['codex'], lines, async () => {
+      const run = await delegate(
+        fakePi(async () => ({})),
+        fakeCtx(cwd),
+        {
+          harness: 'codex',
+          mode: 'general',
+          task: 'x',
+          maxBudgetUsd: 2,
+        },
+      );
+      assert.match(run.content, /^⚠ maxBudgetUsd \$2\.000 was not enforced — codex/);
+      assert.equal((run.details.budget as { enforcement: string }).enforcement, 'unenforced');
+      const transcript = readFileSync(run.details.file as string, 'utf8');
+      assert.ok(transcript.includes('- budget: $2.000 (NOT enforced)'));
+    });
+  });
+});
+
+test('delegate: a host-enforced budget stops the run and records budget exceeded', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/index.ts');
+    const { readFileSync } = await import('node:fs');
+    const step = (cost: number) => JSON.stringify({ type: 'step_finish', sessionID: 's', part: { cost, tokens: {} } });
+    const lines = [JSON.stringify({ type: 'text', part: { text: 'working' } }), step(0.4), step(0.4)];
+    await withFakeBinaries(
+      ['opencode'],
+      lines,
+      async () => {
+        const run = await delegate(
+          fakePi(async () => ({})),
+          fakeCtx(cwd),
+          {
+            harness: 'opencode',
+            mode: 'general',
+            task: 'x',
+            maxBudgetUsd: 0.5,
+          },
+        );
+        assert.match(run.content, /budget exceeded: opencode reported \$0\.800 against a \$0\.500 cap — run stopped/);
+        assert.equal(run.result.stopReason, 'budget_exceeded');
+        assert.equal((run.details.budget as { exceeded: boolean }).exceeded, true);
+        const transcript = readFileSync(run.details.file as string, 'utf8');
+        assert.ok(transcript.includes('(host-enforced) · budget exceeded'));
+      },
+      { sleepAfterSec: 20 },
+    );
+  });
 });

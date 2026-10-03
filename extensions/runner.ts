@@ -21,6 +21,33 @@ export interface RunHarnessOptions {
 export interface HarnessResult extends StreamedResult {
   streamedText: string;
   harness: string;
+  /** Set when the runner itself killed the run for exceeding `maxBudgetUsd` (host enforcement). */
+  budgetExceeded?: boolean;
+}
+
+/**
+ * Host-side `maxBudgetUsd` enforcement for a harness with no native budget flag: true once the
+ * harness's own streamed running total (`totalCostUsd`) goes over the cap. A harness that reports
+ * no cost (`null`) can never trip this — `delegate()` flags that budget as unenforced instead.
+ */
+export function isOverBudget(harness: Harness, maxBudgetUsd: number | undefined, r: StreamedResult | null): boolean {
+  return (
+    maxBudgetUsd !== undefined &&
+    harness.nativeBudget !== true &&
+    r !== null &&
+    typeof r.totalCostUsd === 'number' &&
+    r.totalCostUsd > maxBudgetUsd
+  );
+}
+
+/** The result recorded for a run the host stopped over budget. */
+export function budgetStoppedResult(r: StreamedResult, streamedText: string): StreamedResult {
+  return {
+    ...r,
+    isError: true,
+    stopReason: 'budget_exceeded',
+    result: r.result || streamedText || '(stopped: budget exceeded)',
+  };
 }
 
 import { DEFAULT_TIMEOUT_MS } from './harnesses/types.ts';
@@ -54,13 +81,19 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     const MAX_STREAMED = 5 * 1024 * 1024; // 5MB cap to prevent OOM on compromised harness
     const MAX_ACTIVITIES = 5000;
 
-    const finish = (r: StreamedResult) => {
+    const finish = (r: StreamedResult, budgetExceeded = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
       const ttft = firstTokenAt !== null ? firstTokenAt - startAt : r.ttftMs;
-      resolve({ ...r, ttftMs: ttft, streamedText: state.streamedText, harness: opts.harness.name });
+      resolve({
+        ...r,
+        ttftMs: ttft,
+        streamedText: state.streamedText,
+        harness: opts.harness.name,
+        ...(budgetExceeded ? { budgetExceeded: true } : {}),
+      });
     };
     const fail = (err: Error) => {
       if (settled) return;
@@ -98,6 +131,10 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
         // merge streamedText into result if empty
         if (!outcome.result.result) outcome.result.result = state.streamedText;
         state.result = outcome.result;
+        if (!settled && isOverBudget(opts.harness, opts.maxBudgetUsd, state.result)) {
+          proc.kill('SIGKILL');
+          finish(budgetStoppedResult(state.result, state.streamedText), true);
+        }
       }
     });
 

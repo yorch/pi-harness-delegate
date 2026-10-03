@@ -169,6 +169,66 @@ export function formatVerifySection(v: VerifyResult): string {
   return lines.join('\n');
 }
 
+/** How a run's `maxBudgetUsd` was (or wasn't) enforced, and whether it was exceeded. */
+export interface BudgetNote {
+  limitUsd: number;
+  /** `native`: the harness CLI enforces it itself. `host`: the runner killed/would kill the run from
+   *  the harness's streamed cost. `unenforced`: neither — no native flag and no cost reported. */
+  enforcement: 'native' | 'host' | 'unenforced';
+  exceeded: boolean;
+  /** Human-readable warning, or null when there's nothing to warn about. */
+  message: string | null;
+}
+
+/**
+ * Pure: describe a run's budget outcome. Undefined when no budget was set. `stoppedByHost` is the
+ * runner's own `budgetExceeded` flag; `costUsd` is the run's final `totalCostUsd` (null = unmeasured).
+ */
+export function describeBudget(opts: {
+  harness: string;
+  limitUsd: number | undefined;
+  native: boolean;
+  costUsd: number | null;
+  stoppedByHost: boolean;
+}): BudgetNote | undefined {
+  const { harness, limitUsd, native, costUsd, stoppedByHost } = opts;
+  if (limitUsd === undefined) return undefined;
+  const limit = `$${limitUsd.toFixed(3)}`;
+  const cost = costUsd !== null ? `$${costUsd.toFixed(3)}` : '$—';
+  if (native) {
+    const exceeded = costUsd !== null && costUsd > limitUsd;
+    return {
+      limitUsd,
+      enforcement: 'native',
+      exceeded,
+      message: exceeded ? `⛔ budget exceeded: ${cost} spent against a ${limit} cap (enforced by ${harness})` : null,
+    };
+  }
+  if (stoppedByHost) {
+    return {
+      limitUsd,
+      enforcement: 'host',
+      exceeded: true,
+      message: `⛔ budget exceeded: ${harness} reported ${cost} against a ${limit} cap — run stopped`,
+    };
+  }
+  if (costUsd === null) {
+    return {
+      limitUsd,
+      enforcement: 'unenforced',
+      exceeded: false,
+      message: `⚠ maxBudgetUsd ${limit} was not enforced — ${harness} has no native budget flag and reported no cost`,
+    };
+  }
+  return { limitUsd, enforcement: 'host', exceeded: costUsd > limitUsd, message: null };
+}
+
+/** One transcript header line for a budget note. */
+export function formatBudgetLine(b: BudgetNote): string {
+  const how = b.enforcement === 'native' ? 'native' : b.enforcement === 'host' ? 'host-enforced' : 'NOT enforced';
+  return `- budget: $${b.limitUsd.toFixed(3)} (${how})${b.exceeded ? ' · budget exceeded' : ''}`;
+}
+
 /** Build the markdown report content injected into the session on the next turn. */
 export function buildReportContent(opts: {
   harness?: string;
@@ -397,6 +457,8 @@ export function buildTranscript(
     output: string;
     /** Host-run verification result, when a `verify` command was configured for this run. */
     verify?: VerifyResult;
+    /** Budget outcome, when `maxBudgetUsd` was set for this run. */
+    budget?: BudgetNote;
   } & Record<string, unknown>,
 ): string {
   const harness = (opts.harness as string | undefined) ?? 'claude';
@@ -450,6 +512,8 @@ export function buildTranscript(
     `- context: ${context ?? 'n/a'}`,
     `- duration: ${duration ?? 'n/a'}`,
     `- stop reason: ${opts.stopReason ?? 'n/a'}`,
+    ...(opts.budget ? [formatBudgetLine(opts.budget)] : []),
+    ...(opts.budget?.message ? ['', opts.budget.message] : []),
     '',
     '## Activity',
     opts.activityLog.length > 0 ? opts.activityLog.join('\n') : '(no tool activity)',

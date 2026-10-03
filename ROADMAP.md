@@ -330,6 +330,9 @@ reasonably read as read-only — gave arbitrary host command execution.
 - **Correctness** — runners never spawn on an already-aborted signal and drop their abort listeners;
   opencode/amp report `totalCostUsd` only when a cost field was actually seen; a `sessionId` can't be
   fanned out; run-registry entries are written atomically.
+- **Features** — `addDirs` end to end (tool param, repeatable `/delegate --add-dir=`, `addDirs:` template
+  frontmatter); `maxBudgetUsd` is host-enforced (run killed, recorded as `budget exceeded`) for harnesses
+  that stream a cost but have no native budget flag, and flagged as unenforced when neither applies.
 
 ## Future
 

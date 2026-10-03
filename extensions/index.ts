@@ -37,6 +37,7 @@ import {
   buildTranscript,
   buildVerifyResult,
   collectActivityLog,
+  describeBudget,
   type FanoutRunSummary,
   formatMetrics,
   formatSpend,
@@ -697,6 +698,8 @@ export async function delegate(
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);
+  const maxBudgetUsd =
+    opts.maxBudgetUsd ?? template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd;
 
   // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
   // exactly as before; fan-out passes waitForSlot:true to queue instead.
@@ -741,11 +744,7 @@ export async function delegate(
       cwd: ctx.cwd,
       permission,
       model,
-      maxBudgetUsd:
-        opts.maxBudgetUsd ??
-        template.maxBudgetUsd ??
-        config.maxBudgetUsd ??
-        config.harnesses[harnessName]?.maxBudgetUsd,
+      maxBudgetUsd,
       signal: opts.signal,
       timeoutMs: config.harnesses[harnessName]?.timeoutMs ?? config.timeoutMs,
       resumeSessionId: opts.sessionId,
@@ -821,6 +820,17 @@ export async function delegate(
       : await runVerify(pi, ctx.cwd, verifyPlan.command)
     : undefined;
 
+  // How maxBudgetUsd fared: native (claude), host-enforced from streamed cost (the runner kills the
+  // run — `result.budgetExceeded`), or unenforceable (no native flag and no cost reported) — the
+  // last two always surface a message, never silently.
+  const budget = describeBudget({
+    harness: harnessName,
+    limitUsd: maxBudgetUsd,
+    native: harness.nativeBudget === true,
+    costUsd: result.totalCostUsd,
+    stoppedByHost: result.budgetExceeded === true,
+  });
+
   const file = saveOutput(
     harnessName,
     mode,
@@ -844,14 +854,16 @@ export async function delegate(
       activityLog: collectActivityLog(activityEvents),
       output: result.result || result.streamedText,
       verify,
+      budget,
     }),
   );
   pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts);
   // also prune legacy if claude
   if (harnessName === 'claude') pruneOutputs(legacyOutputsDir(), config.maxTranscripts);
 
+  const output = result.result || result.streamedText || '(empty result)';
   return {
-    content: result.result || result.streamedText || '(empty result)',
+    content: budget?.message ? `${budget.message}\n\n${output}` : output,
     details: {
       harness: harnessName,
       mode,
@@ -874,6 +886,7 @@ export async function delegate(
       promptTokens,
       usage: result.usage,
       verify,
+      budget,
     },
     result,
     activityLog: collectActivityLog(activityEvents),

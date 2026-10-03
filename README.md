@@ -241,6 +241,14 @@ Config lives as a key inside pi's own `~/.pi/agent/settings.json` rather than a 
 
 `autoDelegateHints` is off by default — no system-prompt bias. When `true`, explicit markers (`@harness`, `with codex`, `delegate … to claude`) and imperative review/plan phrasing append a hint.
 
+### Budgets (`maxBudgetUsd` / `--budget`)
+
+A per-run cap, resolved call → template → global config → per-harness config. How it's enforced depends on the harness, and the outcome is always recorded (tool result `details.budget`, a `- budget:` line in the transcript):
+
+- **Native** — `claude` gets `--max-budget-usd` and enforces it itself.
+- **Host-enforced** — harnesses with no budget flag that *do* stream a running cost (`opencode`, `amp`/`omp`, and `opencode` over ACP): the run is killed as soon as the reported total goes over the cap, and recorded as `budget exceeded` (`stopReason: budget_exceeded`, a `⛔ budget exceeded … run stopped` line at the top of the result). Enforcement is only as fine-grained as the harness's cost reports (per step/turn), so a run can overshoot by up to one step.
+- **Not enforceable** — `codex` (no `$` cost on ChatGPT-plan auth) and `devin` report no cost and have no flag, so a budget can't be applied; the run proceeds and the result starts with `⚠ maxBudgetUsd … was not enforced`, never silently.
+
 ## Metrics recorded
 
 Every run records in details + transcript: harness, mode, permission (normalized + native), cost, tokens (input/output/cache), context% (prompt ÷ window), model, turns, duration, TTFT, stop reason, session id. Token + cost feed pi's `Usage`.

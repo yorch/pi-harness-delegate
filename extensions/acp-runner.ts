@@ -21,7 +21,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { DEFAULT_TIMEOUT_MS, type Harness, type ParseState, type StreamedResult } from './harnesses/types.ts';
-import type { HarnessResult, RunHarnessOptions } from './runner.ts';
+import { budgetStoppedResult, type HarnessResult, isOverBudget, type RunHarnessOptions } from './runner.ts';
 
 /** Bound on the initial handshake (initialize / session/new / session/set_mode) so a hung agent
  *  doesn't wedge the whole `timeoutMs` budget before `session/prompt` — the actual work — even starts. */
@@ -102,14 +102,20 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
     let nextId = 1;
     const pending = new Map<number, PendingRequest>();
 
-    const finish = (r: StreamedResult) => {
+    const finish = (r: StreamedResult, budgetExceeded = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
       rejectAllPending(new Error('session ended'));
       const ttft = firstTokenAt !== null ? firstTokenAt - startAt : r.ttftMs;
-      resolve({ ...r, ttftMs: ttft, streamedText: state.streamedText, harness: opts.harness.name });
+      resolve({
+        ...r,
+        ttftMs: ttft,
+        streamedText: state.streamedText,
+        harness: opts.harness.name,
+        ...(budgetExceeded ? { budgetExceeded: true } : {}),
+      });
     };
     const fail = (err: Error) => {
       if (settled) return;
@@ -243,6 +249,12 @@ export function runAcpHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       if (outcome.result) {
         if (!outcome.result.result) outcome.result.result = state.streamedText;
         state.result = outcome.result;
+        // Same host-side budget enforcement as runner.ts (see isOverBudget). Replayed history
+        // from a resume can't trip it — only once the new prompt is in flight.
+        if (promptSent && !settled && isOverBudget(opts.harness, opts.maxBudgetUsd, state.result)) {
+          proc.kill('SIGKILL');
+          finish(budgetStoppedResult(state.result, state.streamedText), true);
+        }
       }
     });
 
