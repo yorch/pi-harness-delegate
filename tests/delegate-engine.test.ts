@@ -891,3 +891,25 @@ test('/delegate command: parser notices are shown — notify(warning) with UI, s
     });
   });
 });
+
+test('claude_delegate tool: the pinned harness wins over any harness param, including a fan-out spec', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { existsSync, rmSync: rm } = await import('node:fs');
+    const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const alias = tools.get('claude_delegate');
+    assert.ok(alias);
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await withFakeBinaries(['claude', 'codex', 'opencode'], [CLAUDE_RESULT], async argsFile => {
+      for (const harness of ['codex', 'opencode', 'claude,codex', 'all']) {
+        for (const n of ['claude', 'codex', 'opencode']) rm(`${argsFile}.${n}`, { force: true });
+        const res = (await alias.execute('t', { harness, mode: 'general', task: 'x' }, undefined, undefined, ctx)) as {
+          details: Record<string, unknown>;
+        };
+        assert.ok(existsSync(`${argsFile}.claude`), `${harness}: claude must run`);
+        assert.ok(!existsSync(`${argsFile}.codex`), `${harness}: codex must not run`);
+        assert.ok(!existsSync(`${argsFile}.opencode`), `${harness}: opencode must not run`);
+        assert.equal(res.details.harness, 'claude');
+      }
+    });
+  });
+});
