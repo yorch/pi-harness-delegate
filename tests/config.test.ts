@@ -1,5 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -199,14 +210,17 @@ test('resolveTransport: rejects a transport outside supportsTransports with a cl
 
 // --- Provenance: loadConfigWithSource / describeConfigSource / buildConfigReport ---
 
-async function withSettingsDir<T>(write: ((dir: string) => void) | undefined, fn: () => Promise<T> | T): Promise<T> {
+async function withSettingsDir<T>(
+  write: ((dir: string) => void) | undefined,
+  fn: (dir: string) => Promise<T> | T,
+): Promise<T> {
   const dir = join(tmpdir(), `cfg-source-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   try {
     write?.(dir);
-    return await fn();
+    return await fn(dir);
   } finally {
     process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(dir, { recursive: true, force: true });
@@ -437,4 +451,106 @@ test('writeDelegateConfig: atomic write leaves no temp file behind', async () =>
     const leftovers = readdirSync(process.env.PI_CODING_AGENT_DIR as string).filter(f => f.endsWith('.tmp'));
     assert.deepEqual(leftovers, []);
   });
+});
+
+// --- writeDelegateConfig hardening (adversarial review of `config init`) ---
+
+test('writeDelegateConfig: preserves the original file mode', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => {
+      writeFileSync(join(dir, 'settings.json'), '{"theme":"x"}', { mode: 0o600 });
+      chmodSync(join(dir, 'settings.json'), 0o600);
+    },
+    dir => {
+      assert.equal(writeDelegateConfig({}).ok, true);
+      assert.equal(statSync(join(dir, 'settings.json')).mode & 0o777, 0o600);
+    },
+  );
+});
+
+test('writeDelegateConfig: writes through a symlinked settings.json instead of replacing the link', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => {
+      writeFileSync(join(dir, 'real.json'), '{"theme":"x"}');
+      symlinkSync(join(dir, 'real.json'), join(dir, 'settings.json'));
+    },
+    dir => {
+      assert.equal(writeDelegateConfig({ defaultHarness: 'codex' }).ok, true);
+      assert.equal(lstatSync(join(dir, 'settings.json')).isSymbolicLink(), true);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'real.json'), 'utf8')).delegate, { defaultHarness: 'codex' });
+    },
+  );
+});
+
+test('writeDelegateConfig: matches the existing trailing-newline convention', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  for (const nl of ['', '\n']) {
+    await withSettingsDir(
+      dir => writeFileSync(join(dir, 'settings.json'), `{"theme":"x"}${nl}`),
+      dir => {
+        writeDelegateConfig({});
+        assert.equal(readFileSync(join(dir, 'settings.json'), 'utf8').endsWith('\n'), nl === '\n');
+      },
+    );
+  }
+});
+
+test("writeDelegateConfig: refuses while pi's settings lock is held, leaving the file untouched", async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => {
+      writeFileSync(join(dir, 'settings.json'), '{"theme":"x"}');
+      mkdirSync(join(dir, 'settings.json.lock'));
+    },
+    dir => {
+      const r = writeDelegateConfig({});
+      assert.equal(r.ok, false);
+      assert.match(r.message, /locked/);
+      assert.equal(readFileSync(join(dir, 'settings.json'), 'utf8'), '{"theme":"x"}');
+      assert.equal(existsSync(join(dir, 'settings.json.lock')), true); // not ours — must not be removed
+    },
+  );
+});
+
+test('writeDelegateConfig: releases its lock and leaves no tmp file behind', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => writeFileSync(join(dir, 'settings.json'), '{}'),
+    dir => {
+      writeDelegateConfig({});
+      assert.deepEqual(readdirSync(dir).sort(), ['settings.json']);
+    },
+  );
+});
+
+test('writeDelegateConfig: locks the path pi locks even when settings.json is a symlink', async () => {
+  const { writeDelegateConfig } = await import('../extensions/config.ts');
+  await withSettingsDir(
+    dir => {
+      writeFileSync(join(dir, 'real.json'), '{"theme":"x"}');
+      symlinkSync(join(dir, 'real.json'), join(dir, 'settings.json'));
+      mkdirSync(join(dir, 'settings.json.lock')); // pi's lock: <configured path>.lock
+    },
+    dir => {
+      const r = writeDelegateConfig({});
+      assert.equal(r.ok, false);
+      assert.match(r.message, /locked/);
+      assert.equal(readFileSync(join(dir, 'real.json'), 'utf8'), '{"theme":"x"}');
+    },
+  );
+});
+
+test('nonDefaultConfig: only the aliases that differ are kept, not the untouched default ones', async () => {
+  const { nonDefaultConfig, defaultDelegateConfig } = await import('../extensions/config.ts');
+  const cfg = { ...defaultDelegateConfig(), modelAliases: { ...defaultDelegateConfig().modelAliases, max: 'opus-9' } };
+  assert.deepEqual(nonDefaultConfig(cfg), { modelAliases: { max: 'opus-9' } });
+});
+
+test('nonDefaultConfig: omits everything still at its default, keeps real overrides', async () => {
+  const { nonDefaultConfig, defaultDelegateConfig } = await import('../extensions/config.ts');
+  assert.deepEqual(nonDefaultConfig(defaultDelegateConfig()), {});
+  const cfg = { ...defaultDelegateConfig(), defaultHarness: 'codex', harnesses: { codex: { model: 'm' } } };
+  assert.deepEqual(nonDefaultConfig(cfg), { defaultHarness: 'codex', harnesses: { codex: { model: 'm' } } });
 });
