@@ -1,0 +1,11 @@
+# pi-harness-delegate
+
+> A pi coding agent extension that delegates work to Claude Code, Codex (Muse), OpenCode, Amp and Devin headlessly — one tool, normalized permissions, multi-harness fan-out, host-run verify, streaming transcripts and portable templates.
+
+## Links
+
+- [Website](https://yorch.github.io/pi-harness-delegate/): overview, harnesses, usage, modes, config
+- [Source and README](https://github.com/yorch/pi-harness-delegate): full documentation
+- [npm package](https://www.npmjs.com/package/pi-harness-delegate): `pi install npm:pi-harness-delegate`
+- [pi.dev listing](https://pi.dev/packages/pi-harness-delegate)
+- [Changelog](https://github.com/yorch/pi-harness-delegate/blob/main/CHANGELOG.md)
