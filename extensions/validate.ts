@@ -9,6 +9,8 @@
  * up front on fan-out — never left to each harness's `buildArgs`.
  */
 
+import { realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -99,4 +101,72 @@ export async function confirmDangerousToolCall(
     ok = false;
   }
   if (!ok) throw new Error(`allowDangerous for ${target} was declined by the user`);
+}
+
+/** realpath of `p`, or — when `p` doesn't exist yet — realpath of its nearest existing ancestor
+ *  with the missing tail re-appended, so a not-yet-created dir under a symlink still resolves
+ *  through that symlink. */
+function realpathOrAncestor(p: string): string {
+  let cur = p;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(cur), ...tail);
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return p;
+      tail.unshift(basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * The model-supplied `addDirs` entries that resolve **outside** `cwd` — after `resolve()` against
+ * `cwd` and symlink resolution on both sides, so neither `..` nor a symlink inside the repo
+ * pointing out of it escapes. Empty when every entry stays inside the working directory.
+ */
+export function addDirsOutsideCwd(cwd: string, addDirs: string[] | undefined): string[] {
+  if (!addDirs || addDirs.length === 0) return [];
+  const root = realpathOrAncestor(resolve(cwd));
+  const out: string[] = [];
+  for (const d of addDirs) {
+    const real = realpathOrAncestor(resolve(cwd, d));
+    const rel = relative(root, real);
+    const inside = rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    if (!inside) out.push(real);
+  }
+  return out;
+}
+
+/**
+ * Gate model-requested `addDirs` on the `delegate` tool. `addDirs` widens what the harness may
+ * touch — on `codex`/`claude`/`amp` the extra dir is writable on any non-readonly run, and even a
+ * `readonly` run can read it — so a model-set entry (prompt-injection reachable, same trust model as
+ * `allowDangerous`/`verify`) may only stay inside the working directory on its own. Anything that
+ * resolves outside it needs a human's `ctx.ui.confirm`; with no UI, fail closed. Template
+ * frontmatter (trusted on-disk config) and the human-typed `/delegate --add-dir` never call this.
+ */
+export async function confirmToolAddDirs(
+  ctx: Pick<ExtensionContext, 'hasUI' | 'cwd'> & { ui?: { confirm?: ExtensionContext['ui']['confirm'] } },
+  addDirs: string[] | undefined,
+): Promise<void> {
+  const outside = addDirsOutsideCwd(ctx.cwd, addDirs);
+  if (outside.length === 0) return;
+  const list = outside.join(', ');
+  if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') {
+    throw new Error(
+      `addDirs outside the working directory requested (${list}), but there is no interactive UI to confirm it with — refusing (extra directories outside the project need a human's explicit approval)`,
+    );
+  }
+  let ok = false;
+  try {
+    ok = await ctx.ui.confirm(
+      'Allow access outside the project?',
+      `The agent wants the delegated harness to access directories outside ${ctx.cwd}:\n\n${outside.map(d => `  ${d}`).join('\n')}\n\nOn non-readonly runs these may be writable.`,
+    );
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new Error(`addDirs outside the working directory (${list}) were declined by the user`);
 }

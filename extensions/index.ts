@@ -40,7 +40,7 @@ import { type FeedEntry, progressWindow } from './progress.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
 import { type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { confirmDangerousToolCall } from './validate.ts';
+import { confirmDangerousToolCall, confirmToolAddDirs } from './validate.ts';
 
 export default function (pi: ExtensionAPI) {
   const ui: RunUiState = { activeRunId: 0, activeOverlay: null };
@@ -59,6 +59,7 @@ export default function (pi: ExtensionAPI) {
       'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
       'sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run\'s details (letters, digits, . _ : - only). It cannot be combined with a fan-out harness ("all" or a comma list) — a session belongs to one harness.',
       'pr must be a PR number, an http(s) PR URL, or owner/repo#123.',
+      'addDirs inside the working directory are accepted as-is; any entry outside it asks the human to confirm interactively and is refused in a non-interactive session.',
       'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
     ],
     parameters: Type.Object({
@@ -102,7 +103,7 @@ export default function (pi: ExtensionAPI) {
       addDirs: Type.Optional(
         Type.Array(Type.String(), {
           description:
-            'Extra directories (outside the working directory) the harness may access. Relative paths resolve against the working directory. Not every harness supports this (opencode ignores it; codex ignores it on resume).',
+            'Extra directories the harness may access. Relative paths resolve against the working directory. Any entry that resolves (after symlinks) outside the working directory requires interactive human confirmation and is refused without a UI. Not every harness supports this (opencode ignores it; codex ignores it on resume).',
         }),
       ),
       // Deliberately no `verify` param — see the trust-model comment on DelegateToolParams/runVerify.
@@ -118,6 +119,9 @@ export default function (pi: ExtensionAPI) {
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
       if (params.allowDangerous === true) await confirmDangerousToolCall(ctx, params);
+      // Same trust model for model-set addDirs: inside cwd is fine, anything outside needs a human
+      // (fail closed without a UI). Covers single, fan-out, and the claude_delegate alias.
+      await confirmToolAddDirs(ctx, params.addDirs);
       if (params.harness && isFanoutSpec(params.harness)) {
         return runFanoutTool(pi, ctx, config, params, signal, onUpdate);
       }

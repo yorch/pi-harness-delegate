@@ -248,6 +248,44 @@ test('delegate tool: flag-shaped sessionId/model/pr are rejected before a slot o
   });
 });
 
+test('delegate tool: addDirs outside cwd are refused without a UI on single, fan-out, and alias paths', async () => {
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { tools } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['delegate', { harness: 'claude' }],
+      ['delegate', { harness: 'claude,codex' }],
+      ['claude_delegate', {}],
+    ];
+    for (const [name, extra] of cases) {
+      for (const dir of ['/', '../', 'sub/../../..']) {
+        await assert.rejects(
+          () =>
+            tools
+              .get(name)
+              ?.execute('t', { mode: 'tinker', task: 'x', addDirs: [dir], ...extra }, undefined, undefined, ctx) ??
+            Promise.resolve(),
+          /addDirs outside the working directory/,
+          `${name} ${JSON.stringify(extra)} ${dir}`,
+        );
+      }
+    }
+    // inside cwd passes the gate — fails later on the unknown mode instead
+    await assert.rejects(
+      () =>
+        tools
+          .get('delegate')
+          ?.execute('t', { harness: 'claude', mode: 'nope', task: 'x', addDirs: ['sub'] }, undefined, undefined, ctx) ??
+        Promise.resolve(),
+      /unknown delegate mode "nope"/,
+    );
+    const { activeCount } = await import('../extensions/concurrency.ts');
+    assert.equal(activeCount(), 0);
+  });
+});
+
 async function captureStderr(fn: () => Promise<void>): Promise<string> {
   const orig = process.stderr.write.bind(process.stderr);
   let out = '';

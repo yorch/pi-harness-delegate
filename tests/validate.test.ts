@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   addDirError,
+  addDirsOutsideCwd,
   confirmDangerousToolCall,
+  confirmToolAddDirs,
   modelError,
   prError,
   sessionIdError,
@@ -98,4 +100,49 @@ test('confirmDangerousToolCall: resolves on approval; a throwing dialog counts a
       ),
     /declined/,
   );
+});
+
+test('addDirsOutsideCwd: inside paths pass; .., absolute, and symlink escapes are caught', async () => {
+  const { mkdirSync, mkdtempSync, rmSync, symlinkSync, realpathSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'adddirs-')));
+  const cwd = join(root, 'repo');
+  const outside = join(root, 'outside');
+  mkdirSync(join(cwd, 'sub'), { recursive: true });
+  mkdirSync(outside);
+  symlinkSync(outside, join(cwd, 'link'));
+  try {
+    assert.deepEqual(addDirsOutsideCwd(cwd, undefined), []);
+    assert.deepEqual(addDirsOutsideCwd(cwd, ['sub', '.', join(cwd, 'sub'), 'not-yet/created', '..foo']), []);
+    assert.deepEqual(addDirsOutsideCwd(cwd, ['../outside']), [outside]);
+    assert.deepEqual(addDirsOutsideCwd(cwd, ['sub/../../outside']), [outside]);
+    assert.deepEqual(addDirsOutsideCwd(cwd, ['/etc']), [realpathSync('/etc')]);
+    // a symlink inside the repo pointing out of it — and a not-yet-existing path beneath it
+    assert.deepEqual(addDirsOutsideCwd(cwd, ['link', 'link/new']), [outside, join(outside, 'new')]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('confirmToolAddDirs: inside cwd needs no UI; outside fails closed without one, asks with one', async () => {
+  const cwd = process.cwd();
+  await confirmToolAddDirs({ cwd, hasUI: false }, ['tests', './extensions']);
+  await assert.rejects(() => confirmToolAddDirs({ cwd, hasUI: false }, ['/']), /no interactive UI/);
+  let asked = 0;
+  const ui = (answer: boolean | 'throw') => ({
+    cwd,
+    hasUI: true,
+    ui: {
+      confirm: async () => {
+        asked++;
+        if (answer === 'throw') throw new Error('x');
+        return answer;
+      },
+    },
+  });
+  await assert.rejects(() => confirmToolAddDirs(ui(false) as never, ['/']), /declined/);
+  await assert.rejects(() => confirmToolAddDirs(ui('throw') as never, ['/']), /declined/);
+  await confirmToolAddDirs(ui(true) as never, ['/']);
+  assert.equal(asked, 3);
 });
