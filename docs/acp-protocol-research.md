@@ -340,8 +340,9 @@ Prioritized; effort is relative to this repo's own recent PRs (#21/#23/#24) as a
    against a v2-speaking agent (or any future agent that only supports a version we don't) producing a
    confusing failure instead of an honest one. No urgency, but no reason to wait either — it's a
    self-contained, low-risk change.
-3. **Investigate `session/set_config_option` (category `model`) as the real fix for Devin's unwired
-   model-selection gap** (`ROADMAP.md` §14: *"Devin's `model` isn't wired over ACP — no verified way to
+3. **(Resolved differently — Devin's model is now set via the `devin acp --model <MODEL>` CLI flag,
+   verified against `devin acp --help`; kept for the record.)** **Investigate `session/set_config_option`
+   (category `model`) as the real fix for Devin's then-unwired model-selection gap** (`ROADMAP.md` §14: *"Devin's `model` isn't wired over ACP — no verified way to
    set it on this version's ACP surface"*). The schema now has a generalized, category-tagged config
    mechanism (stabilized across 1.14.0–1.18.0) explicitly designed for exactly "model selector" as one of
    its four named categories. Effort: medium — requires a live capture against a Devin build new enough to

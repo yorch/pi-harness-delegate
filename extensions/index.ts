@@ -1863,7 +1863,7 @@ export default function (pi: ExtensionAPI) {
         );
       else
         ctx.ui.notify?.(
-          'Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=…] [--model=…] [--scope=…] [--verify=…] <prompt>',
+          'Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=…] [--model=…] [--scope=…] [--pr=…] [--budget=…] [--verify=…] [--resume=…] <prompt>',
           'warning',
         );
       return;
@@ -1933,7 +1933,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand('delegate', {
     description:
-      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--verify=<cmd>] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report.',
+      'Delegate a task to any harness. Usage: /delegate [--harness=claude|codex|opencode|amp|devin|all] [--mode=review|plan|implement|security-audit|docs|general] [--model=...] [--scope=diff|pr|paths] [--pr=<n|url>] [--budget=<usd>] [--verify=<cmd>] [--resume=<id>] <prompt> — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report.',
     handler: makeHandler(),
   });
   pi.registerCommand('claude', {

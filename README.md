@@ -39,10 +39,34 @@ Manual delegation:
 
 Only the prompt is required. A **harness as first word** and/or **mode as next word** selects them; every `--flag` is optional (harness defaults to `delegate.defaultHarness`, mode to `delegate.defaultMode`, scope to whole repo).
 
+| Flag | Meaning |
+| --- | --- |
+| `--harness=<name>` | `claude`, `codex`, `opencode`, `amp` (`omp`), `devin`, `all`, or a comma list (fan-out, below) |
+| `--mode=<template>` | Any template name (`review`, `plan`, `implement`, `security-audit`, `docs`, `general`, or your own) |
+| `--model=<model>` | Model or alias (`economy`/`balanced`/`max`, see `modelAliases`) |
+| `--scope=<scope>` | `diff` (current `git diff HEAD`), `pr` (`gh pr diff` for the current branch), or a path list |
+| `--pr=<pr>` | A specific PR to scope to: a number, an http(s) PR URL, or `owner/repo#123` (implies the PR diff as scope) |
+| `--budget=<usd>` | Per-run spend cap in USD (same as the tool's `maxBudgetUsd`) |
+| `--resume=<session-id>` | Continue a previous delegated session (single harness only — not with a fan-out) |
+| `--verify="<cmd>"` | Host-run check after the harness exits (see [Verify](#modes-templates)) |
+
+Flag values may be quoted (`--verify="bun test && bun run lint"`). `--resume`, `--model`, and `--pr` values are validated before anything runs — e.g. a value starting with `-` is rejected, so it can never be smuggled into a harness's command line as a flag.
+
+**Subcommands** (work on `/delegate` and on every alias, where the alias pins the harness filter):
+
+| Subcommand | What it does |
+| --- | --- |
+| `/delegate list [harness]` | Available modes/templates (all harnesses, or one) |
+| `/delegate history [harness]` (alias `logs`) | Past transcripts, newest first; open one to read it (and see its resume hint) |
+| `/delegate status [harness]` (aliases `health`, `doctor`, `check`) | Config provenance, project trust, per-harness detection/version/templates/active-vs-cap, spend rollup |
+| `/delegate config` | What was read from `settings.json` and the effective config (print-only) |
+| `/delegate config init` | Write the effective config into `settings.json`'s `delegate` key (the only write this extension does) |
+| `/delegate watch` (alias `show`) | Re-open a minimized progress overlay |
+
 Some modes have **default tasks** when the prompt is omitted:
 `/delegate review` reviews the current git diff (`scope: diff`), `/delegate security-audit` audits the repo. Modes without a default (`plan`, `implement`, `docs`, `general`) print a hint asking for a prompt.
 
-The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff, `pr` = PR diff, path list, or whole repo), `model`, `maxBudgetUsd`, `allowDangerous`, `sessionId`, `pr`. (`verify` is deliberately *not* a tool parameter — see below.)
+The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff, `pr` = PR diff, path list, or whole repo), `model`, `maxBudgetUsd`, `allowDangerous`, `sessionId`, `pr`. (`verify` is deliberately *not* a tool parameter — see below.) Setting `allowDangerous` from the tool always asks you to confirm interactively, and is refused outright in a non-interactive session — see [Security model](#security-model).
 
 `claude_delegate` remains as a deprecated alias for `delegate{harness:claude}`.
 
@@ -56,10 +80,9 @@ The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff
 delegate({ harness: "all", mode: "review", scope: "diff" })   # tool call form
 ```
 
-- `all` resolves against *detected* harnesses, so Devin joins a fan-out automatically once `devin` is installed — a 5-harness fan-out costs more (and runs one more concurrent process) than the 4-harness one did, budget accordingly.
-
-- `all` resolves to whatever's actually installed (`detectAll()`) — an uninstalled harness is skipped and named in the report, it doesn't fail the run. An explicit list is validated the same way; an unknown name is also reported rather than aborting the rest.
-- Each harness's run goes through the same `delegate()` engine as a single-harness call and writes its own transcript to its own `~/.pi/agent/delegate/outputs/<harness>/`. Runs are launched together and execute in parallel, bounded by `maxConcurrent` (default `4`, one slot per supported harness) — a run beyond the cap queues for a free slot instead of failing, and the cap is enforced across pi processes, not just this one. **This means fan-out spend is genuinely simultaneous**: with the default cap, a 4-harness fan-out can bill all four at once instead of one after another — budget accordingly (`maxBudgetUsd` still applies per run).
+- `all` resolves to whatever's actually installed (`detectAll()`) — an uninstalled harness is skipped and named in the report, it doesn't fail the run. An explicit list is validated the same way; an unknown name is also reported rather than aborting the rest. With all five harnesses installed, `all` means five runs.
+- Each harness's run goes through the same `delegate()` engine as a single-harness call and writes its own transcript to its own `~/.pi/agent/delegate/outputs/<harness>/`. Runs are launched together and execute in parallel, bounded by `maxConcurrent` (default `4`) — a run beyond the cap queues for a free slot instead of failing (so a 5-harness `all` runs four at once and the fifth when a slot frees), and the cap is enforced across pi processes, not just this one. **This means fan-out spend is genuinely simultaneous**: up to `maxConcurrent` harnesses can bill at once instead of one after another — budget accordingly (`maxBudgetUsd` still applies per run, not to the fan-out as a whole).
+- `--resume`/`sessionId` can't be combined with a fan-out — a session id belongs to exactly one harness — and is rejected up front with a message saying so.
 - The synthesized report is always ordered by the resolved harness list (e.g. `claude, codex, opencode`), regardless of which harness actually finishes first — it groups each harness's metrics + output and a total spend line (unknown-cost runs called out separately, same as `/delegate status`), assembled mechanically, not by asking a model to summarize.
 - A single-harness call (`harness: "claude"`, or omitted) behaves exactly as before, including the concurrency guard: it still fails fast with "another delegate run is already in progress" at capacity rather than queueing. Fan-out is opt-in by typing `all`/a list.
 - `/delegate all …` batches successful completions into one notification instead of one per harness; a failure is never delayed or folded into the batch — it surfaces immediately.
@@ -89,7 +112,7 @@ Detect availability: `delegate` checks `harness --version` at startup; missing h
 
 ### Transport
 
-Every harness runs over its native CLI's stdout (`stdout`, the default and only option for `claude`/`codex`/`amp`). `opencode` and `devin` also speak [ACP](https://agentclientprotocol.com) (Agent Client Protocol — bidirectional JSON-RPC over stdio): Devin ships ACP-only (no stdout mode exists), and `opencode` supports both — `stdout` stays the default, `transport: "acp"` is opt-in per harness in config (see below). ACP gives `opencode` a genuine `cost`/`contextWindow` (both `null` over stdout today) and a resume path independently proven to recall cross-process state; the tradeoff is `model`/`numTurns` staying unmeasured (`null`) either way. `amp`/`omp` has a real `acp` subcommand too, but isn't offered as a `transport` value — its ACP mode surface has only 2 permission tiers against the stdout CLI's genuine 3, a real regression, not just an unverified one. Configuring a transport a harness doesn't support fails immediately with a clear error, before anything spawns.
+Every harness runs over its native CLI's stdout (`stdout`, the default and only option for `claude`/`codex`/`amp`). `opencode` and `devin` also speak [ACP](https://agentclientprotocol.com) (Agent Client Protocol — bidirectional JSON-RPC over stdio): Devin ships ACP-only (no stdout mode exists), and `opencode` supports both — `stdout` stays the default, `transport: "acp"` is opt-in per harness in config (see below). ACP gives `opencode` a genuine `contextWindow` (`null` over stdout) and a server-side running cost total (stdout reports cost too, summed from each step's `step_finish` — `null` only if no step reported one), plus a resume path independently proven to recall cross-process state; the tradeoff is `model`/`numTurns` staying unmeasured (`null`) either way. `amp`/`omp` has a real `acp` subcommand too, but isn't offered as a `transport` value — its ACP mode surface has only 2 permission tiers against the stdout CLI's genuine 3, a real regression, not just an unverified one. Configuring a transport a harness doesn't support fails immediately with a clear error, before anything spawns.
 
 ## Modes (templates)
 
@@ -115,6 +138,22 @@ verify: bun test          # optional — host-run check after the harness exits
 You are a senior engineer delegated by the pi coding agent.
 ...
 ```
+
+All frontmatter keys (one `key: value` per line; only `name` is required):
+
+| Key | Meaning |
+| --- | --- |
+| `name` | The mode name used to select it (`--mode=`/`mode`) |
+| `description` | Shown by `/delegate list` |
+| `permission` | `readonly` \| `edit` \| `danger` (default `edit`). Any other value is treated as a native permission string |
+| `permissionMode` / `sandbox` | Legacy/native escape hatch (see below) |
+| `model` | Default model for this mode (call → template → harness → global) |
+| `maxBudgetUsd` | Default per-run spend cap in USD (a call's `maxBudgetUsd`/`--budget` wins) |
+| `skill` | Appends `Use the "<skill>" skill.` to the prompt |
+| `defaultTask` | Task used when the prompt is omitted (e.g. `review` → review the current diff) |
+| `defaultScope` | Scope used with `defaultTask` (e.g. `diff`) |
+| `verify` | Host-run check command (see below) |
+| `harness` | Informational: which harness a template targets (shown by `/delegate list`) |
 
 **Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, use the native key (`permissionMode: dontAsk`, `sandbox: ...`) — it overrides `permission` for that harness.
 
@@ -144,7 +183,7 @@ Custom templates are just files dropped in the above dirs — any registered nam
 ## Inspecting what the harness is doing
 
 - **Live activity feed** — `▶ Bash: ... ✓/✗`, `💭 thinking…`, text tail. `/delegate` shows a framed progress window (spinner, `danger` banner for `danger` permission, `esc`×2 cancels, `m` minimizes, `watch` re-opens).
-- **Full transcript every run** — `~/.pi/agent/delegate/outputs/<harness>/<ts>-<mode>.md` (also legacy `claude-delegate/outputs/` for claude). Tool result ends with path.
+- **Full transcript every run** — `~/.pi/agent/delegate/outputs/<harness>/<ts>-<mode>.md` (also legacy `claude-delegate/outputs/` for claude). Tool result ends with path. Transcripts contain your prompts, diffs, and the harness's full output, so they're written owner-only (directory `0700`, files `0600`).
 - **Resume:** every run records a session id.
 
 ```bash
@@ -157,7 +196,7 @@ Reveal thinking live with `"inspectThinking": true` in config (off by default).
 
 ## Config
 
-In `~/.pi/agent/settings.json`:
+In `~/.pi/agent/settings.json` (or `$PI_CODING_AGENT_DIR/settings.json` — `PI_CODING_AGENT_DIR`, pi's own agent-dir override, relocates everything this extension keeps under `~/.pi/agent`: settings, user templates, transcripts, and the active-run registry):
 
 ```json
 {
@@ -211,6 +250,8 @@ One deliberate, narrow exception: pi's own `Usage` (the footer/session token+cos
 - `readonly` — no edits (e.g. Claude `plan`, Codex `read-only`).
 - `edit` — workspace writes auto-accepted (e.g. `acceptEdits`, `workspace-write`).
 - `danger` — unrestricted, **only via `allowDangerous:true` on the call** — never a default. Shows `⚠ danger` banner. `review`/`plan`/`security-audit` templates stay `readonly`.
+- When the **model** sets `allowDangerous: true` on the `delegate` tool, the extension asks you to confirm it (`Allow dangerous delegation?`) before anything runs; declining aborts the call, and in a non-interactive session (no UI to ask) it is refused outright. The model alone can never grant `danger`.
+- Values that end up on a harness's command line (`sessionId`/`--resume`, `model`, `pr`) are validated first — notably, nothing starting with `-` is accepted, so a prompt-injected value can't masquerade as a CLI flag.
 
 Review what the harness is asked to do before granting broad permissions.
 
