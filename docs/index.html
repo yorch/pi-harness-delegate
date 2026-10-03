@@ -6,9 +6,50 @@
     <title>pi-harness-delegate — delegate to any harness from pi</title>
     <meta
       name="description"
-      content="Delegate work to Claude Code, Muse (Codex), OpenCode, Amp, or Devin from the pi coding agent — one tool, five harnesses, normalized permissions, multi-harness fan-out, host-run verify, streaming, portable templates."
+      content="Run Claude Code, Codex, OpenCode, Amp or Devin from the pi coding agent through one tool, with normalized permissions, multi-harness fan-out and host-run verify."
     >
+    <link rel="canonical" href="https://yorch.github.io/pi-harness-delegate/">
+    <meta name="theme-color" content="#0b0e1c">
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230b0e1c'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='%23e6e8f5' font-family='monospace'>π</text></svg>"
+    >
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="pi-harness-delegate">
+    <meta property="og:title" content="pi-harness-delegate — delegate to any harness from pi">
+    <meta
+      property="og:description"
+      content="One tool, five harnesses: Claude Code, Codex, OpenCode, Amp and Devin from the pi coding agent."
+    >
+    <meta property="og:url" content="https://yorch.github.io/pi-harness-delegate/">
+    <meta property="og:image" content="https://yorch.github.io/pi-harness-delegate/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="pi / harness delegate — claude, codex, opencode, amp, devin">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="pi-harness-delegate — delegate to any harness from pi">
+    <meta
+      name="twitter:description"
+      content="One tool, five harnesses: Claude Code, Codex, OpenCode, Amp and Devin from the pi coding agent."
+    >
+    <meta name="twitter:image" content="https://yorch.github.io/pi-harness-delegate/og.png">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "pi-harness-delegate",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "description": "A pi coding agent extension that delegates work to Claude Code, Codex, OpenCode, Amp and Devin headlessly.",
+        "url": "https://yorch.github.io/pi-harness-delegate/",
+        "downloadUrl": "https://www.npmjs.com/package/pi-harness-delegate",
+        "codeRepository": "https://github.com/yorch/pi-harness-delegate",
+        "license": "https://github.com/yorch/pi-harness-delegate/blob/main/LICENSE",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
       href="https://fonts.googleapis.com/css2?family=Fragment+Mono&family=Instrument+Sans:wght@500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,600&display=swap"
       rel="stylesheet"
@@ -385,6 +426,15 @@
     /* sections */
     section {
       margin-top: 64px;
+      scroll-margin-top: 24px;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
     }
     h2 {
       font-size: 12px;
@@ -429,7 +479,7 @@
       height: 1px;
       background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
     }
-    .card h4 {
+    .card h3 {
       font-size: 13px;
       letter-spacing: 0.02em;
       margin-bottom: 6px;
@@ -437,7 +487,7 @@
       align-items: center;
       gap: 8px;
     }
-    .card h4 i {
+    .card h3 i {
       width: 7px;
       height: 7px;
       border-radius: 50%;
@@ -618,300 +668,308 @@
         </div>
       </nav>
 
-      <div class="hero">
-        <div>
-          <span class="kicker"><i></i> pi extension — streaming · permission-bounded · fan-out across 5 harnesses</span>
-          <h1>pi <span class="slash">/</span> <em>harness</em><br>delegate</h1>
-          <p class="tagline">
-            Delegate work from <b>pi</b> to <b>any harness</b> — Claude Code, Muse (Codex), OpenCode, Amp, Devin — with
-            one tool, <b>normalized permissions</b>, <b>multi-harness fan-out</b> and
-            <b>portable templates</b>. Successor to
-            <code>pi-claude-delegate</code>.
-          </p>
-          <div class="pills">
-            <span class="pill claude"><i></i> claude <span class="alias">/claude</span></span>
-            <span class="pill codex"><i></i> codex <span class="alias">/codex</span></span>
-            <span class="pill opencode"><i></i> opencode <span class="alias">/opencode</span></span>
-            <span class="pill amp"><i></i> amp <span class="alias">/amp · /omp</span></span>
-            <span class="pill devin"><i></i> devin <span class="alias">/devin</span></span>
-          </div>
-          <div class="install-card">
-            <div class="install-left">
-              <span class="pm">npm</span>
-              <span class="cmd" id="cmd">pi install npm:pi-harness-delegate</span>
-            </div>
-            <div class="btns">
-              <button
-                type="button"
-                class="btn btn-primary"
-                onclick="navigator.clipboard?.writeText(document.getElementById('cmd').textContent);this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1400)"
+      <main>
+        <div class="hero">
+          <div>
+            <span class="kicker"
+              ><i></i>
+              pi extension — streaming · permission-bounded · fan-out across 5 harnesses</span
+            >
+            <h1>
+              pi <span class="slash">/</span> <em>harness</em><br>delegate<span class="sr-only">
+                — delegate to any coding-agent harness from pi</span
               >
-                Copy
-              </button>
-              <a
-                href="https://github.com/yorch/pi-harness-delegate"
-                class="btn btn-ghost"
-                style="
+            </h1>
+            <p class="tagline">
+              Delegate work from <b>pi</b> to <b>any harness</b> — Claude Code, Muse (Codex CLI), OpenCode, Amp, Devin —
+              with one tool, <b>normalized permissions</b>, <b>multi-harness fan-out</b> and
+              <b>portable templates</b>. Successor to
+              <code>pi-claude-delegate</code>.
+            </p>
+            <div class="pills">
+              <span class="pill claude"><i></i> claude <span class="alias">/claude</span></span>
+              <span class="pill codex"><i></i> codex <span class="alias">/codex</span></span>
+              <span class="pill opencode"><i></i> opencode <span class="alias">/opencode</span></span>
+              <span class="pill amp"><i></i> amp <span class="alias">/amp · /omp</span></span>
+              <span class="pill devin"><i></i> devin <span class="alias">/devin</span></span>
+            </div>
+            <div class="install-card">
+              <div class="install-left">
+                <span class="pm">npm</span>
+                <span class="cmd" id="cmd">pi install npm:pi-harness-delegate</span>
+              </div>
+              <div class="btns">
+                <button
+                  type="button"
+                  class="btn btn-primary"
+                  onclick="navigator.clipboard?.writeText(document.getElementById('cmd').textContent);this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1400)"
+                >
+                  Copy
+                </button>
+                <a
+                  href="https://github.com/yorch/pi-harness-delegate"
+                  class="btn btn-ghost"
+                  style="
                   text-decoration: none;
                   display: inline-flex;
                   align-items: center;
                 "
-                >GitHub →</a
+                  >GitHub →</a
+                >
+              </div>
+            </div>
+            <div class="niche">
+              also:
+              <code>pi install git:github.com/yorch/pi-harness-delegate</code>
+              · needs at least one harness binary (<code>claude --version</code>,
+              <code>codex --version</code>, <code>opencode --version</code>, <code>amp --version</code>,
+              <code>devin --version</code>) on <code>PATH</code>
+            </div>
+          </div>
+          <div class="preview-wrap">
+            <div class="preview">
+              <div class="preview-head">
+                <span class="traffic"><i></i><i></i><i></i></span>
+                pi — harness delegate
+              </div>
+              <div style="padding: 14px; font-family: 'Fragment Mono', monospace; font-size: 12px; line-height: 1.75">
+                <div style="color: var(--dim)">
+                  ▲ user &nbsp;<span style="color: var(--fg)">review the auth flow</span>
+                </div>
+                <div style="margin-top: 10px; color: var(--muted)">● delegate all · review · 3/5 · ⏱ 0:41</div>
+                <div style="color: var(--green)">&nbsp;&nbsp;✓ claude&nbsp;&nbsp;&nbsp;0:38&nbsp; done</div>
+                <div style="color: var(--green)">&nbsp;&nbsp;✓ codex&nbsp;&nbsp;&nbsp;&nbsp;0:35&nbsp; done</div>
+                <div style="color: var(--green)">&nbsp;&nbsp;✓ opencode&nbsp;0:40&nbsp; done</div>
+                <div style="color: var(--cyan)">
+                  &nbsp;&nbsp;⠹ devin&nbsp;&nbsp;&nbsp;&nbsp;0:12&nbsp; ▶ Read: auth/session.ts
+                </div>
+                <div style="color: var(--dim)">&nbsp;&nbsp;… amp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;queued</div>
+              </div>
+              <div class="preview-foot">
+                <span class="chip">▶ Read: auth/login.ts ✓</span>
+                <span class="chip">▶ Grep: TODO ✓</span>
+                <span class="chip">💭 thinking…</span>
+                <span class="chip">3 turn(s) · $0.543 · 6.2% ctx</span>
+              </div>
+              <div
+                style="padding: 0 12px 10px; font-family: 'Fragment Mono', monospace; font-size: 10px; color: var(--dim)"
               >
-            </div>
-          </div>
-          <div class="niche">
-            also:
-            <code>pi install git:github.com/yorch/pi-harness-delegate</code>
-            · needs at least one harness binary (<code>claude --version</code>,
-            <code>codex --version</code>, <code>opencode --version</code>, <code>amp --version</code>,
-            <code>devin --version</code>) on <code>PATH</code>
-          </div>
-        </div>
-        <div class="preview-wrap">
-          <div class="preview">
-            <div class="preview-head">
-              <span class="traffic"><i></i><i></i><i></i></span>
-              pi — harness delegate
-            </div>
-            <div style="padding: 14px; font-family: 'Fragment Mono', monospace; font-size: 12px; line-height: 1.75">
-              <div style="color: var(--dim)">
-                ▲ user &nbsp;<span style="color: var(--fg)">review the auth flow</span>
+                illustrative — layout mirrors the real fan-out overlay, not a screenshot
               </div>
-              <div style="margin-top: 10px; color: var(--muted)">● delegate all · review · 3/5 · ⏱ 0:41</div>
-              <div style="color: var(--green)">&nbsp;&nbsp;✓ claude&nbsp;&nbsp;&nbsp;0:38&nbsp; done</div>
-              <div style="color: var(--green)">&nbsp;&nbsp;✓ codex&nbsp;&nbsp;&nbsp;&nbsp;0:35&nbsp; done</div>
-              <div style="color: var(--green)">&nbsp;&nbsp;✓ opencode&nbsp;0:40&nbsp; done</div>
-              <div style="color: var(--cyan)">
-                &nbsp;&nbsp;⠹ devin&nbsp;&nbsp;&nbsp;&nbsp;0:12&nbsp; ▶ Read: auth/session.ts
+            </div>
+            <div class="floating">
+              <div style="color: var(--cyan); font-weight: 600; margin-bottom: 6px">live activity feed</div>
+              <div>
+                ▶ <b>codex</b> review ·
+                <span style="color: var(--green)">GPT-5</span>
               </div>
-              <div style="color: var(--dim)">&nbsp;&nbsp;… amp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;queued</div>
-            </div>
-            <div class="preview-foot">
-              <span class="chip">▶ Read: auth/login.ts ✓</span>
-              <span class="chip">▶ Grep: TODO ✓</span>
-              <span class="chip">💭 thinking…</span>
-              <span class="chip">3 turn(s) · $0.543 · 6.2% ctx</span>
-            </div>
-            <div
-              style="padding: 0 12px 10px; font-family: 'Fragment Mono', monospace; font-size: 10px; color: var(--dim)"
-            >
-              illustrative — layout mirrors the real fan-out overlay, not a screenshot
-            </div>
-          </div>
-          <div class="floating">
-            <div style="color: var(--cyan); font-weight: 600; margin-bottom: 6px">live activity feed</div>
-            <div>
-              ▶ <b>codex</b> review ·
-              <span style="color: var(--green)">GPT-5</span>
-            </div>
-            <div>▶ <b>claude</b> plan · sonnet</div>
-            <div class="row">
-              <span>context</span><span style="color: var(--fg)">6.2% · 1.0M</span>
-            </div>
-            <div class="row">
-              <span>cost</span><span style="color: var(--amber)">$0.12</span>
-            </div>
-            <div style="margin-top: 6px; color: var(--dim)">
-              transcript →
-              <code>~/.pi/agent/delegate/outputs/&lt;harness&gt;/…</code>
+              <div>▶ <b>claude</b> plan · sonnet</div>
+              <div class="row">
+                <span>context</span><span style="color: var(--fg)">6.2% · 1.0M</span>
+              </div>
+              <div class="row">
+                <span>cost</span><span style="color: var(--amber)">$0.12</span>
+              </div>
+              <div style="margin-top: 6px; color: var(--dim)">
+                transcript →
+                <code>~/.pi/agent/delegate/outputs/&lt;harness&gt;/…</code>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <section>
-        <h2>Why this exists</h2>
-        <div class="grid3">
-          <div class="card">
-            <h4 style="color: var(--cyan)"><i></i> One tool, five harnesses</h4>
-            <p>
-              <code>delegate { harness:claude|codex|opencode|amp|devin}</code>
-              — same task, same streaming, per-harness runners under
-              <code>extensions/harnesses/</code>.
-            </p>
-            <div class="mono">/delegate · /claude · /codex · /opencode · /amp · /omp · /devin</div>
+        <section id="why">
+          <h2>Why this exists</h2>
+          <div class="grid3">
+            <div class="card">
+              <h3 style="color: var(--cyan)"><i></i> One tool, five harnesses</h3>
+              <p>
+                <code>delegate { harness:claude|codex|opencode|amp|devin}</code>
+                — same task, same streaming, per-harness runners under
+                <code>extensions/harnesses/</code>.
+              </p>
+              <div class="mono">/delegate · /claude · /codex · /opencode · /amp · /omp · /devin</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--green)"><i></i> Normalized permissions</h3>
+              <p>
+                <code>readonly → edit → danger</code>
+                maps to each harness native.
+                <code>danger</code>
+                only via <code>allowDangerous:true</code> — never a default.
+              </p>
+              <div class="mono">review/plan/security-audit = readonly · implement = edit</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--red)"><i></i> Fan out, compare</h3>
+              <p>
+                <code>harness: "all"</code>
+                or a comma list runs the same task on every detected harness
+                <b>concurrently</b>
+                and returns one comparison report — costs N× a single run, budget accordingly.
+              </p>
+              <div class="mono">/delegate all review the auth flow</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--violet)"><i></i> Portable templates</h3>
+              <p>
+                Markdown with frontmatter in <code>templates/shared</code> +
+                <code>templates/&lt;harness&gt;</code>. User/project overlays win on collision.
+              </p>
+              <div class="mono">harness frontmatter selects model</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--amber)"><i></i> Host-run verify</h3>
+              <p>
+                A template's <code>verify:</code> command runs on the host after the harness exits — report-only, never
+                on a <code>readonly</code> template, and never a model-settable tool parameter.
+              </p>
+              <div class="mono">verify: bun test</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--accent)"><i></i> Streaming + transcripts</h3>
+              <p>
+                Live feed (tool ✓/✗, thinking, text tail), framed overlay (<code>m</code>
+                minimize, double-<code>esc</code>
+                cancel), full transcript partitioned by harness.
+              </p>
+              <div class="mono">outputs/&lt;harness&gt;/&lt;ts&gt;-&lt;mode&gt;.md</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--orange)"><i></i> Configurable transport</h3>
+              <p>
+                Every harness runs over its native CLI's <code>stdout</code> by default.
+                <code>opencode</code>
+                also speaks <a href="https://agentclientprotocol.com">ACP</a>, opt-in per harness; <code>devin</code> is
+                ACP-only.
+              </p>
+              <div class="mono">harnesses.opencode.transport: "acp"</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--green)"><i></i> Cost-aware</h3>
+              <p>
+                Tokens, context% and spend flow into pi footer stats via tool
+                <code>Usage</code>. Per-harness <code>modelAliases</code>, <code>/delegate status</code> spend rollup.
+              </p>
+              <div class="mono">economy / balanced / max</div>
+            </div>
           </div>
-          <div class="card">
-            <h4 style="color: var(--green)"><i></i> Normalized permissions</h4>
-            <p>
-              <code>readonly → edit → danger</code>
-              maps to each harness native.
-              <code>danger</code>
-              only via <code>allowDangerous:true</code> — never a default.
-            </p>
-            <div class="mono">review/plan/security-audit = readonly · implement = edit</div>
-          </div>
-          <div class="card">
-            <h4 style="color: var(--red)"><i></i> Fan out, compare</h4>
-            <p>
-              <code>harness: "all"</code>
-              or a comma list runs the same task on every detected harness
-              <b>concurrently</b>
-              and returns one comparison report — costs N× a single run, budget accordingly.
-            </p>
-            <div class="mono">/delegate all review the auth flow</div>
-          </div>
-          <div class="card">
-            <h4 style="color: var(--violet)"><i></i> Portable templates</h4>
-            <p>
-              Markdown with frontmatter in <code>templates/shared</code> +
-              <code>templates/&lt;harness&gt;</code>. User/project overlays win on collision.
-            </p>
-            <div class="mono">harness frontmatter selects model</div>
-          </div>
-          <div class="card">
-            <h4 style="color: var(--amber)"><i></i> Host-run verify</h4>
-            <p>
-              A template's <code>verify:</code> command runs on the host after the harness exits — report-only, never on
-              a <code>readonly</code> template, and never a model-settable tool parameter.
-            </p>
-            <div class="mono">verify: bun test</div>
-          </div>
-          <div class="card">
-            <h4 style="color: var(--accent)"><i></i> Streaming + transcripts</h4>
-            <p>
-              Live feed (tool ✓/✗, thinking, text tail), framed overlay (<code>m</code>
-              minimize, double-<code>esc</code>
-              cancel), full transcript partitioned by harness.
-            </p>
-            <div class="mono">outputs/&lt;harness&gt;/&lt;ts&gt;-&lt;mode&gt;.md</div>
-          </div>
-          <div class="card">
-            <h4 style="color: var(--orange)"><i></i> Configurable transport</h4>
-            <p>
-              Every harness runs over its native CLI's <code>stdout</code> by default.
-              <code>opencode</code>
-              also speaks <a href="https://agentclientprotocol.com">ACP</a>, opt-in per harness; <code>devin</code> is
-              ACP-only.
-            </p>
-            <div class="mono">harnesses.opencode.transport: "acp"</div>
-          </div>
-          <div class="card">
-            <h4 style="color: var(--green)"><i></i> Cost-aware</h4>
-            <p>
-              Tokens, context% and spend flow into pi footer stats via tool
-              <code>Usage</code>. Per-harness <code>modelAliases</code>, <code>/delegate status</code> spend rollup.
-            </p>
-            <div class="mono">economy / balanced / max</div>
-          </div>
-        </div>
-      </section>
+        </section>
 
-      <section>
-        <h2>Harnesses</h2>
-        <div class="table-wrap">
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Harness</th>
-                  <th>readonly → edit → danger</th>
-                  <th>Cost</th>
-                  <th>Context %</th>
-                  <th>ACP</th>
-                  <th>Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><b>claude</b><br><span class="code">claude</span></td>
-                  <td>
-                    <span class="perm perm-RO">plan</span>
-                    <span class="perm perm-ED">acceptEdits</span>
-                    <span class="perm perm-DG">bypassPermissions</span>
-                  </td>
-                  <td><span class="tri tri-yes">reported</span></td>
-                  <td><span class="tri tri-yes">reported</span></td>
-                  <td><span class="tri tri-no">no</span></td>
-                  <td>Full stream-json + verbose. Schema-verified against Claude Code 2.1.247.</td>
-                </tr>
-                <tr>
-                  <td><b>codex</b><br><span class="code">codex</span></td>
-                  <td>
-                    <span class="perm perm-RO">read-only</span>
-                    <span class="perm perm-ED">workspace-write</span>
-                    <span class="perm perm-DG">danger-full-access</span>
-                  </td>
-                  <td><span class="tri tri-no">unmeasured</span></td>
-                  <td><span class="tri tri-no">unmeasured</span></td>
-                  <td><span class="tri tri-no">no</span></td>
-                  <td>
-                    <code>codex exec --json</code>, tolerant parser. No <code>$</code> cost on ChatGPT-plan auth.
-                    Schema-verified against codex-cli 0.149.1.
-                  </td>
-                </tr>
-                <tr>
-                  <td><b>opencode</b><br><span class="code">opencode</span></td>
-                  <td>
-                    <span class="perm perm-RO">plan</span>
-                    <span class="perm perm-ED">build</span>
-                    <span class="perm perm-DG">build --auto</span>
-                  </td>
-                  <td><span class="tri tri-partial">stdout: no · acp: yes</span></td>
-                  <td><span class="tri tri-partial">stdout: no · acp: yes</span></td>
-                  <td><span class="tri tri-partial">opt-in</span></td>
-                  <td>
-                    <code>opencode run --format json</code>
-                    (default) or <code>opencode acp</code>
-                    (<code>transport: "acp"</code>). Schema-verified against opencode 1.18.16.
-                  </td>
-                </tr>
-                <tr>
-                  <td><b>amp</b> <span class="code">(omp)</span><br><span class="code">amp</span></td>
-                  <td>
-                    <span class="perm perm-RO">always-ask</span>
-                    <span class="perm perm-ED">write</span>
-                    <span class="perm perm-DG">yolo</span>
-                  </td>
-                  <td><span class="tri tri-yes">reported</span></td>
-                  <td><span class="tri tri-no">never</span></td>
-                  <td><span class="tri tri-no">not offered</span></td>
-                  <td>
-                    <code>&lt;binary&gt; -p --mode json</code>. Real <code>acp</code> subcommand exists but has fewer
-                    permission tiers than stdout — a regression, not offered as a transport. Schema-verified against omp
-                    17.2.9.
-                  </td>
-                </tr>
-                <tr>
-                  <td><b>devin</b><br><span class="code">devin</span></td>
-                  <td>
-                    <span class="perm perm-RO">plan</span>
-                    <span class="perm perm-ED">accept-edits</span>
-                    <span class="perm perm-DG">bypass</span>
-                  </td>
-                  <td><span class="tri tri-no">never</span></td>
-                  <td><span class="tri tri-yes">reported</span></td>
-                  <td><span class="tri tri-yes">only mode</span></td>
-                  <td>
-                    Runs <code>devin acp</code> — no stdout mode exists. Real tool-call ids, working
-                    <code>session/load</code>
-                    resume. Schema-verified against devin 3000.6.7 (260a97c8).
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+        <section id="harnesses">
+          <h2>Harnesses</h2>
+          <div class="table-wrap">
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Harness</th>
+                    <th>readonly → edit → danger</th>
+                    <th>Cost</th>
+                    <th>Context %</th>
+                    <th>ACP</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><b>claude</b><br><span class="code">claude</span></td>
+                    <td>
+                      <span class="perm perm-RO">plan</span>
+                      <span class="perm perm-ED">acceptEdits</span>
+                      <span class="perm perm-DG">bypassPermissions</span>
+                    </td>
+                    <td><span class="tri tri-yes">reported</span></td>
+                    <td><span class="tri tri-yes">reported</span></td>
+                    <td><span class="tri tri-no">no</span></td>
+                    <td>Full stream-json + verbose. Schema-verified against Claude Code 2.1.247.</td>
+                  </tr>
+                  <tr>
+                    <td><b>codex</b><br><span class="code">codex</span></td>
+                    <td>
+                      <span class="perm perm-RO">read-only</span>
+                      <span class="perm perm-ED">workspace-write</span>
+                      <span class="perm perm-DG">danger-full-access</span>
+                    </td>
+                    <td><span class="tri tri-no">unmeasured</span></td>
+                    <td><span class="tri tri-no">unmeasured</span></td>
+                    <td><span class="tri tri-no">no</span></td>
+                    <td>
+                      <code>codex exec --json</code>, tolerant parser. No <code>$</code> cost on ChatGPT-plan auth.
+                      Schema-verified against codex-cli 0.149.1.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><b>opencode</b><br><span class="code">opencode</span></td>
+                    <td>
+                      <span class="perm perm-RO">plan</span>
+                      <span class="perm perm-ED">build</span>
+                      <span class="perm perm-DG">build --auto</span>
+                    </td>
+                    <td><span class="tri tri-partial">stdout: no · acp: yes</span></td>
+                    <td><span class="tri tri-partial">stdout: no · acp: yes</span></td>
+                    <td><span class="tri tri-partial">opt-in</span></td>
+                    <td>
+                      <code>opencode run --format json</code>
+                      (default) or <code>opencode acp</code>
+                      (<code>transport: "acp"</code>). Schema-verified against opencode 1.18.16.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><b>amp</b> <span class="code">(omp)</span><br><span class="code">amp</span></td>
+                    <td>
+                      <span class="perm perm-RO">always-ask</span>
+                      <span class="perm perm-ED">write</span>
+                      <span class="perm perm-DG">yolo</span>
+                    </td>
+                    <td><span class="tri tri-yes">reported</span></td>
+                    <td><span class="tri tri-no">never</span></td>
+                    <td><span class="tri tri-no">not offered</span></td>
+                    <td>
+                      <code>&lt;binary&gt; -p --mode json</code>. Real <code>acp</code> subcommand exists but has fewer
+                      permission tiers than stdout — a regression, not offered as a transport. Schema-verified against
+                      omp 17.2.9.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><b>devin</b><br><span class="code">devin</span></td>
+                    <td>
+                      <span class="perm perm-RO">plan</span>
+                      <span class="perm perm-ED">accept-edits</span>
+                      <span class="perm perm-DG">bypass</span>
+                    </td>
+                    <td><span class="tri tri-no">never</span></td>
+                    <td><span class="tri tri-yes">reported</span></td>
+                    <td><span class="tri tri-yes">only mode</span></td>
+                    <td>
+                      Runs <code>devin acp</code> — no stdout mode exists. Real tool-call ids, working
+                      <code>session/load</code>
+                      resume. Schema-verified against devin 3000.6.7 (260a97c8).
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-        <p
-          style="
+          <p
+            style="
             color: var(--dim);
             font-size: 12px;
             font-family: Fragment Mono, monospace;
             margin-top: 8px;
           "
-        >
-          Native escape hatch: <code>permissionMode: dontAsk</code> /
-          <code>sandbox: …</code>
-          in frontmatter overrides normalized (must still pass <code>allowDangerous</code> for danger). Detect
-          availability: <code>delegate</code> checks <code>harness --version</code> at startup.
-        </p>
-      </section>
+          >
+            Native escape hatch: <code>permissionMode: dontAsk</code> /
+            <code>sandbox: …</code>
+            in frontmatter overrides normalized (must still pass <code>allowDangerous</code> for danger). Detect
+            availability: <code>delegate</code> checks <code>harness --version</code> at startup.
+          </p>
+        </section>
 
-      <section>
-        <h2>Usage</h2>
-        <div class="usage">
-          <pre><span class="c">// agent-driven</span>
+        <section id="usage">
+          <h2>Usage</h2>
+          <div class="usage">
+            <pre><span class="c">// agent-driven</span>
 delegate({
   harness: "codex",
   mode: "review",
@@ -931,7 +989,7 @@ delegate({
 <span class="c">// fan out to every detected harness</span>
 /delegate all review the auth flow
 /delegate claude,codex plan the migration</pre>
-          <pre><span class="c"># partitioned transcripts</span>
+            <pre><span class="c"># partitioned transcripts</span>
 ~/.pi/agent/delegate/outputs/
   claude/2026-08-25-…-review.md
   codex/2026-08-25-…-plan.md
@@ -950,178 +1008,181 @@ delegate({
   }
 }}
 <span class="c"># /delegate config · /delegate config init · /delegate status</span></pre>
-        </div>
-      </section>
+          </div>
+        </section>
 
-      <section>
-        <h2>Modes</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Mode</th>
-                <th>Permission</th>
-                <th>Purpose</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><code>review</code></td>
-                <td><span class="perm perm-RO">readonly</span></td>
-                <td>Code review, cites <code>file:line</code>, prioritized</td>
-              </tr>
-              <tr>
-                <td><code>plan</code></td>
-                <td><span class="perm perm-RO">readonly</span></td>
-                <td>Implementation plan + risks</td>
-              </tr>
-              <tr>
-                <td><code>implement</code></td>
-                <td><span class="perm perm-ED">edit</span></td>
-                <td>Edits + checks</td>
-              </tr>
-              <tr>
-                <td><code>security-audit</code></td>
-                <td><span class="perm perm-RO">readonly</span></td>
-                <td>Injection/auth/secrets/supply chain</td>
-              </tr>
-              <tr>
-                <td><code>docs</code></td>
-                <td><span class="perm perm-ED">edit</span></td>
-                <td>Docs matching repo style</td>
-              </tr>
-              <tr>
-                <td><code>general</code></td>
-                <td><span class="perm perm-ED">edit</span></td>
-                <td>Any task</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p
-          style="
+        <section id="modes">
+          <h2>Modes</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Mode</th>
+                  <th>Permission</th>
+                  <th>Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>review</code></td>
+                  <td><span class="perm perm-RO">readonly</span></td>
+                  <td>Code review, cites <code>file:line</code>, prioritized</td>
+                </tr>
+                <tr>
+                  <td><code>plan</code></td>
+                  <td><span class="perm perm-RO">readonly</span></td>
+                  <td>Implementation plan + risks</td>
+                </tr>
+                <tr>
+                  <td><code>implement</code></td>
+                  <td><span class="perm perm-ED">edit</span></td>
+                  <td>Edits + checks</td>
+                </tr>
+                <tr>
+                  <td><code>security-audit</code></td>
+                  <td><span class="perm perm-RO">readonly</span></td>
+                  <td>Injection/auth/secrets/supply chain</td>
+                </tr>
+                <tr>
+                  <td><code>docs</code></td>
+                  <td><span class="perm perm-ED">edit</span></td>
+                  <td>Docs matching repo style</td>
+                </tr>
+                <tr>
+                  <td><code>general</code></td>
+                  <td><span class="perm perm-ED">edit</span></td>
+                  <td>Any task</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p
+            style="
             color: var(--dim);
             font-size: 12px;
             font-family: Fragment Mono, monospace;
             margin-top: 8px;
           "
-        >
-          Each mode is a markdown template with frontmatter (<code>permission</code>, <code>model</code>,
-          <code>maxBudgetUsd</code>, optional <code>verify</code>). No template ships a <code>verify</code> by default —
-          <code>readonly</code>
-          templates never run one even if configured.
-        </p>
-      </section>
+          >
+            Each mode is a markdown template with frontmatter (<code>permission</code>, <code>model</code>,
+            <code>maxBudgetUsd</code>, optional <code>verify</code>). No template ships a <code>verify</code> by default
+            —
+            <code>readonly</code>
+            templates never run one even if configured.
+          </p>
+        </section>
 
-      <section>
-        <h2>Fan out to multiple harnesses</h2>
-        <div class="grid-fanout">
-          <div class="card">
-            <h4 style="color: var(--red)"><i></i> One task, every harness, concurrently</h4>
-            <p>
-              <code>harness</code>
-              also accepts <code>all</code> or a comma-separated list. The same task runs on every harness at once
-              (bounded by <code>maxConcurrent</code>, default <b>4</b>) and comes back as one synthesized comparison
-              report, ordered by the resolved harness list — not one report per harness.
-              <code>all</code>
-              resolves against whatever's actually <em>detected</em>; an uninstalled or unknown harness is named in the
-              report rather than failing the run.
-            </p>
-            <p style="margin-top: 10px">
-              <b style="color: var(--fg)">This is genuinely simultaneous spend</b>
-              — a 5-harness fan-out can bill all five at once, not one after another. <code>maxBudgetUsd</code> still
-              applies per run;
-              <code>maxConcurrent: 1</code>
-              restores one-at-a-time behavior everywhere, single runs included.
-            </p>
-            <div class="mono">/delegate all review the auth flow · /delegate claude,codex plan the migration</div>
-          </div>
-          <div class="card">
-            <h4 style="color: var(--cyan)"><i></i> One overlay, per-harness rows</h4>
-            <pre style="margin-top: 4px; font-size: 11px; padding: 10px">╭─ ⠋ delegate all · review · 1/4 · ⏱ 0:42──╮
+        <section id="fan-out">
+          <h2>Fan out to multiple harnesses</h2>
+          <div class="grid-fanout">
+            <div class="card">
+              <h3 style="color: var(--red)"><i></i> One task, every harness, concurrently</h3>
+              <p>
+                <code>harness</code>
+                also accepts <code>all</code> or a comma-separated list. The same task runs on every harness at once
+                (bounded by <code>maxConcurrent</code>, default <b>4</b>) and comes back as one synthesized comparison
+                report, ordered by the resolved harness list — not one report per harness.
+                <code>all</code>
+                resolves against whatever's actually <em>detected</em>; an uninstalled or unknown harness is named in
+                the report rather than failing the run.
+              </p>
+              <p style="margin-top: 10px">
+                <b style="color: var(--fg)">This is genuinely simultaneous spend</b>
+                — a 5-harness fan-out can bill all five at once, not one after another. <code>maxBudgetUsd</code> still
+                applies per run;
+                <code>maxConcurrent: 1</code>
+                restores one-at-a-time behavior everywhere, single runs included.
+              </p>
+              <div class="mono">/delegate all review the auth flow · /delegate claude,codex plan the migration</div>
+            </div>
+            <div class="card">
+              <h3 style="color: var(--cyan)"><i></i> One overlay, per-harness rows</h3>
+              <pre style="margin-top: 4px; font-size: 11px; padding: 10px">╭─ ⠋ delegate all · review · 1/4 · ⏱ 0:42──╮
 │ ✓ claude   0:38  done                    │
 │ ⠹ codex    0:41  ▶ Bash: bun test        │
 │ ⠹ opencode 0:12  ✍ looking at auth…      │
 │ … amp      queued                        │
 │ esc cancel all · m minimize              │
 ╰────────────────────────────────────────────╯</pre>
-            <p>
-              Double-<code>esc</code>
-              cancels every in-flight and queued run at once; the status bar chip shows aggregate state and spend so far
-              (e.g. <code>● 1✓ 1✗ 1▶ 1… · ⏱ 0:42 · $0.175</code>).
-            </p>
+              <p>
+                Double-<code>esc</code>
+                cancels every in-flight and queued run at once; the status bar chip shows aggregate state and spend so
+                far (e.g. <code>● 1✓ 1✗ 1▶ 1… · ⏱ 0:42 · $0.175</code>).
+              </p>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section>
-        <h2>Config &amp; project trust</h2>
-        <div class="grid-config">
-          <div class="card">
-            <h4 style="color: var(--accent)"><i></i> One key in pi's own settings.json</h4>
-            <p>
-              Config lives under the <code>delegate</code> key in <code>~/.pi/agent/settings.json</code> —
-              <code>defaultHarness</code>, <code>maxBudgetUsd</code>, <code>maxConcurrent</code>,
-              <code>modelAliases</code>, per-harness <code>harnesses.&lt;name&gt;.model</code> /
-              <code>.transport</code>. Legacy <code>claudeDelegate</code> auto-migrates.
-            </p>
-            <div class="mono">/delegate config · /delegate config init · /delegate status</div>
+        <section id="config">
+          <h2>Config &amp; project trust</h2>
+          <div class="grid-config">
+            <div class="card">
+              <h3 style="color: var(--accent)"><i></i> One key in pi's own settings.json</h3>
+              <p>
+                Config lives under the <code>delegate</code> key in <code>~/.pi/agent/settings.json</code> —
+                <code>defaultHarness</code>, <code>maxBudgetUsd</code>, <code>maxConcurrent</code>,
+                <code>modelAliases</code>, per-harness <code>harnesses.&lt;name&gt;.model</code> /
+                <code>.transport</code>. Legacy <code>claudeDelegate</code> auto-migrates.
+              </p>
+              <div class="mono">/delegate config · /delegate config init · /delegate status</div>
+            </div>
+            <div
+              class="card"
+              style="border-color: rgba(255, 200, 87, 0.35); background: linear-gradient(180deg, rgba(255, 200, 87, 0.06), var(--card))"
+            >
+              <h3 style="color: var(--amber)"><i></i> Project trust — security fix in 0.6.0</h3>
+              <p>
+                Project-local templates (<code>.pi/delegate/templates/</code>) load only when
+                <b style="color: var(--fg)">pi itself</b>
+                considers the project trusted. As of <b>0.6.0</b>,
+                <code>.pi/trusted</code>
+                and the <code>PI_TRUSTED</code>/<code>PI_DELEGATE_TRUSTED</code>
+                environment variables <b style="color: var(--fg)">no longer grant trust</b> — a repo could commit
+                <code>.pi/trusted</code>
+                and silently widen a builtin template's permission on clone. Trust a project via pi's own trust prompt
+                or
+                <code>defaultProjectTrust</code>
+                instead.
+              </p>
+              <div class="mono">/delegate status → reports trust + skipped templates</div>
+            </div>
           </div>
+        </section>
+
+        <section id="migration">
+          <h2>Migration</h2>
           <div
             class="card"
-            style="border-color: rgba(255, 200, 87, 0.35); background: linear-gradient(180deg, rgba(255, 200, 87, 0.06), var(--card))"
-          >
-            <h4 style="color: var(--amber)"><i></i> Project trust — security fix in 0.6.0</h4>
-            <p>
-              Project-local templates (<code>.pi/delegate/templates/</code>) load only when
-              <b style="color: var(--fg)">pi itself</b>
-              considers the project trusted. As of <b>0.6.0</b>,
-              <code>.pi/trusted</code>
-              and the <code>PI_TRUSTED</code>/<code>PI_DELEGATE_TRUSTED</code>
-              environment variables <b style="color: var(--fg)">no longer grant trust</b> — a repo could commit
-              <code>.pi/trusted</code>
-              and silently widen a builtin template's permission on clone. Trust a project via pi's own trust prompt or
-              <code>defaultProjectTrust</code>
-              instead.
-            </p>
-            <div class="mono">/delegate status → reports trust + skipped templates</div>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <h2>Migration</h2>
-        <div
-          class="card"
-          style="
+            style="
             display: flex;
             gap: 16px;
             align-items: center;
             justify-content: space-between;
             flex-wrap: wrap;
           "
-        >
-          <div>
-            <b style="color: var(--amber)">pi-claude-delegate → pi-harness-delegate</b><br>
-            <span style="color: var(--muted); font-size: 13px"
-              ><code>claude_delegate</code>
-              →
-              <code>delegate { harness:claude}</code>
-              · <code>/claude</code> alias still works · <code>claudeDelegate</code> config auto-migrates · transcripts
-              stay readable</span
-            >
-          </div>
-          <code
-            style="
+          >
+            <div>
+              <b style="color: var(--amber)">pi-claude-delegate → pi-harness-delegate</b><br>
+              <span style="color: var(--muted); font-size: 13px"
+                ><code>claude_delegate</code>
+                →
+                <code>delegate { harness:claude}</code>
+                · <code>/claude</code> alias still works · <code>claudeDelegate</code> config auto-migrates ·
+                transcripts stay readable</span
+              >
+            </div>
+            <code
+              style="
               background: var(--bg-2);
               border: 1px solid var(--border);
               padding: 6px 10px;
               border-radius: 8px;
             "
-            >pi install npm:pi-harness-delegate</code
-          >
-        </div>
-      </section>
+              >pi install npm:pi-harness-delegate</code
+            >
+          </div>
+        </section>
+      </main>
 
       <footer>
         <span
