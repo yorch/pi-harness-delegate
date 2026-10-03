@@ -1,5 +1,24 @@
 # pi-harness-delegate
 
+## 0.7.0
+
+### Minor Changes
+
+- [#43](https://github.com/yorch/pi-harness-delegate/pull/43) [`65812d1`](https://github.com/yorch/pi-harness-delegate/commit/65812d1dd3865e972cc481fe1030a973ecd4387c) Thanks [@yorch](https://github.com/yorch)! - `addDirs` end to end: extra directories the harness may access can now come from the `delegate` tool's `addDirs` parameter, a repeatable `/delegate --add-dir=<path>` flag, or an `addDirs:` template frontmatter key (merged, resolved against the working directory, and validated). A model-supplied tool `addDirs` entry that resolves (after `..` and symlinks) outside the working directory requires interactive confirmation and is refused without a UI. Harnesses without the capability (`opencode run`, `codex exec resume`) keep ignoring them as before.
+  
+  `maxBudgetUsd` is now enforced (or honestly reported) for every harness: Claude keeps its native `--max-budget-usd`; harnesses that stream a cost but have no budget flag (opencode, amp) are stopped host-side as soon as the reported total exceeds the cap and recorded as `budget exceeded`; harnesses that report no cost (codex, devin) get a clear "not enforced" warning in the result and transcript instead of silently ignoring the cap. Over ACP (opencode), the cap is checked on every streamed `usage_update` (mid-turn, not only after the turn ends), and on a resumed session only the spend since the run started counts — prior turns in opencode's session-cumulative cost no longer trip a small budget.
+
+- [#43](https://github.com/yorch/pi-harness-delegate/pull/43) [`65812d1`](https://github.com/yorch/pi-harness-delegate/commit/65812d1dd3865e972cc481fe1030a973ecd4387c) Thanks [@yorch](https://github.com/yorch)! - `/delegate --allow-dangerous` (and the `/claude`, `/codex`, … aliases): a human can now run a `permission: danger` template — or escalate any other template to `danger` — from the command path, which previously always failed with "requires danger permission". The flag (also `--allow-dangerous=true`; any other value is off) applies to that one invocation only, is never read from config, and always asks for interactive confirmation naming the harness(es), mode, and that the run has full, unrestricted permissions — a fan-out gets a single prompt covering every harness. A decline runs nothing; a non-interactive session refuses it outright. The `delegate` tool's `allowDangerous` parameter and its own confirmation are unchanged. The danger-refusal error now names both opt-ins.
+
+### Patch Changes
+
+- [#43](https://github.com/yorch/pi-harness-delegate/pull/43) [`65812d1`](https://github.com/yorch/pi-harness-delegate/commit/65812d1dd3865e972cc481fe1030a973ecd4387c) Thanks [@yorch](https://github.com/yorch)! - Fix a batch of review findings:
+  
+  - **Concurrency slot leak**: a refused `danger` template, or a failing `git diff`/`gh pr diff` scope lookup, no longer leaks a `maxConcurrent` slot for the rest of the pi session. The in-process counter also no longer absorbs other processes' runs.
+  - **Security**: the `delegate` tool's `allowDangerous` now requires interactive human confirmation (refused with no UI); `sessionId`, `model`, and `pr` are validated so a value can't be injected as a CLI flag; `codex exec resume` and `gh pr diff` pass their positionals after `--`. Transcripts are written owner-only (`0700` dir, `0600` files).
+  - **Correctness**: runners never spawn for an already-cancelled run and clean up their abort listeners; opencode/amp report cost only when the harness actually reported one (never a fake `$0`); resuming one `sessionId` across a fan-out is rejected up front; run-registry entries are written atomically, and temp files abandoned by a crashed writer are reaped.
+  - **Docs**: README documents every flag (`--budget`, `--pr`, …), subcommand, and template frontmatter key, `PI_CODING_AGENT_DIR`, and corrects the fan-out and opencode cost notes; package metadata now mentions Devin.
+
 ## 0.6.2
 
 ### Patch Changes
