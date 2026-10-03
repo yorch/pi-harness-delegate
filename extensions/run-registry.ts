@@ -17,7 +17,7 @@
  * `acquireRun`/`countActiveRuns` directly.
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { agentDir } from './config.ts';
 
@@ -45,7 +45,17 @@ export function acquireRun(harness: string, mode: string): RunHandle | null {
     const dir = runsDir();
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${process.pid}-${harness}-${Math.random().toString(36).slice(2, 8)}.json`);
-    writeFileSync(file, JSON.stringify({ pid: process.pid, harness, mode, startedAt: Date.now() }));
+    // Write-then-rename so a concurrent countActiveRuns() never sees a half-written entry: it
+    // treats unparseable `.json` files as corrupt and deletes them, which would silently drop a
+    // live run's registration mid-write. `.tmp` files are invisible to it (it only reads `.json`).
+    const tmp = `${file}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ pid: process.pid, harness, mode, startedAt: Date.now() }));
+      renameSync(tmp, file);
+    } catch (err) {
+      rmSync(tmp, { force: true });
+      throw err;
+    }
     return { file };
   } catch {
     return null;
@@ -73,6 +83,7 @@ export function countActiveRuns(harness?: string): number {
   }
   let count = 0;
   for (const f of files) {
+    // only complete entries — in-flight `<entry>.json.tmp` writes (see acquireRun) are skipped
     if (!f.endsWith('.json')) continue;
     const full = join(runsDir(), f);
     try {

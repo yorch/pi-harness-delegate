@@ -154,3 +154,26 @@ test('acquireRunWithinLimits: never over-admits across many repeated claims agai
     assert.equal(countActiveRuns(), 0);
   });
 });
+
+test('run-registry: entries are written atomically — no .tmp left behind, in-flight .tmp files ignored', async () => {
+  await withAgentDir(async dir => {
+    const { readdirSync, existsSync } = await import('node:fs');
+    const { acquireRun, releaseRun, countActiveRuns } = await import('../extensions/run-registry.ts');
+    const handle = acquireRun('claude', 'review');
+    assert.ok(handle);
+    const runs = join(dir, 'delegate', 'runs');
+    assert.deepEqual(
+      readdirSync(runs).filter(f => f.endsWith('.tmp')),
+      [],
+      'acquireRun must rename its temp file into place',
+    );
+    // another process mid-write: a partial entry under its temp name is neither counted nor deleted
+    const inflight = join(runs, `${process.pid}-codex-zzz.json.tmp`);
+    writeFileSync(inflight, '{"pid": 12');
+    assert.equal(countActiveRuns(), 1);
+    assert.equal(countActiveRuns('codex'), 0);
+    assert.ok(existsSync(inflight), 'a .tmp file must be left alone for its writer to rename');
+    releaseRun(handle);
+    assert.equal(countActiveRuns(), 0);
+  });
+});
