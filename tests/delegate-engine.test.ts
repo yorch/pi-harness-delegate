@@ -168,6 +168,20 @@ test('delegate tool: claude_delegate is the same definition as delegate, differi
   assert.equal(typeof alias.renderResult, 'function');
 });
 
+test('claude_delegate renderCall shows the pinned harness, not the ignored harness param', async () => {
+  const { tools } = await loadExtension();
+  const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s };
+  const render = (name: string) => {
+    const t = tools.get(name) as unknown as {
+      renderCall: (p: unknown, th: unknown) => { render: (w: number) => string[] };
+    };
+    return t.renderCall({ harness: 'codex', mode: 'review', task: 'x' }, theme).render(80).join('\n');
+  };
+  assert.match(render('claude_delegate'), /claude review/);
+  assert.doesNotMatch(render('claude_delegate'), /codex/);
+  assert.match(render('delegate'), /codex review/);
+});
+
 test('delegate tool: allowDangerous with no UI is refused before anything runs', async () => {
   await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
     const { tools } = await loadExtension(async () => {

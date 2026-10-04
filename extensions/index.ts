@@ -201,7 +201,7 @@ export default function (pi: ExtensionAPI) {
       };
     },
     renderCall(params, theme) {
-      const harness = params.harness ?? 'delegate';
+      const harness = spec.forceHarness ?? params.harness ?? 'delegate';
       const mode = params.mode ?? 'general';
       const task = params.task ?? '';
       const taskStr = task ? ` — ${task.length > 60 ? `${task.slice(0, 59)}…` : task}` : '';
