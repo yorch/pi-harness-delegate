@@ -211,6 +211,13 @@ test('permission: still wins over the legacy keys — same tier, but a disagreei
   const bogus = tierOf('permission: danger\nsandbox: bogus\npermissionMode: plan');
   assert.deepEqual(bogus.slice(0, 3), ['danger', 'bypassPermissions', undefined]);
   assert.equal(bogus[3], 'permission: danger overrides permissionMode: "plan", sandbox: "bogus" (ignored)');
+  // an unrecognized value is flagged even when the recognized legacy keys agree with permission:
+  const unrecognized = tierOf('permission: edit\nsandbox: workspace-write\npermissionMode: bogus');
+  assert.deepEqual(unrecognized.slice(0, 3), ['edit', 'acceptEdits', undefined]);
+  assert.equal(
+    unrecognized[3],
+    'permission: edit overrides permissionMode: "bogus", sandbox: "workspace-write" (ignored)',
+  );
   // the warning reaches /delegate list through the description
   const t = parseTemplate('---\nname: x\ndescription: d\npermission: edit\nsandbox: read-only\n---\nb');
   assert.equal(t?.description, `⚠ ${t?.permissionWarning} · d`);
