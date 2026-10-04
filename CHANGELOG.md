@@ -1,5 +1,21 @@
 # pi-harness-delegate
 
+## 0.7.3
+
+### Patch Changes
+
+- [#53](https://github.com/yorch/pi-harness-delegate/pull/53) [`afb5cf5`](https://github.com/yorch/pi-harness-delegate/commit/afb5cf5b11afc11b83be20ef724f313baa9929f7) Thanks [@yorch](https://github.com/yorch)! - Legacy `sandbox:` template frontmatter now maps codex sandbox values onto the right tier (`read-only` → readonly, `workspace-write` → edit, `danger-full-access` → danger, behind `allowDangerous`), case-insensitively. Previously every codex value fell through to `edit`, so `sandbox: read-only` ran writable and its `verify:` ran host-side. An unrecognized `sandbox:`/`permissionMode:` value now fails closed to `readonly` instead of silently becoming `edit`, with a warning shown in `/delegate list` and on every run (a notification, a `- warning:` transcript line, and a prefix on the result).
+  
+  Other behavior changes for existing templates:
+  
+  - `permissionMode:` values are now case- and `-`/`_`-insensitive: `permissionMode: Plan` was `edit`, now `readonly`; `accept-edits`/`bypass_permissions` are recognized (`bypass_permissions` is danger, refused without `allowDangerous`).
+  - `permissionMode: nope` (any unrecognized value) was `edit`, now `readonly` with a warning.
+  - An empty `permissionMode:` no longer hides `sandbox:`: `permissionMode:` + `sandbox: danger-full-access` was `edit`, now `danger` (refused without `allowDangerous`).
+  - The `permission`/`permissionMode`/`sandbox` key names are case-insensitive: `Sandbox: read-only` or `Permission: readonly` were silently ignored (→ `edit`), now honored. A key given more than once takes the least permissive value.
+  - `permission:` still wins over the legacy keys, but a legacy key that disagrees with it is now flagged with a warning (the tier is unchanged).
+
+- [#52](https://github.com/yorch/pi-harness-delegate/pull/52) [`d2dce59`](https://github.com/yorch/pi-harness-delegate/commit/d2dce599cf6ae252d503a67e01900b70f05f7e9a) Thanks [@yorch](https://github.com/yorch)! - Native permissions in template frontmatter now match a harness's allowlist case-insensitively (`permission: Plan` is claude's `plan`, no longer gated as an unlisted/danger mode) and always reach the harness in their canonical spelling; case variants of danger modes (`Yolo`, `BYPASSPERMISSIONS`) stay gated. A native value that is genuinely read-only on its harness (claude/devin/opencode `plan`, codex `read-only`) now runs as the `readonly` tier — recorded as `readonly`, and its `verify:` command is skipped instead of executing host-side (it used to run, breaking readonly's no-execution guarantee). The `delegate` tool's `harness` param is now normalized exactly like `/delegate`'s, so `harness: "claude,"` is a single run (fail-fast at capacity, single-run result) rather than a one-harness fan-out, and `omp` resolves to `amp`. A harness spec that names no harness at all (`,`, `" , "`) is now refused with a clear error on both the tool and `/delegate --harness=` instead of silently running the default harness. The deprecated `claude_delegate` alias's call header now shows the harness it actually runs (`claude`) rather than an ignored `harness` param.
+
 ## 0.7.2
 
 ### Patch Changes
