@@ -23,6 +23,8 @@ export interface DelegateTemplate {
   nativePermission?: string;
   /** Legacy raw permissionMode for transcript compat. */
   permissionMode: PermissionMode;
+  /** Why an unrecognized legacy `permissionMode:`/`sandbox:` value was failed closed to `readonly`. */
+  legacyPermissionError?: string;
   model?: string;
   maxBudgetUsd?: number;
   skill?: string;
@@ -36,10 +38,95 @@ export interface DelegateTemplate {
   harness?: string;
 }
 
+/** Tier order, least permissive first — used to pick the safer of two conflicting legacy keys. */
+const TIER_RANK: Record<NormalizedPermission, number> = { readonly: 0, edit: 1, danger: 2 };
+
+const TIER_PERMISSION_MODE: Record<NormalizedPermission, PermissionMode> = {
+  readonly: 'plan',
+  edit: 'acceptEdits',
+  danger: 'bypassPermissions',
+};
+
+/** Claude `PermissionMode` names, matched case-insensitively (`acceptedits` → `acceptEdits`). */
+const PERMISSION_MODES_BY_LOWER = new Map<string, PermissionMode>([...PERMISSION_MODES].map(m => [m.toLowerCase(), m]));
+
+/** Codex `--sandbox` values (the legacy `sandbox:` key) → normalized tier. Keys are lowercase, `_`→`-`. */
+const LEGACY_SANDBOX_TIERS: Record<string, NormalizedPermission> = {
+  'read-only': 'readonly',
+  readonly: 'readonly',
+  'workspace-write': 'edit',
+  'danger-full-access': 'danger',
+};
+
+interface LegacyPermission {
+  permission: NormalizedPermission;
+  permissionMode: PermissionMode;
+  /** Set when a legacy value was unrecognized and the template was failed closed to `readonly`. */
+  legacyPermissionError?: string;
+}
+
+/**
+ * Map one legacy `permissionMode:`/`sandbox:` value onto a normalized tier. Both keys accept both
+ * vocabularies (claude PermissionMode names and codex sandbox values), case/whitespace-insensitive.
+ * Returns `null` for an unrecognized value — the caller fails that closed.
+ */
+function classifyLegacyValue(value: string): Omit<LegacyPermission, 'legacyPermissionError'> | null {
+  const lower = value.trim().toLowerCase();
+  const mode = PERMISSION_MODES_BY_LOWER.get(lower);
+  if (mode) {
+    if (mode === 'plan') return { permission: 'readonly', permissionMode: mode };
+    if (mode === 'bypassPermissions') return { permission: 'danger', permissionMode: mode };
+    return { permission: 'edit', permissionMode: mode };
+  }
+  const tier = LEGACY_SANDBOX_TIERS[lower.replace(/_/g, '-')];
+  return tier ? { permission: tier, permissionMode: TIER_PERMISSION_MODE[tier] } : null;
+}
+
+/**
+ * Legacy `permissionMode:`/`sandbox:` keys → normalized tier. Only consulted when `permission:` is
+ * absent. An empty/absent value means "not set" (default `edit`, as always).
+ *
+ * **Fails closed:** an unrecognized value (a typo, a value from some other harness's vocabulary)
+ * yields `readonly` plus `legacyPermissionError` — never the old silent `edit`, and never a refusal
+ * to load. Not loading would let a same-named lower tier (e.g. the builtin `implement`, `edit`)
+ * silently win instead, which can be MORE permissive than an author who wrote `sandbox: readonyl`
+ * meant; `readonly` is the one tier that can never exceed what any author meant (and it also skips
+ * `verify:`). When both keys are set, the less permissive of the two wins.
+ */
+export function normalizeLegacyPermission(
+  permissionMode: string | undefined,
+  sandbox: string | undefined,
+): LegacyPermission {
+  const set = [
+    ['permissionMode', permissionMode?.trim()],
+    ['sandbox', sandbox?.trim()],
+  ].filter((e): e is [string, string] => Boolean(e[1]));
+  if (set.length === 0) return { permission: 'edit', permissionMode: 'acceptEdits' };
+  let best: Omit<LegacyPermission, 'legacyPermissionError'> | null = null;
+  for (const [key, value] of set) {
+    const c = classifyLegacyValue(value);
+    if (!c) {
+      return {
+        permission: 'readonly',
+        permissionMode: 'plan',
+        legacyPermissionError: `unrecognized ${key}: "${value}" — loaded as readonly (fail closed)`,
+      };
+    }
+    if (!best || TIER_RANK[c.permission] < TIER_RANK[best.permission]) best = c;
+  }
+  return best as LegacyPermission;
+}
+
 export function normalizePermission(
   raw: string | undefined,
   fallbackMode: string | undefined,
-): { permission: NormalizedPermission; nativePermission?: string; permissionMode: PermissionMode } {
+  sandbox?: string,
+): {
+  permission: NormalizedPermission;
+  nativePermission?: string;
+  permissionMode: PermissionMode;
+  legacyPermissionError?: string;
+} {
   // Prefer normalized permission
   if (raw) {
     const lower = raw.trim().toLowerCase();
@@ -57,14 +144,8 @@ export function normalizePermission(
     // Unknown native — treat as native escape hatch
     return { permission: 'edit', nativePermission: raw.trim(), permissionMode: 'acceptEdits' };
   }
-  // Legacy permissionMode mapping
-  if (fallbackMode && PERMISSION_MODES.has(fallbackMode as PermissionMode)) {
-    const m = fallbackMode as PermissionMode;
-    if (m === 'plan') return { permission: 'readonly', permissionMode: m };
-    if (m === 'bypassPermissions') return { permission: 'danger', permissionMode: m };
-    return { permission: 'edit', permissionMode: m };
-  }
-  return { permission: 'edit', permissionMode: 'acceptEdits' };
+  // Legacy permissionMode/sandbox mapping — fails closed to readonly on an unrecognized value
+  return normalizeLegacyPermission(fallbackMode, sandbox);
 }
 
 /** Comma-separated frontmatter list (`a, b`) — undefined when absent or empty. */
@@ -92,17 +173,21 @@ export function parseTemplate(text: string): DelegateTemplate | null {
   if (!name) return null;
 
   const permRaw = meta.permission?.trim();
-  const permModeRaw = meta.permissionMode?.trim() ?? meta.sandbox?.trim();
-  const norm = normalizePermission(permRaw, permModeRaw);
+  const norm = normalizePermission(permRaw, meta.permissionMode, meta.sandbox);
 
   const budget = meta.maxBudgetUsd ? Number(meta.maxBudgetUsd) : NaN;
+  const description = meta.description ?? '';
 
   return {
     name,
-    description: meta.description ?? '',
+    // An unrecognized legacy value is surfaced where the template is listed (`/delegate list`).
+    description: norm.legacyPermissionError
+      ? `⚠ ${norm.legacyPermissionError}${description ? ` · ${description}` : ''}`
+      : description,
     permission: norm.permission,
     nativePermission: norm.nativePermission,
     permissionMode: norm.permissionMode,
+    legacyPermissionError: norm.legacyPermissionError,
     model: meta.model || undefined,
     maxBudgetUsd: Number.isFinite(budget) && budget > 0 ? budget : undefined,
     skill: meta.skill || undefined,
