@@ -25,7 +25,7 @@ import {
   resolveHarnessName,
 } from './harnesses/registry.ts';
 import { readAllHistory } from './history.ts';
-import { collectModes, formatModeRow } from './modes.ts';
+import { collectModes, formatModeRow, formatOmitted } from './modes.ts';
 import { loadTemplates, projectTemplatePresence } from './templates.ts';
 /**
  * `/delegate list [harness]` — the same read-only discovery data (`collectModes`) the model's
@@ -41,7 +41,7 @@ export async function showModes(ctx: ExtensionContext, harnessFilter?: string): 
     resolveHarnessName(loadConfigWithSource().config.defaultHarness),
   );
   const rows = report.modes.map(formatModeRow);
-  if (report.omitted > 0) rows.push(`… +${report.omitted} more not shown`);
+  if (report.omitted > 0) rows.push(`… +${report.omitted} more not shown (${formatOmitted(report)})`);
   if (!trusted && projectTemplatePresence(ctx.cwd, HARNESS_NAMES).dirs.length > 0)
     rows.push('(project untrusted — its project-local templates were not loaded; see /delegate status)');
   if (!ctx.hasUI) {

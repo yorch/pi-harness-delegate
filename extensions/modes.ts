@@ -19,8 +19,15 @@ import { classifyNativePermission, getHarness, HARNESS_NAMES, nativePermissionTi
 import type { NormalizedPermission } from './harnesses/types.ts';
 import { type DelegateTemplate, loadTemplates, type TemplateSource } from './templates.ts';
 
-/** Caps for template-authored text and for how many modes a listing shows. */
-export const MODE_TEXT_LIMITS = { name: 64, description: 240, model: 64, warning: 200, maxModes: 100 } as const;
+/**
+ * Caps for template-authored text and for how many modes a listing shows. `maxModesPerSource` caps
+ * each source tier (builtin / user / project) on its own, so no number of project templates can push
+ * a builtin or user mode out of the listing.
+ */
+export const MODE_TEXT_LIMITS = { name: 64, description: 240, model: 64, warning: 200, maxModesPerSource: 50 } as const;
+
+/** Listing order of source tiers: what ships with the extension first, a project's own last. */
+const SOURCE_ORDER: readonly TemplateSource[] = ['builtin', 'user', 'project'];
 
 // ANSI CSI / OSC / two-byte escape sequences.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping terminal escapes is the point
@@ -171,8 +178,9 @@ export interface ModeInfo {
 export interface ModesReport {
   trusted: boolean;
   modes: ModeInfo[];
-  /** Modes not listed because of `MODE_TEXT_LIMITS.maxModes`. */
+  /** Modes not listed because of `MODE_TEXT_LIMITS.maxModesPerSource` — in total, and per source. */
   omitted: number;
+  omittedBySource: Partial<Record<TemplateSource, number>>;
 }
 
 /** The template's own description — `parseTemplate` prefixes a permission warning onto it, which
@@ -191,7 +199,9 @@ function warningsOf(t: DelegateTemplate): string[] {
 
 /**
  * Every mode available on `harnesses` (default: all registered), as each harness's own run would
- * load it (`loadTemplates(cwd, harness, trusted)`). Sorted by name, capped at `maxModes`.
+ * load it (`loadTemplates(cwd, harness, trusted)`). Listed builtin modes first, then user, then
+ * project (a mode's tier is the most trusted source any of its copies comes from), by name within a
+ * tier, each tier capped at `maxModesPerSource` with the overflow counted per tier.
  * `defaultHarness` (the resolved config default) decides each mode's no-harness default — see
  * `templateForHarnessDefault`; that is judged over every harness's view, whatever `harnesses` lists.
  */
@@ -240,12 +250,27 @@ export function collectModes(
       });
     }
   }
-  const all = [...byName.values()].map(e => e.info).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return {
-    trusted,
-    modes: all.slice(0, MODE_TEXT_LIMITS.maxModes),
-    omitted: Math.max(0, all.length - MODE_TEXT_LIMITS.maxModes),
-  };
+  const rank = (m: ModeInfo) => Math.min(...m.availability.map(a => SOURCE_ORDER.indexOf(a.source)));
+  const modes: ModeInfo[] = [];
+  const omittedBySource: Partial<Record<TemplateSource, number>> = {};
+  SOURCE_ORDER.forEach((source, i) => {
+    const tier = [...byName.values()]
+      .map(e => e.info)
+      .filter(m => rank(m) === i)
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    modes.push(...tier.slice(0, MODE_TEXT_LIMITS.maxModesPerSource));
+    if (tier.length > MODE_TEXT_LIMITS.maxModesPerSource)
+      omittedBySource[source] = tier.length - MODE_TEXT_LIMITS.maxModesPerSource;
+  });
+  const omitted = Object.values(omittedBySource).reduce((a, b) => a + b, 0);
+  return { trusted, modes, omitted, omittedBySource };
+}
+
+/** `project 51, user 3` — the per-source overflow, for the listing headers. */
+export function formatOmitted(report: Pick<ModesReport, 'omittedBySource'>): string {
+  return SOURCE_ORDER.filter(s => report.omittedBySource[s])
+    .map(s => `${s} ${report.omittedBySource[s]}`)
+    .join(', ');
 }
 
 /** `readonly on claude, codex · danger (needs allowDangerous) on amp` — harnesses grouped by tier/source. */
@@ -288,7 +313,9 @@ export function formatModesForModel(
   },
 ): string {
   const lines: string[] = [];
-  lines.push(`delegate modes: ${report.modes.length}${report.omitted > 0 ? ` (+${report.omitted} not listed)` : ''}`);
+  lines.push(
+    `delegate modes: ${report.modes.length}${report.omitted > 0 ? ` (+${report.omitted} not listed — ${formatOmitted(report)}; at most ${MODE_TEXT_LIMITS.maxModesPerSource} per source, builtin then user then project)` : ''}`,
+  );
   lines.push(
     report.trusted
       ? 'project trust: trusted — project-local templates are included.'
