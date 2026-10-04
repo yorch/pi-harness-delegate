@@ -60,9 +60,9 @@ export interface DelegateTemplate {
   /**
    * Default harness(es) for this mode (`harnesses: codex` or `harnesses: claude, codex`), used ONLY
    * when the caller names no harness. Lowercased; well-formed but unknown names are kept so the
-   * existing fan-out reporting (`resolveHarnessList`) names them. Never widens permission. The
-   * `/delegate` command runs the whole list (a fan-out when it has several); the `delegate` tool runs
-   * only the first known one — see `templateHarnessDefault` (command.ts).
+   * existing fan-out reporting (`resolveHarnessList`) names them. Never widens permission. Several
+   * names make a run with no harness a fan-out on both the `/delegate` command and the `delegate`
+   * tool — see `templateHarnessDefault` (command.ts).
    */
   harnesses?: string[];
   /**

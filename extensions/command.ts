@@ -96,20 +96,14 @@ export function normalizeHarnessSpec(spec: string): string | undefined {
  * harness (`undefined` when it declares none). Callers only consult this when no harness was given —
  * an explicit `--harness=`, first-word harness, alias command or tool `harness` param always wins.
  *
- * - `single: false` (the `/delegate` command): the whole list, as a spec — several names make it a
- *   fan-out, which goes through the normal fan-out path (`resolveHarnessList` skips/reports unknown
- *   and uninstalled names, `waitForSlot`, one `--allow-dangerous` confirm naming every harness).
- * - `single: true` (the `delegate` tool): only the first *known* name (falling back to the first
- *   entry, so an all-unknown list fails with the usual unknown-harness error rather than silently
- *   running the config default). A template must not turn a model's single call into a multi-harness
- *   fan-out: that would multiply spend the model never asked for and change the result shape.
+ * The same on both paths (the `/delegate` command and the `delegate` tool): one name is a normal
+ * single run (fail-fast at capacity); several are a fan-out spec, which each path hands to its
+ * unchanged fan-out runner (`runFanoutCommand` / `runFanoutTool`) — `resolveHarnessList` detection
+ * filtering and unknown/skipped reporting, `waitForSlot: true` through `acquireSlot`,
+ * `fanoutResumeError`, and the path's own danger/addDirs confirm gates resolved against this spec.
  */
-export function templateHarnessDefault(
-  harnesses: readonly string[] | undefined,
-  opts: { single: boolean; isKnown: (name: string) => boolean },
-): string | undefined {
+export function templateHarnessDefault(harnesses: readonly string[] | undefined): string | undefined {
   if (!harnesses || harnesses.length === 0) return undefined;
-  if (opts.single) return normalizeHarnessSpec(harnesses.find(h => opts.isKnown(h)) ?? harnesses[0]);
   return normalizeHarnessSpec(harnesses.join(','));
 }
 

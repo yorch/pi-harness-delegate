@@ -112,7 +112,7 @@ const DELEGATE_TOOL_PARAMS = Type.Object({
   harness: Type.Optional(
     Type.String({
       description:
-        'Harness to use: claude, codex, opencode, amp (aliases: omp), devin. "all" or a comma list (e.g. "claude,codex") fans out to each detected harness. Defaults to config defaultHarness.',
+        'Harness to use: claude, codex, opencode, amp (aliases: omp), devin. "all" or a comma list (e.g. "claude,codex") fans out to each detected harness. Omitted: the mode\'s default harness(es) if its template declares any (several fan out — see delegate_modes), else config defaultHarness.',
     }),
   ),
   task: Type.String({ description: 'The task/intent to delegate. Be specific.' }),
@@ -210,16 +210,13 @@ export default function (pi: ExtensionAPI) {
       let harness = harnessSpec === undefined ? undefined : normalizeHarnessSpec(harnessSpec);
       if (harnessSpec && harness === undefined) throw new Error(emptyHarnessSpecError(harnessSpec));
       const config = loadConfig();
-      // No harness given: the mode's template may name a default (`harnesses:`). The tool takes only
-      // its first known harness — a template never turns the model's single call into a fan-out (see
-      // templateHarnessDefault). Resolved before the confirm gates so they name what will run.
-      let templateHarnessNote = '';
-      if (harness === undefined) {
-        const declared = templateForDefaults(ctx, config, rawParams.mode)?.harnesses;
-        harness = templateHarnessDefault(declared, { single: true, isKnown: isKnownHarness });
-        if (declared && declared.length > 1 && harness)
-          templateHarnessNote = `template "${rawParams.mode || config.defaultMode}" defaults to harnesses ${declared.join(', ')}; the delegate tool runs only ${harness} — pass harness: "${declared.join(',')}" to fan out.\n`;
-      }
+      // No harness given: the mode's template may name default harness(es) (`harnesses:`). Several
+      // make this a fan-out through runFanoutTool below — the same path as an explicit `harness:
+      // "a,b"` (detection filtering, waitForSlot queueing, fanoutResumeError). Resolved *before* the
+      // confirm gates, so the allowDangerous confirm names every harness that will run and the
+      // addDirs confirm (headless: refusal) covers the whole fan-out.
+      if (harness === undefined)
+        harness = templateHarnessDefault(templateForDefaults(ctx, config, rawParams.mode)?.harnesses);
       const params: DelegateToolParams = { ...rawParams, harness };
       // an out-of-range per-call timeout fails the call before any confirm prompt, and once — not
       // once per fan-out row
@@ -267,7 +264,7 @@ export default function (pi: ExtensionAPI) {
       const footer = summary.truncated ? `\nFull output: ${details.file}` : `\nTranscript: ${details.file}`;
       details.markdown = summary.text;
       return {
-        content: [{ type: 'text', text: `${templateHarnessNote}${head}${body}${footer}` }],
+        content: [{ type: 'text', text: `${head}${body}${footer}` }],
         details,
         usage: result.usage ? mapClaudeUsage({ ...result.usage, totalCostUsd: result.totalCostUsd }) : undefined,
       };
@@ -655,10 +652,7 @@ export default function (pi: ExtensionAPI) {
     // reporting, slot queueing and single --allow-dangerous confirm as a typed list.
     if (!parsed.harness) {
       const config = loadConfig();
-      parsed.harness = templateHarnessDefault(templateForDefaults(ctx, config, parsed.mode)?.harnesses, {
-        single: false,
-        isKnown: isKnownHarness,
-      });
+      parsed.harness = templateHarnessDefault(templateForDefaults(ctx, config, parsed.mode)?.harnesses);
     }
 
     // fan-out: harness field is `all` or a comma list — resolve to detected harnesses and run

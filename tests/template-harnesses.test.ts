@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { dirname } from 'node:path';
 import { test } from 'node:test';
 import { templateHarnessDefault } from '../extensions/command.ts';
-import { isKnownHarness } from '../extensions/harnesses/registry.ts';
 import { parseTemplate, parseTemplateHarnesses } from '../extensions/templates.ts';
 import {
   CLAUDE_RESULT,
@@ -51,15 +50,12 @@ test('parseTemplateHarnesses: lowercased, deduped; `all` and non-name entries ar
   assert.match(t?.fieldWarnings?.[0] ?? '', /"all" ignored/);
 });
 
-test('templateHarnessDefault: the command gets the whole list, the tool only the first known harness', () => {
-  const opts = { isKnown: isKnownHarness };
-  assert.equal(templateHarnessDefault(undefined, { ...opts, single: false }), undefined);
-  assert.equal(templateHarnessDefault([], { ...opts, single: true }), undefined);
-  assert.equal(templateHarnessDefault(['codex', 'claude'], { ...opts, single: false }), 'codex,claude');
-  assert.equal(templateHarnessDefault(['omp'], { ...opts, single: false }), 'amp');
-  assert.equal(templateHarnessDefault(['nope', 'omp', 'claude'], { ...opts, single: true }), 'amp');
-  // all unknown: the first entry, so the run fails with the usual unknown-harness error
-  assert.equal(templateHarnessDefault(['nope', 'zilch'], { ...opts, single: true }), 'nope');
+test('templateHarnessDefault: the whole list as a normalized spec — one name single, several a fan-out', () => {
+  assert.equal(templateHarnessDefault(undefined), undefined);
+  assert.equal(templateHarnessDefault([]), undefined);
+  assert.equal(templateHarnessDefault(['codex', 'claude']), 'codex,claude');
+  assert.equal(templateHarnessDefault(['omp']), 'amp');
+  assert.equal(templateHarnessDefault(['nope', 'omp', 'claude']), 'nope,omp,claude'); // aliases resolved by resolveHarnessList
 });
 
 test('/delegate: a template harnesses list fans out when no harness is given, reporting unknown/uninstalled', async () => {
@@ -159,75 +155,165 @@ test('/delegate: --resume with a template fan-out default is rejected, never res
   });
 });
 
-test('delegate tool: a template harnesses list picks only its first known harness — a single run, with a note', async () => {
+const headless = (cwd: string) => ({ cwd, hasUI: false, isProjectTrusted: () => true });
+
+test('delegate tool: a template harnesses list fans out through runFanoutTool, reporting unknown/uninstalled', async () => {
   await withSandbox(
-    { templates: { fan: tpl('fan', 'readonly', 'harnesses: nope, codex, claude') } },
+    { templates: { fan: tpl('fan', 'readonly', 'harnesses: nope, codex, claude, amp') } },
     async ({ cwd }) => {
       await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
-        const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
-        const res = (await tools.get('delegate')?.execute('t', { mode: 'fan', task: 'x' }, undefined, undefined, {
-          cwd,
-          hasUI: false,
-          isProjectTrusted: () => true,
-        })) as { content: { text: string }[]; details: Record<string, unknown> };
-        assert.ok(ran(argsFile, 'codex'));
-        assert.equal(readArgs(`${argsFile}.claude`), null, 'no fan-out: claude neither probed nor run');
-        assert.equal(res.details.harness, 'codex');
-        assert.equal(res.details.fanout, undefined);
-        assert.match(
-          res.content[0].text,
-          /defaults to harnesses nope, codex, claude; the delegate tool runs only codex/,
-        );
+        await withOnlyFakes(argsFile, async () => {
+          const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const res = (await tools
+            .get('delegate')
+            ?.execute('t', { mode: 'fan', task: 'x' }, undefined, undefined, headless(cwd))) as {
+            content: { text: string }[];
+            details: Record<string, unknown>;
+          };
+          assert.ok(ran(argsFile, 'codex'));
+          assert.ok(ran(argsFile, 'claude'));
+          assert.equal(res.details.fanout, true);
+          assert.deepEqual(res.details.harnesses, ['codex', 'claude']);
+          assert.deepEqual(res.details.unknown, ['nope']);
+          assert.deepEqual(res.details.skipped, ['amp']);
+          assert.match(res.content[0].text, /2\/2 ok/);
+        });
       });
     },
   );
 });
 
-test('delegate tool: the allowDangerous confirm names the template-chosen harness', async () => {
-  await withSandbox({ templates: { fan: tpl('fan', 'edit', 'harnesses: codex') } }, async ({ cwd }) => {
-    const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
-    const { ctx, asked } = uiCtx(cwd, false);
-    await assert.rejects(
-      () =>
-        tools
-          .get('delegate')
-          ?.execute('t', { mode: 'fan', task: 'x', allowDangerous: true }, undefined, undefined, ctx) ??
-        Promise.resolve(),
-      /declined/,
-    );
-    assert.equal(asked.length, 1);
-    assert.match(asked[0], /run codex fan with DANGER/);
+test('delegate tool: a one-harness template default is a plain single run on that harness', async () => {
+  await withSandbox({ templates: { one: tpl('one', 'readonly', 'harnesses: codex') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const res = (await tools
+        .get('delegate')
+        ?.execute('t', { mode: 'one', task: 'x' }, undefined, undefined, headless(cwd))) as {
+        details: Record<string, unknown>;
+      };
+      assert.ok(ran(argsFile, 'codex'));
+      assert.equal(readArgs(`${argsFile}.claude`), null, 'claude neither probed nor run');
+      assert.equal(res.details.harness, 'codex');
+      assert.equal(res.details.fanout, undefined);
+    });
   });
 });
 
-test('delegate tool: single-run fail-fast at capacity is unchanged, explicit or template-chosen harness', async () => {
+test('delegate tool: the allowDangerous confirm names every template harness; decline / headless run nothing', async () => {
+  await withSandbox({ templates: { fan: tpl('fan', 'edit', 'harnesses: claude, codex') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      await withOnlyFakes(argsFile, async () => {
+        const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const params = { mode: 'fan', task: 'x', allowDangerous: true };
+        const declined = uiCtx(cwd, false);
+        await assert.rejects(
+          () => tools.get('delegate')?.execute('t', params, undefined, undefined, declined.ctx) ?? Promise.resolve(),
+          /declined/,
+        );
+        assert.equal(declined.asked.length, 1);
+        assert.match(declined.asked[0], /run claude,codex fan with DANGER/);
+        await assert.rejects(
+          () => tools.get('delegate')?.execute('t', params, undefined, undefined, headless(cwd)) ?? Promise.resolve(),
+          /no interactive UI to confirm it with/,
+        );
+        assert.equal(readArgs(`${argsFile}.claude`), null, 'nothing probed or run');
+        assert.equal(readArgs(`${argsFile}.codex`), null, 'nothing probed or run');
+
+        const approved = uiCtx(cwd, true);
+        await tools.get('delegate')?.execute('t', params, undefined, undefined, approved.ctx);
+        assert.equal(approved.asked.length, 1, 'one confirm covers the whole template fan-out');
+        assert.ok(readArgs(`${argsFile}.claude`)?.includes('bypassPermissions'));
+        assert.ok(readArgs(`${argsFile}.codex`)?.includes('danger-full-access'));
+      });
+    });
+  });
+});
+
+test('delegate tool: addDirs outside cwd on a template fan-out is gated once — headless refuses before anything runs', async () => {
+  await withSandbox({ templates: { fan: tpl('fan', 'readonly', 'harnesses: claude, codex') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      await withOnlyFakes(argsFile, async () => {
+        const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        await assert.rejects(
+          () =>
+            tools
+              .get('delegate')
+              ?.execute('t', { mode: 'fan', task: 'x', addDirs: ['/'] }, undefined, undefined, headless(cwd)) ??
+            Promise.resolve(),
+          /addDirs outside the working directory requested/,
+        );
+        assert.equal(readArgs(`${argsFile}.claude`), null);
+        assert.equal(readArgs(`${argsFile}.codex`), null);
+      });
+    });
+  });
+});
+
+test('delegate tool: sessionId with a template fan-out default is rejected, never resumed across harnesses', async () => {
+  await withSandbox({ templates: { fan: tpl('fan', 'readonly', 'harnesses: claude, codex') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      await assert.rejects(
+        () =>
+          tools
+            .get('delegate')
+            ?.execute('t', { mode: 'fan', task: 'x', sessionId: 'abc' }, undefined, undefined, headless(cwd)) ??
+          Promise.resolve(),
+        /across a fan-out/,
+      );
+      assert.equal(readArgs(`${argsFile}.claude`), null);
+      assert.equal(readArgs(`${argsFile}.codex`), null);
+    });
+  });
+});
+
+test('delegate tool: a single template harness still fails fast at capacity; a template fan-out queues for slots', async () => {
   await withSandbox(
-    { settings: { maxConcurrent: 1 }, templates: { fan: tpl('fan', 'readonly', 'harnesses: claude, codex') } },
+    {
+      settings: { maxConcurrent: 1 },
+      templates: {
+        one: tpl('one', 'readonly', 'harnesses: claude'),
+        fan: tpl('fan', 'readonly', 'harnesses: claude, codex'),
+      },
+    },
     async ({ cwd }) => {
       const { acquireSlot } = await import('../extensions/concurrency.ts');
       const { loadConfig } = await import('../extensions/config.ts');
-      const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
-      const release = await acquireSlot({ harness: 'claude', mode: 'held', config: loadConfig(), wait: false });
-      try {
-        for (const params of [
-          { harness: 'claude', mode: 'fan', task: 'x' },
-          { mode: 'fan', task: 'x' },
-        ]) {
-          const signal = AbortSignal.timeout(2000);
-          await assert.rejects(
-            () =>
-              tools.get('delegate')?.execute('t', params, signal, undefined, {
-                cwd,
-                hasUI: false,
-                isProjectTrusted: () => true,
-              }) ?? Promise.resolve(),
-            /already in progress|claimed the last available slot/,
-          );
-          assert.equal(signal.aborted, false, `${JSON.stringify(params)}: rejected immediately, not queued`);
-        }
-      } finally {
-        release();
-      }
+      await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const release = await acquireSlot({ harness: 'claude', mode: 'held', config: loadConfig(), wait: false });
+          let released = false;
+          try {
+            for (const params of [
+              { harness: 'claude', mode: 'one', task: 'x' },
+              { mode: 'one', task: 'x' },
+            ]) {
+              const signal = AbortSignal.timeout(2000);
+              await assert.rejects(
+                () =>
+                  tools.get('delegate')?.execute('t', params, signal, undefined, headless(cwd)) ?? Promise.resolve(),
+                /already in progress|claimed the last available slot/,
+              );
+              assert.equal(signal.aborted, false, `${JSON.stringify(params)}: rejected immediately, not queued`);
+            }
+            // the fan-out waits for the held slot instead of failing, then runs both (one at a time)
+            const fan = tools
+              .get('delegate')
+              ?.execute('t', { mode: 'fan', task: 'x' }, undefined, undefined, headless(cwd));
+            await new Promise(r => setTimeout(r, 400));
+            assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'), 'queued behind the held slot');
+            release();
+            released = true;
+            const res = (await fan) as { details: Record<string, unknown>; content: { text: string }[] };
+            assert.equal(res.details.fanout, true);
+            assert.match(res.content[0].text, /2\/2 ok/);
+          } finally {
+            if (!released) release();
+          }
+        });
+      });
     },
   );
 });

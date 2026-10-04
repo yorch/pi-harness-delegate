@@ -219,7 +219,7 @@ test('delegate_modes: template harnesses/timeout/warnings are shown; the mode co
     assert.match(text, /^delegate modes: 100 \(\+13 not listed\)/);
     assert.match(
       text,
-      /default harness when none given: codex, claude \(the delegate tool uses only the first known one\) · timeout: 900s/,
+      /default harness when none given: codex, claude \(fans out to each installed one\) · timeout: 900s/,
     );
     assert.match(text, /- mode: broken\n.*\n.*\n {2}warning: "timeout: \\"99999\\" ignored/);
   });

@@ -246,7 +246,7 @@ export function formatModesForModel(
     ];
     if (m.defaultHarnesses)
       extras.push(
-        `default harness when none given: ${m.defaultHarnesses.join(', ')} (the delegate tool uses only the first known one)`,
+        `default harness when none given: ${m.defaultHarnesses.join(', ')}${m.defaultHarnesses.length > 1 ? ' (fans out to each installed one)' : ''}`,
       );
     if (m.timeoutSec !== undefined) extras.push(`timeout: ${m.timeoutSec}s`);
     if (m.model) extras.push(`model: ${JSON.stringify(m.model)}`);
