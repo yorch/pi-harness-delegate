@@ -81,6 +81,16 @@ test('legacy permissionMode: claude names keep their mapping, now case-insensiti
   assert.deepEqual(tierOf('sandbox: plan'), ['readonly', 'plan', undefined, undefined]);
 });
 
+test('legacy permissionMode: claude names are `-`/`_`-insensitive too, landing on the same tier', () => {
+  for (const v of ['accept-edits', 'Accept_Edits', 'accept_edits'])
+    assert.deepEqual(tierOf(`permissionMode: ${v}`), ['edit', 'acceptEdits', undefined, undefined], v);
+  assert.deepEqual(tierOf('permissionMode: dont-ask'), ['edit', 'dontAsk', undefined, undefined]);
+  for (const v of ['bypass_permissions', 'Bypass-Permissions'])
+    assert.deepEqual(tierOf(`sandbox: ${v}`), ['danger', 'bypassPermissions', undefined, undefined], v);
+  // separators are only dropped for the claude-name lookup — a codex value still needs its own shape
+  assert.equal(tierOf('sandbox: workspacewrite')[0], 'readonly');
+});
+
 test('legacy keys: an unrecognized value fails closed to readonly, with a warning naming key and value', () => {
   for (const fm of ['sandbox: workspace-wrte', 'sandbox: full', 'permissionMode: yolo', 'sandbox: danger']) {
     const [perm, mode, native, err] = tierOf(fm);

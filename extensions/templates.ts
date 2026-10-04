@@ -47,7 +47,7 @@ const TIER_PERMISSION_MODE: Record<NormalizedPermission, PermissionMode> = {
   danger: 'bypassPermissions',
 };
 
-/** Claude `PermissionMode` names, matched case-insensitively (`acceptedits` → `acceptEdits`). */
+/** Claude `PermissionMode` names, matched case- and `-`/`_`-insensitively (`accept-edits` → `acceptEdits`). */
 const PERMISSION_MODES_BY_LOWER = new Map<string, PermissionMode>([...PERMISSION_MODES].map(m => [m.toLowerCase(), m]));
 
 /** Codex `--sandbox` values (the legacy `sandbox:` key) → normalized tier. Keys are lowercase, `_`→`-`. */
@@ -75,12 +75,14 @@ interface LegacyPermission {
 
 /**
  * Map one legacy `permissionMode:`/`sandbox:` value onto a normalized tier. Both keys accept both
- * vocabularies (claude PermissionMode names and codex sandbox values), case/whitespace-insensitive.
+ * vocabularies (claude PermissionMode names and codex sandbox values), case/whitespace/`-`/`_`-insensitive.
  * Returns `null` for an unrecognized value — the caller fails that closed.
  */
 function classifyLegacyValue(value: string): Omit<LegacyPermission, 'legacyPermissionError'> | null {
   const lower = value.trim().toLowerCase();
-  const mode = PERMISSION_MODES_BY_LOWER.get(lower);
+  // Claude names have no separators of their own, so `accept-edits`/`bypass_permissions` can only
+  // ever mean that same name (and tier) — danger stays gated behind allowDangerous downstream.
+  const mode = PERMISSION_MODES_BY_LOWER.get(lower.replace(/[-_]/g, ''));
   if (mode) {
     if (mode === 'plan') return { permission: 'readonly', permissionMode: mode };
     if (mode === 'bypassPermissions') return { permission: 'danger', permissionMode: mode };
