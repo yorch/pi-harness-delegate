@@ -1257,6 +1257,24 @@ test('delegate: a native edit permission still runs its verify command, and dang
   });
 });
 
+test('delegate: a case-variant `Sandbox: read-only` key is honored — readonly, verify never executed', async () => {
+  for (const key of ['Sandbox', 'SANDBOX']) {
+    await withSandbox({}, async ({ cwd }) => {
+      writeCodexTemplate(cwd, 'ro', `${key}: read-only\nverify: touch pwned`);
+      const { delegate } = await import('../extensions/engine.ts');
+      const pi = fakePi(async (cmd, args) => {
+        throw new Error(`pi.exec must not be reached on a readonly run: ${cmd} ${args.join(' ')}`);
+      });
+      await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async argsFile => {
+        const run = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'ro', task: 'x' });
+        assert.equal(run.details.permission, 'readonly', key);
+        assert.equal(sandboxArg(argsFile), 'read-only', key);
+        assert.equal(run.verify?.skipped, 'readonly run', key);
+      });
+    });
+  }
+});
+
 test('delegate: legacy `sandbox: workspace-write` runs as edit and its verify runs host-side', async () => {
   await withSandbox({}, async ({ cwd }) => {
     writeCodexTemplate(cwd, 'ww', 'sandbox: Workspace_Write\nverify: bun test');

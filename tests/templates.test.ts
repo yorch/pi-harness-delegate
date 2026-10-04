@@ -172,6 +172,47 @@ test('permission: still wins over the legacy keys — same tier, but a disagreei
   assert.deepEqual(tierOf('permission: ask'), ['edit', 'acceptEdits', 'ask', undefined]);
 });
 
+test('permission keys are case-insensitive — `Sandbox:`/`SANDBOX:`/`Permission:` are never silently ignored', () => {
+  for (const fm of ['Sandbox: read-only', 'SANDBOX: read-only', 'Permission: readonly', 'PERMISSIONMODE: plan'])
+    assert.deepEqual(tierOf(fm), ['readonly', 'plan', undefined, undefined], fm);
+  assert.deepEqual(tierOf('PermissionMode: bypassPermissions'), ['danger', 'bypassPermissions', undefined, undefined]);
+  assert.equal(tierOf('Sandbox: nope')[0], 'readonly');
+  assert.match(String(tierOf('Sandbox: nope')[3]), /unrecognized sandbox: "nope"/);
+  // `Permission:` still outranks the legacy keys, whatever their case
+  assert.equal(tierOf('SANDBOX: danger-full-access\nPermission: readonly')[0], 'readonly');
+  // other keys keep their exact-case behavior
+  assert.equal(parseTemplate('---\nname: x\nVerify: touch pwned\n---\nb')?.verify, undefined);
+});
+
+test('permission keys duplicated by case: the least permissive value wins, in either order', () => {
+  for (const [a, b] of [
+    ['sandbox: workspace-write', 'Sandbox: read-only'],
+    ['permissionMode: acceptEdits', 'PermissionMode: plan'],
+    ['sandbox: danger-full-access', 'SANDBOX: read-only'],
+  ]) {
+    assert.equal(tierOf(`${a}\n${b}`)[0], 'readonly', `${a} / ${b}`);
+    assert.equal(tierOf(`${b}\n${a}`)[0], 'readonly', `${b} / ${a}`);
+  }
+  // one unrecognized variant still fails the whole thing closed
+  assert.equal(tierOf('sandbox: danger-full-access\nSandbox: nope')[0], 'readonly');
+  // duplicated permission: with disagreeing tiers → least permissive, flagged
+  for (const fm of ['permission: edit\nPermission: readonly', 'Permission: readonly\npermission: edit']) {
+    const [perm, mode, native, warn] = tierOf(fm);
+    assert.deepEqual([perm, mode, native], ['readonly', 'plan', undefined], fm);
+    assert.match(String(warn), /^conflicting permission: values .* — using the least permissive, readonly$/, fm);
+  }
+  assert.equal(tierOf('permission: danger\nPERMISSION: edit')[0], 'edit');
+  // a disagreement involving a native value can't be ranked → fail closed to readonly
+  for (const fm of ['permission: edit\nPermission: yolo', 'Permission: yolo\npermission: danger']) {
+    const [perm, , native, warn] = tierOf(fm);
+    assert.deepEqual([perm, native], ['readonly', undefined], fm);
+    assert.match(String(warn), /conflicting permission: .* loaded as readonly \(fail closed\)/, fm);
+  }
+  // duplicates that agree are not a conflict
+  assert.deepEqual(tierOf('permission: readonly\nPermission: read-only'), ['readonly', 'plan', undefined, undefined]);
+  assert.deepEqual(tierOf('permission: ask\nPermission: ask'), ['edit', 'acceptEdits', 'ask', undefined]);
+});
+
 test('parseTemplate returns null without name', () => {
   assert.equal(parseTemplate('---\ndescription: no name\n---\nbody'), null);
   assert.equal(parseTemplate('no frontmatter at all'), null);

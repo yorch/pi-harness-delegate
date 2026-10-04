@@ -97,11 +97,22 @@ function classifyLegacyValue(value: string): Omit<LegacyPermission, 'permissionW
 }
 
 /** The legacy keys actually set (non-empty), as `[key, value]` pairs. */
-function legacyEntries(permissionMode: string | undefined, sandbox: string | undefined): [string, string][] {
+function legacyEntries(permissionMode: FrontmatterValues, sandbox: FrontmatterValues): [string, string][] {
   return [
-    ['permissionMode', permissionMode?.trim()],
-    ['sandbox', sandbox?.trim()],
-  ].filter((e): e is [string, string] => Boolean(e[1]));
+    ...values(permissionMode).map(v => ['permissionMode', v] as [string, string]),
+    ...values(sandbox).map(v => ['sandbox', v] as [string, string]),
+  ];
+}
+
+/**
+ * A permission key's value(s): the keys are read case-insensitively and every occurrence is kept
+ * (`sandbox:` + `Sandbox:` is two values), so callers take an array; a single string still works.
+ */
+type FrontmatterValues = string | readonly string[] | undefined;
+
+/** Non-empty trimmed values — an empty value means "not set". */
+function values(v: FrontmatterValues): string[] {
+  return (typeof v === 'string' ? [v] : (v ?? [])).map(x => x.trim()).filter(Boolean);
 }
 
 /**
@@ -113,11 +124,11 @@ function legacyEntries(permissionMode: string | undefined, sandbox: string | und
  * to load. Not loading would let a same-named lower tier (e.g. the builtin `implement`, `edit`)
  * silently win instead, which can be MORE permissive than an author who wrote `sandbox: readonyl`
  * meant; `readonly` is the one tier that can never exceed what any author meant (and it also skips
- * `verify:`). When both keys are set, the less permissive of the two wins.
+ * `verify:`). When both keys (or several case variants of one) are set, the least permissive wins.
  */
 export function normalizeLegacyPermission(
-  permissionMode: string | undefined,
-  sandbox: string | undefined,
+  permissionMode: FrontmatterValues,
+  sandbox: FrontmatterValues,
 ): LegacyPermission {
   const set = legacyEntries(permissionMode, sandbox);
   if (set.length === 0) return { permission: 'edit', permissionMode: 'acceptEdits' };
@@ -137,9 +148,9 @@ export function normalizeLegacyPermission(
 }
 
 export function normalizePermission(
-  raw: string | undefined,
-  fallbackMode: string | undefined,
-  sandbox?: string,
+  raw: FrontmatterValues,
+  fallbackMode: FrontmatterValues,
+  sandbox?: FrontmatterValues,
 ): {
   permission: NormalizedPermission;
   nativePermission?: string;
@@ -147,8 +158,30 @@ export function normalizePermission(
   permissionWarning?: string;
 } {
   // Prefer normalized permission
-  if (raw) {
-    const resolved = normalizeTierValue(raw);
+  const raws = values(raw);
+  if (raws.length > 1) {
+    // `permission:` given more than once (e.g. `permission:` and `Permission:`) — the same tier is
+    // fine; disagreeing tiers take the least permissive, and a disagreement involving a native value
+    // (whose tier is per-harness, so not comparable here) fails closed to readonly. Never "last wins".
+    const all = raws.map(normalizeTierValue);
+    const distinct = new Set(all.map(r => `${r.permission}|${r.nativePermission ?? ''}`));
+    if (distinct.size > 1) {
+      const listed = raws.map(quoteValue).join(', ');
+      if (all.some(r => r.nativePermission))
+        return {
+          permission: 'readonly',
+          permissionMode: 'plan',
+          permissionWarning: `conflicting permission: values ${listed} — loaded as readonly (fail closed)`,
+        };
+      const least = all.reduce((a, b) => (TIER_RANK[b.permission] < TIER_RANK[a.permission] ? b : a));
+      return {
+        ...least,
+        permissionWarning: `conflicting permission: values ${listed} — using the least permissive, ${least.permission}`,
+      };
+    }
+  }
+  if (raws.length > 0) {
+    const resolved = normalizeTierValue(raws[0]);
     // `permission:` always wins; a legacy key that disagrees is ignored, but said so — an author who
     // wrote `sandbox: read-only` next to `permission: edit` should see which one ran. Skipped for a
     // native value: its tier is only known per harness at run time, so "disagrees" isn't decidable here.
@@ -194,23 +227,36 @@ function parseList(raw: string | undefined): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
+type PermissionKey = 'permission' | 'permissionMode' | 'sandbox';
+const PERMISSION_KEYS = new Map<string, PermissionKey>([
+  ['permission', 'permission'],
+  ['permissionmode', 'permissionMode'],
+  ['sandbox', 'sandbox'],
+]);
+
 /** Parse a template file: frontmatter (---\nkey: value\n---) + markdown body. */
 export function parseTemplate(text: string): DelegateTemplate | null {
   const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text.trimStart());
   if (!m) return null;
 
   const meta: Record<string, string> = {};
+  // The keys that decide the tier are matched case-insensitively and keep every occurrence: an
+  // exact-case lookup let `Sandbox: read-only` be silently ignored (→ the `edit` default, verify on).
+  const perm: Record<PermissionKey, string[]> = { permission: [], permissionMode: [], sandbox: [] };
   for (const line of m[1].split('\n')) {
     const i = line.indexOf(':');
     if (i <= 0) continue;
-    meta[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    const key = line.slice(0, i).trim();
+    const value = line.slice(i + 1).trim();
+    const permKey = PERMISSION_KEYS.get(key.toLowerCase());
+    if (permKey) perm[permKey].push(value);
+    else meta[key] = value;
   }
 
   const name = meta.name?.trim();
   if (!name) return null;
 
-  const permRaw = meta.permission?.trim();
-  const norm = normalizePermission(permRaw, meta.permissionMode, meta.sandbox);
+  const norm = normalizePermission(perm.permission, perm.permissionMode, perm.sandbox);
 
   const budget = meta.maxBudgetUsd ? Number(meta.maxBudgetUsd) : NaN;
   const description = meta.description ?? '';
