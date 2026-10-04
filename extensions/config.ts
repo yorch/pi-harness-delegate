@@ -12,6 +12,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DEFAULT_TIMEOUT_MS, type Harness, type Transport } from './harnesses/types.ts';
+import { TEMPLATE_TIMEOUT_MAX_SEC } from './templates.ts';
 
 export interface HarnessConfig {
   model?: string;
@@ -429,6 +430,29 @@ export function writeDelegateConfig(delegateSubtree: unknown): WriteConfigResult
       }
     }
   }
+}
+
+/**
+ * The harness timeout for one run. Precedence:
+ *
+ * 1. a template's `timeout:` (seconds) replaces the **global** `timeoutMs` — the global value is
+ *    only a default, and a template author knows how long their task takes;
+ * 2. an explicit **per-harness** `harnesses.<name>.timeoutMs` is a ceiling — the operator said this
+ *    harness must not run longer, so a template can shorten a run on it but never lengthen it;
+ * 3. a template can never exceed `TEMPLATE_TIMEOUT_MAX_SEC`, whatever was parsed (re-clamped here as
+ *    defense in depth — `parseTemplateTimeout` already rejects out-of-range values).
+ *
+ * There is deliberately no per-call (tool/command) timeout: a model-settable one would be another
+ * prompt-injection-reachable spend lever. With no template timeout this is exactly the previous
+ * `harnesses.<name>.timeoutMs ?? timeoutMs`.
+ */
+export function resolveRunTimeoutMs(cfg: DelegateConfig, harnessName: string, templateTimeoutSec?: number): number {
+  const raw = cfg.harnesses[harnessName]?.timeoutMs;
+  const harnessMs = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : undefined;
+  if (templateTimeoutSec === undefined || !Number.isFinite(templateTimeoutSec) || templateTimeoutSec <= 0)
+    return harnessMs ?? cfg.timeoutMs;
+  const templateMs = Math.min(templateTimeoutSec, TEMPLATE_TIMEOUT_MAX_SEC) * 1000;
+  return harnessMs !== undefined ? Math.min(templateMs, harnessMs) : templateMs;
 }
 
 export function resolveModelForHarness(

@@ -46,6 +46,33 @@ export interface DelegateTemplate {
   addDirs?: string[];
   prompt: string;
   harness?: string;
+  /**
+   * Per-run harness timeout in seconds (`timeout: 900`), an integer within
+   * [`TEMPLATE_TIMEOUT_MIN_SEC`, `TEMPLATE_TIMEOUT_MAX_SEC`]. An out-of-range or non-integer value is
+   * ignored (the config timeout applies) and reported in `fieldWarnings`. See `resolveRunTimeoutMs`.
+   */
+  timeoutSec?: number;
+  /**
+   * Non-permission frontmatter problems (an invalid `timeout:`, a rejected `harnesses:` entry):
+   * the value was ignored and the default applies. Shown in `/delegate list`, `delegate_modes` and
+   * at run time — never silently dropped.
+   */
+  fieldWarnings?: string[];
+}
+
+/** Bounds for a template's `timeout:` (seconds). A template can never raise a run past the max. */
+export const TEMPLATE_TIMEOUT_MIN_SEC = 10;
+export const TEMPLATE_TIMEOUT_MAX_SEC = 7200;
+
+/** `timeout:` frontmatter → seconds, or a warning (value ignored) when it isn't a bounded integer. */
+export function parseTemplateTimeout(raw: string | undefined): { timeoutSec?: number; warning?: string } {
+  const v = raw?.trim();
+  if (!v) return {};
+  const n = /^\d{1,9}$/.test(v) ? Number(v) : NaN;
+  if (Number.isInteger(n) && n >= TEMPLATE_TIMEOUT_MIN_SEC && n <= TEMPLATE_TIMEOUT_MAX_SEC) return { timeoutSec: n };
+  return {
+    warning: `timeout: ${quoteValue(v)} ignored — must be a whole number of seconds from ${TEMPLATE_TIMEOUT_MIN_SEC} to ${TEMPLATE_TIMEOUT_MAX_SEC}; the configured timeout applies`,
+  };
 }
 
 /** The legacy keys ignored next to a native `permission:` value — keys already sanitized (`displayKey`). */
@@ -369,6 +396,9 @@ export function parseTemplate(text: string): DelegateTemplate | null {
 
   const budget = meta.maxBudgetUsd ? Number(meta.maxBudgetUsd) : NaN;
   const description = meta.description ?? '';
+  const fieldWarnings: string[] = [];
+  const timeout = parseTemplateTimeout(meta.timeout);
+  if (timeout.warning) fieldWarnings.push(timeout.warning);
 
   return {
     name,
@@ -390,6 +420,8 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     addDirs: parseList(meta.addDirs),
     prompt: m[2].trim(),
     harness: meta.harness || undefined,
+    timeoutSec: timeout.timeoutSec,
+    fieldWarnings: fieldWarnings.length > 0 ? fieldWarnings : undefined,
   };
 }
 

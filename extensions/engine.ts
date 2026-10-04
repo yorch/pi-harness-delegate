@@ -30,6 +30,7 @@ import {
   legacyOutputsDir,
   loadConfig,
   resolveModelForHarness,
+  resolveRunTimeoutMs,
   resolveTransport,
 } from './config.ts';
 import {
@@ -383,8 +384,14 @@ export async function delegate(
           harness.name,
         )
       : undefined);
-  // The mode is a template `name:` — frontmatter, so quoted/escaped like every other echoed value.
-  const warning = permissionWarning && `⚠ template ${quoteValue(mode, 200)}: ${permissionWarning}`;
+  // The mode is a template `name:` — frontmatter, so quoted/escaped like every other echoed value…
+  // …and so is a non-permission frontmatter field that was ignored (an out-of-range `timeout:`, a
+  // rejected `harnesses:` entry) — same channels, one line per problem.
+  const warning =
+    [permissionWarning, ...(template.fieldWarnings ?? [])]
+      .filter(Boolean)
+      .map(w => `⚠ template ${quoteValue(mode, 200)}: ${w}`)
+      .join('\n') || undefined;
   if (warning) {
     if (ctx.hasUI) ctx.ui.notify?.(warning, 'warning');
     else process.stderr.write(`${warning}\n`);
@@ -432,6 +439,8 @@ export async function delegate(
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);
   const maxBudgetUsd =
     opts.maxBudgetUsd ?? template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd;
+  // template `timeout:` over the global default, capped by an explicit per-harness timeout — see config.ts
+  const timeoutMs = resolveRunTimeoutMs(config, harnessName, template.timeoutSec);
 
   // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
   // exactly as before; fan-out passes waitForSlot:true to queue instead.
@@ -483,7 +492,7 @@ export async function delegate(
       model,
       maxBudgetUsd,
       signal: opts.signal,
-      timeoutMs: config.harnesses[harnessName]?.timeoutMs ?? config.timeoutMs,
+      timeoutMs,
       resumeSessionId: opts.sessionId,
       addDirs,
       onStream: (t: string) => {
@@ -628,6 +637,8 @@ export async function delegate(
       verify,
       budget,
       permissionWarning: permissionWarning ?? null,
+      templateWarnings: template.fieldWarnings ?? [],
+      timeoutMs,
     },
     result,
     activityLog: collectActivityLog(activityEvents),
