@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -1188,6 +1188,48 @@ test('delegate: a native read-only permission (any casing) never runs its verify
   }
 });
 
+// Legacy `sandbox:` frontmatter (codex's own `--sandbox` vocabulary) used to fall through
+// normalizePermission's claude-only legacy map to `edit` — so `sandbox: read-only` ran as
+// workspace-write *and* its `verify:` ran host-side, and `danger-full-access` silently became edit.
+const CODEX_RESULT_LINES = [
+  JSON.stringify({ type: 'thread.started', thread_id: 'thr-1' }),
+  JSON.stringify({ type: 'turn.started' }),
+  JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'all good' } }),
+  JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 } }),
+];
+
+function writeCodexTemplate(cwd: string, name: string, frontmatter: string): void {
+  const dir = join(cwd, '.pi', 'delegate', 'templates', 'codex');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${name}.md`), `---\nname: ${name}\ndescription: t\n${frontmatter}\n---\nDo it.\n`);
+}
+
+function sandboxArg(argsFile: string): string {
+  const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+  return argv[argv.indexOf('--sandbox') + 1];
+}
+
+test('delegate: legacy `sandbox: read-only` (any case/spacing) runs readonly and never executes verify', async () => {
+  for (const value of ['read-only', 'READ-ONLY', '  Read_Only  ', 'readonly']) {
+    await withSandbox({}, async ({ cwd }) => {
+      writeCodexTemplate(cwd, 'ro', `sandbox: ${value}\nverify: touch pwned`);
+      const { delegate } = await import('../extensions/engine.ts');
+      const pi = fakePi(async (cmd, args) => {
+        throw new Error(`pi.exec must not be reached on a readonly run: ${cmd} ${args.join(' ')}`);
+      });
+      await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async argsFile => {
+        const run = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'ro', task: 'x' });
+        assert.equal(run.details.permission, 'readonly', value);
+        assert.equal(sandboxArg(argsFile), 'read-only', value);
+        assert.equal(run.verify?.skipped, 'readonly run', value);
+        const transcript = readFileSync(String(run.details.file), 'utf8');
+        assert.match(transcript, /### Verify: `touch pwned`/);
+        assert.match(transcript, /⊘ skipped \(readonly run\)/);
+      });
+    });
+  }
+});
+
 test('delegate: a native edit permission still runs its verify command, and danger gating is unchanged', async () => {
   await withSandbox({}, async ({ cwd }) => {
     writeSharedTemplates(cwd, { edits: verifyTemplate('edits', 'acceptEdits'), ro: verifyTemplate('ro', 'plan') });
@@ -1211,6 +1253,25 @@ test('delegate: a native edit permission still runs its verify command, and dang
       assert.deepEqual(danger.calls, [['sh', '-c', 'touch pwned']]);
       const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
       assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'bypassPermissions');
+    });
+  });
+});
+
+test('delegate: legacy `sandbox: workspace-write` runs as edit and its verify runs host-side', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeCodexTemplate(cwd, 'ww', 'sandbox: Workspace_Write\nverify: bun test');
+    const { delegate } = await import('../extensions/engine.ts');
+    const execs: string[][] = [];
+    const pi = fakePi(async (cmd, args) => {
+      execs.push([cmd, ...args]);
+      return { stdout: '5 pass', stderr: '', code: 0 };
+    });
+    await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async argsFile => {
+      const run = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'ww', task: 'x' });
+      assert.equal(run.details.permission, 'edit');
+      assert.equal(sandboxArg(argsFile), 'workspace-write');
+      assert.deepEqual(execs, [['sh', '-c', 'bun test']]);
+      assert.equal(run.verify?.ok, true);
     });
   });
 });
@@ -1285,4 +1346,36 @@ test('delegate over ACP: a case-variant native permission reaches session/set_mo
       });
     });
   }
+});
+test('delegate: legacy `sandbox: danger-full-access` is a danger template — refused without allowDangerous', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeCodexTemplate(cwd, 'dfa', 'sandbox: DANGER_FULL_ACCESS');
+    const { delegate } = await import('../extensions/engine.ts');
+    const pi = fakePi(async () => ({ stdout: '', stderr: '', code: 0 }));
+    await assert.rejects(
+      () => delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'dfa', task: 'x' }),
+      /requires danger permission/,
+    );
+    await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async argsFile => {
+      const run = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'dfa', task: 'x', allowDangerous: true });
+      assert.equal(run.details.permission, 'danger');
+      assert.equal(sandboxArg(argsFile), 'danger-full-access');
+    });
+  });
+});
+
+test('delegate: an unrecognized legacy `sandbox:` value fails closed to readonly (no write, no verify)', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeCodexTemplate(cwd, 'typo', 'sandbox: workspace-wrte\nverify: touch pwned');
+    const { delegate } = await import('../extensions/engine.ts');
+    const pi = fakePi(async () => {
+      throw new Error('pi.exec must not be reached');
+    });
+    await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async argsFile => {
+      const run = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'typo', task: 'x' });
+      assert.equal(run.details.permission, 'readonly');
+      assert.equal(sandboxArg(argsFile), 'read-only');
+      assert.equal(run.verify?.skipped, 'readonly run');
+    });
+  });
 });
