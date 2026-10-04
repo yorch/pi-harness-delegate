@@ -139,8 +139,11 @@ export interface ModeInfo {
   model?: string;
   /** Per harness the mode loads for, in registry order. */
   availability: ModeAvailability[];
-  /** True when the harness-specific copies differ in description/tier/source. */
+  /** True when the harness-specific copies differ in anything discovery shows (`differsIn`). */
   variesByHarness: boolean;
+  /** Which shown fields differ between harness-specific copies (`permission`, `model`, `timeout`, …).
+   *  Every non-permission value shown is the first listed harness's copy. */
+  differsIn: string[];
   hasDefaultTask: boolean;
   hasDefaultScope: boolean;
   /** A host-run check command is configured (its text is never shown). */
@@ -168,6 +171,28 @@ function plainDescription(t: DelegateTemplate): string {
   const prefix = t.permissionWarning ? `⚠ ${t.permissionWarning}` : '';
   if (!prefix || !t.description.startsWith(prefix)) return t.description;
   return t.description.slice(prefix.length).replace(/^ · /, '');
+}
+
+/** The discovery-visible fields (other than tier/source) on which two copies of a mode differ. */
+function copyDifferences(a: DelegateTemplate, b: DelegateTemplate): string[] {
+  const same = (x: readonly string[] | undefined, y: readonly string[] | undefined) =>
+    (x ?? []).join(',') === (y ?? []).join(',');
+  const out: string[] = [];
+  if (a.description !== b.description) out.push('description');
+  if ((a.model ?? '') !== (b.model ?? '')) out.push('model');
+  if (a.timeoutSec !== b.timeoutSec) out.push('timeout');
+  if (!same(a.harnesses, b.harnesses)) out.push('harnesses');
+  if (Boolean(a.verify) !== Boolean(b.verify)) out.push('host check');
+  if (Boolean(a.defaultTask) !== Boolean(b.defaultTask)) out.push('default task');
+  if (Boolean(a.defaultScope) !== Boolean(b.defaultScope)) out.push('default scope');
+  if (
+    !same(
+      [a.permissionWarning ?? '', ...(a.fieldWarnings ?? [])],
+      [b.permissionWarning ?? '', ...(b.fieldWarnings ?? [])],
+    )
+  )
+    out.push('warnings');
+  return out;
 }
 
 function warningsOf(t: DelegateTemplate, nameEscaped: boolean, modelEscaped: boolean): string[] {
@@ -211,8 +236,13 @@ export function collectModes(
       const entry = byName.get(t.name);
       if (entry) {
         const first = entry.info.availability[0];
-        if (t.description !== entry.first.description || tier !== first.tier || availability.source !== first.source)
-          entry.info.variesByHarness = true;
+        const differs = [
+          ...copyDifferences(entry.first, t),
+          ...(tier !== first.tier || requiresAllowDangerous !== first.requiresAllowDangerous ? ['permission'] : []),
+          ...(availability.source !== first.source ? ['source'] : []),
+        ];
+        for (const field of differs) if (!entry.info.differsIn.includes(field)) entry.info.differsIn.push(field);
+        entry.info.variesByHarness = entry.info.differsIn.length > 0;
         entry.info.availability.push(availability);
         continue;
       }
@@ -227,6 +257,7 @@ export function collectModes(
           model: model?.text,
           availability: [availability],
           variesByHarness: false,
+          differsIn: [],
           hasDefaultTask: Boolean(t.defaultTask),
           hasDefaultScope: Boolean(t.defaultScope),
           hasVerify: Boolean(t.verify),
@@ -283,6 +314,7 @@ export function formatModeRow(m: ModeInfo): string {
     m.defaultHarnesses ? `harnesses=${m.defaultHarnesses.join(',')}` : '',
     m.timeoutSec !== undefined ? `timeout=${m.timeoutSec}s` : '',
     m.hasVerify ? '✓ verify' : '',
+    m.variesByHarness ? `≠ per harness: ${m.differsIn.join(', ')} (shown: ${m.availability[0]?.harness})` : '',
   ];
   const warn = m.warnings.length > 0 ? `⚠ ${m.warnings.join('; ')} · ` : '';
   return `${parts.filter(Boolean).join('  ')}  —  ${warn}${m.description}`;
@@ -335,7 +367,9 @@ export function formatModesForModel(
     if (m.model) extras.push(`model: ${JSON.stringify(m.model)}`);
     lines.push(`  ${extras.join(' · ')}`);
     if (m.variesByHarness)
-      lines.push('  note: harness-specific copies of this mode differ — see the per-harness permission above');
+      lines.push(
+        `  note: harness-specific copies of this mode differ in ${m.differsIn.join(', ')} — permission is shown per harness above; every other value shown is ${m.availability[0]?.harness}'s copy`,
+      );
     for (const w of m.warnings) lines.push(`  warning: ${JSON.stringify(w)}`);
     lines.push(`  description (template data): ${JSON.stringify(m.description)}`);
   }

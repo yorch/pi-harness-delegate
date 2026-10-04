@@ -382,12 +382,44 @@ test('/delegate list: shares the discovery data — sanitized rows, trusted-only
   });
 });
 
+test('delegate_modes: copies differing in model/timeout/harnesses/verify are flagged, naming the fields', async () => {
+  await withSandbox(
+    {
+      templates: {
+        'claude/split': tpl('split', 'readonly', 'model: opus\ntimeout: 60\nharnesses: claude\nverify: bun test'),
+        'codex/split': tpl('split', 'readonly', 'model: gpt-5\ntimeout: 900\nharnesses: codex'),
+        'claude/same': tpl('same', 'readonly', 'model: opus'),
+        'codex/same': tpl('same', 'readonly', 'model: opus'),
+        // identical description/tier/source, differing only in a field the old check ignored
+        'claude/vonly': tpl('vonly', 'readonly', 'verify: bun test'),
+        'codex/vonly': tpl('vonly', 'readonly'),
+      },
+    },
+    async ({ cwd }) => {
+      const report = collectModes(cwd, true, ['claude', 'codex']);
+      const byName = new Map(report.modes.map(m => [m.name, m]));
+      assert.deepEqual(byName.get('split')?.differsIn, ['model', 'timeout', 'harnesses', 'host check']);
+      assert.equal(byName.get('same')?.variesByHarness, false);
+      assert.deepEqual(byName.get('vonly')?.differsIn, ['host check']);
+      assert.equal(byName.get('vonly')?.variesByHarness, true);
+      const text = (await runModes(cwd, true, {})).content[0].text;
+      assert.match(
+        text,
+        /- mode: "split"\n(?:.*\n)*? {2}note: harness-specific copies of this mode differ in model, timeout, harnesses, host check — permission is shown per harness above; every other value shown is claude's copy/,
+      );
+      const row = formatModeRow(byName.get('vonly') as NonNullable<ReturnType<typeof byName.get>>);
+      assert.match(row, /≠ per harness: host check \(shown: claude\)/);
+    },
+  );
+});
+
 test('formatModeRow: shows warnings ahead of the description', () => {
   const row = formatModeRow({
     name: 'x',
     description: 'desc',
     availability: [{ harness: 'claude', tier: 'edit', requiresAllowDangerous: false, source: 'user' }],
     variesByHarness: false,
+    differsIn: [],
     hasDefaultTask: false,
     hasDefaultScope: false,
     hasVerify: true,
