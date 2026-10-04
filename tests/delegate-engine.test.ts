@@ -942,6 +942,48 @@ test('delegate tool: a trailing-comma / mixed-case single harness is a single ru
   });
 });
 
+test('delegate tool: a harness spec that normalizes to nothing is refused, not run on the default harness', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { existsSync } = await import('node:fs');
+    const { tools } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      for (const harness of [',', ' , ', ',,', ' ']) {
+        await assert.rejects(
+          () => tool.execute('t', { harness, mode: 'general', task: 'x' }, undefined, undefined, ctx),
+          /names no harness/,
+          JSON.stringify(harness),
+        );
+      }
+      assert.ok(!existsSync(argsFile), 'nothing ran');
+      // `""` is "unset", the same as omitting the field: the default harness (claude) runs
+      await tool.execute('t', { harness: '', mode: 'general', task: 'x' }, undefined, undefined, ctx);
+      assert.ok(existsSync(argsFile), 'an empty harness runs the default');
+    });
+  });
+});
+
+test('/delegate --harness that names no harness is reported and runs nothing', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { commands } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { existsSync } = await import('node:fs');
+      for (const args of ['--harness=, general do it', '--harness=" , " general do it']) {
+        const err = await captureStderr(() => commands.get('delegate')?.handler(args, ctx) ?? Promise.resolve());
+        assert.match(err, /names no harness/, args);
+      }
+      assert.ok(!existsSync(argsFile), 'nothing ran');
+    });
+  });
+});
+
 test('delegate tool: `claude,` at capacity fails fast like any single run instead of queueing', async () => {
   await withSandbox({ maxConcurrent: 1, templates: {} }, async ({ cwd }) => {
     const { acquireSlot } = await import('../extensions/concurrency.ts');

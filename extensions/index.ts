@@ -27,6 +27,7 @@ import { formatToolUse, ToolCallIndex } from './activity.ts';
 import {
   aliasUsage,
   delegateUsage,
+  emptyHarnessSpecError,
   isFanoutSpec,
   normalizeHarnessSpec,
   parseDelegateCommand,
@@ -148,11 +149,12 @@ export default function (pi: ExtensionAPI) {
       // the deprecated alias pins its harness; everything below sees the effective params. The spec is
       // normalized exactly as /delegate does (normalizeHarnessSpec), so `claude,` is a single run —
       // fail-fast at capacity, single-run result shape — not a one-harness fan-out, and `omp` is `amp`.
+      // A non-empty spec that normalizes to nothing (`,`, `" , "`) is refused rather than silently run
+      // on the default harness (`""` stays "unset", the way a model omitting the field means it).
       const harnessSpec = spec.forceHarness ?? rawParams.harness;
-      const params: DelegateToolParams = {
-        ...rawParams,
-        harness: harnessSpec === undefined ? undefined : normalizeHarnessSpec(harnessSpec),
-      };
+      const harness = harnessSpec === undefined ? undefined : normalizeHarnessSpec(harnessSpec);
+      if (harnessSpec && harness === undefined) throw new Error(emptyHarnessSpecError(harnessSpec));
+      const params: DelegateToolParams = { ...rawParams, harness };
       const config = loadConfig();
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.

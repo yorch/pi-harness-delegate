@@ -184,7 +184,16 @@ test('parseDelegateCommand trailing/stray commas in a harness list are dropped',
   // a bare `,` is no harness at all, and stays prose
   const comma = parseDelegateCommand(', plan x', MODES, HARNESSES);
   assert.equal(comma.harness, undefined);
-  assert.equal(parseDelegateCommand('--harness=, plan x', MODES, HARNESSES).harness, undefined);
+  assert.equal(comma.errors, undefined);
+});
+
+test('parseDelegateCommand --harness= that names no harness is reported, never the default harness', () => {
+  for (const raw of ['--harness=, plan x', '--harness=" , " plan x', '--harness=,, plan x', '--harness= plan x']) {
+    const r = parseDelegateCommand(raw, MODES, HARNESSES);
+    assert.equal(r.harness, undefined, raw);
+    assert.equal(r.errors?.length, 1, raw);
+    assert.match(r.errors?.[0] ?? '', /names no harness/, raw);
+  }
 });
 
 test('parseDelegateCommand --budget that is 0, negative, NaN or empty is reported, not silently ignored', () => {

@@ -76,7 +76,7 @@ The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff
 
 ### Fan out to multiple harnesses
 
-`harness` also accepts `all` or a comma-separated list — the same task runs on every harness **concurrently**, up to `maxConcurrent`, and comes back as one comparison report instead of one report per harness (on `/delegate` and the `delegate` tool alike, the spec is case-insensitive and empty elements are dropped, so `claude,` is a plain single `claude` run, not a one-harness fan-out):
+`harness` also accepts `all` or a comma-separated list — the same task runs on every harness **concurrently**, up to `maxConcurrent`, and comes back as one comparison report instead of one report per harness (on `/delegate` and the `delegate` tool alike, the spec is case-insensitive and empty elements are dropped, so `claude,` is a plain single `claude` run, not a one-harness fan-out; a spec with no harness in it at all, like `,`, is an error rather than the default harness):
 
 ```bash
 /delegate all review the auth flow                 # every *detected* harness

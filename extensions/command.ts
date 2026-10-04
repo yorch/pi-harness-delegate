@@ -84,6 +84,12 @@ export function normalizeHarnessSpec(spec: string): string | undefined {
   return parts.join(',');
 }
 
+/** The error for a harness spec that normalizes to nothing (`,`, `" , "`) — shared by `/delegate`'s
+ *  `--harness=` and the `delegate` tool's `harness` param, so neither silently runs the default. */
+export function emptyHarnessSpecError(raw: string): string {
+  return `harness ${JSON.stringify(raw)} names no harness: give a harness name, a comma-separated list, or "all" (omit it for the default harness)`;
+}
+
 /**
  * One pass over the raw command: a backticked or double-quoted prose span is skipped verbatim (so
  * `explain "--mode=x"` or `` `--allow-dangerous` `` in the prompt is never eaten as a flag); a
@@ -189,6 +195,9 @@ export function parseDelegateCommand(
   }
 
   let harness = flags.harness !== undefined ? normalizeHarnessSpec(flags.harness) : undefined;
+  // `--harness=,` / `--harness=" , "` / `--harness=` name no harness at all: an explicit choice we
+  // can't honor is an error, never a silent fall-back to the default harness.
+  if (flags.harness !== undefined && harness === undefined) errors.push(emptyHarnessSpecError(flags.harness));
   let mode = flags.mode;
   let task = rest.trim();
 
