@@ -76,11 +76,29 @@ const LEGACY_SANDBOX_TIERS: Record<string, NormalizedPermission> = {
 };
 
 /**
- * A frontmatter value echoed back in a warning (`/delegate list`, run-time notes): JSON-quoted so
- * control characters / ANSI escapes are inert, and capped so a huge value can't flood the line.
+ * Characters `JSON.stringify` leaves raw but a terminal or renderer still acts on: C1 controls
+ * (U+009B is the 8-bit CSI), soft hyphen, bidi marks/embeddings/overrides/isolates (Trojan-Source
+ * reordering), zero-width and other invisible format characters, the line/paragraph separators,
+ * BOM, interlinear annotation controls, and tag characters.
  */
-function quoteValue(value: string): string {
-  return JSON.stringify(value).slice(0, 60);
+const INVISIBLE_OR_CONTROL =
+  /[\u0080-\u009F\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u{E0000}-\u{E007F}]/gu;
+
+/** Each match → `\uXXXX` (per UTF-16 code unit), so it is visible and inert. */
+function escapeInvisible(text: string): string {
+  return text.replace(INVISIBLE_OR_CONTROL, ch =>
+    Array.from({ length: ch.length }, (_, i) => `\\u${ch.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''),
+  );
+}
+
+/**
+ * A frontmatter-derived string echoed back in a warning (`/delegate list`, run-time notes): JSON-quoted
+ * so C0 controls / ANSI escapes are inert, the characters `JSON.stringify` leaves raw (C1, bidi,
+ * zero-width, U+2028/9 — see `INVISIBLE_OR_CONTROL`) escaped as `\uXXXX` too, and capped at `max`
+ * chars so a huge value can't flood the line.
+ */
+export function quoteValue(value: string, max = 60): string {
+  return escapeInvisible(JSON.stringify(value)).slice(0, max);
 }
 
 interface LegacyPermission {
@@ -205,7 +223,7 @@ export function normalizePermission(
     const all = raws.map(normalizeTierValue);
     const distinct = new Set(all.map(r => `${r.permission}|${r.nativePermission ?? ''}`));
     if (distinct.size > 1) {
-      const listed = raws.map(quoteValue).join(', ');
+      const listed = raws.map(v => quoteValue(v)).join(', ');
       if (all.some(r => r.nativePermission))
         return {
           permission: 'readonly',

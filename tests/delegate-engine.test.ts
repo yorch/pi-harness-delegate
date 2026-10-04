@@ -1579,3 +1579,77 @@ test('delegate: a native value gated as danger is judged as danger — flagged e
     });
   });
 });
+
+// JSON.stringify leaves C1 controls (U+009B = 8-bit CSI), bidi overrides/isolates, zero-width chars
+// and U+2028/9 raw; a hostile template could otherwise reorder or hide text in every warning channel.
+const INVISIBLE = /[\u0080-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/;
+
+function writeNamedTemplate(cwd: string, harness: string, file: string, frontmatter: string): void {
+  const dir = join(cwd, '.pi', 'delegate', 'templates', harness);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${file}.md`), `---\ndescription: t\n${frontmatter}\n---\nDo it.\n`);
+}
+
+test('delegate: C1/bidi/zero-width/line-separator chars from a template reach no warning channel raw', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    const mode = 'r\u202eevil\u009b2J';
+    // a native value with an ignored, unrecognized legacy value (both hostile), under a hostile name
+    writeNamedTemplate(cwd, 'claude', 'a', `name: ${mode}\npermission: plan\nsandbox: \u202eetirw-ecapskrow`);
+    // an unlisted (danger-gated) hostile native value: refused, then confirmed
+    writeNamedTemplate(cwd, 'claude', 'b', 'name: nat\npermission: x\u200by\u2028z\nsandbox: read-only');
+    // an unrecognized legacy value failed closed, run headless (stderr)
+    writeNamedTemplate(cwd, 'codex', 'c', 'name: typo\nsandbox: \u009b2J\u200d\u2066');
+    const { delegate } = await import('../extensions/engine.ts');
+    const { pi } = recordingPi();
+    const notes: string[] = [];
+    const channels = (run: { content: string; details: Record<string, unknown> }) => {
+      const warning = String(run.details.permissionWarning);
+      const line = readFileSync(String(run.details.file), 'utf8')
+        .split('\n')
+        .find(l => l.startsWith('- warning:'));
+      return { warning, line: String(line), prefix: run.content.split('\n\n')[0] };
+    };
+
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async () => {
+      const run = await delegate(pi, notifyCtx(cwd, notes), { harness: 'claude', mode, task: 'x' });
+      const c = channels(run);
+      assert.equal(
+        c.warning,
+        'permission: "plan" (readonly on claude) overrides sandbox: "\\u202eetirw-ecapskrow" (ignored)',
+      );
+      const want = `⚠ template "r\\u202eevil\\u009b2J": ${c.warning}`;
+      assert.equal(c.prefix, want);
+      assert.equal(c.line, `- warning: ${want}`);
+      assert.deepEqual(notes, [`warning: ${want}`]);
+
+      const refused = await delegate(pi, notifyCtx(cwd, notes), { harness: 'claude', mode: 'nat', task: 'x' }).then(
+        () => assert.fail('must be refused'),
+        (e: Error) => e.message,
+      );
+      assert.match(refused, /native permission "x\\u200by\\u2028z" is not a known/);
+      assert.doesNotMatch(refused, INVISIBLE);
+      const nat = await delegate(pi, notifyCtx(cwd, notes), {
+        harness: 'claude',
+        mode: 'nat',
+        task: 'x',
+        allowDangerous: true,
+      });
+      const n = channels(nat);
+      assert.match(n.warning, /^permission: "x\\u200by\\u2028z" \(danger on claude\) overrides sandbox: "read-only"/);
+      for (const s of [n.warning, n.line, n.prefix]) assert.doesNotMatch(s, INVISIBLE);
+    });
+    for (const s of notes) assert.doesNotMatch(s, INVISIBLE);
+    assert.equal(notes.length, 3, notes.join('\n'));
+
+    const written = await captureStderr(async () => {
+      await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async () => {
+        const run = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'typo', task: 'x' });
+        const c = channels(run);
+        assert.equal(c.warning, 'unrecognized sandbox: "\\u009b2J\\u200d\\u2066" — loaded as readonly (fail closed)');
+        for (const s of [c.warning, c.line, c.prefix]) assert.doesNotMatch(s, INVISIBLE);
+      });
+    });
+    assert.match(written, /⚠ template "typo": unrecognized sandbox: "\\u009b2J\\u200d\\u2066"/);
+    assert.doesNotMatch(written, INVISIBLE);
+  });
+});
