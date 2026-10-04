@@ -351,6 +351,13 @@ export async function delegate(
     );
   const task = opts.task || template.defaultTask;
   if (!task) throw new Error(`delegate mode "${mode}" requires a task`);
+  // A template permission problem (an unrecognized legacy value failed closed to readonly, or an
+  // ignored legacy key) is otherwise only visible in `/delegate list` — say so where the run happens.
+  const warning = template.permissionWarning && `⚠ template "${mode}": ${template.permissionWarning}`;
+  if (warning) {
+    if (ctx.hasUI) ctx.ui.notify?.(warning, 'warning');
+    else process.stderr.write(`${warning}\n`);
+  }
 
   // Fail-fast, before acquireSlot()/spawn — configuring e.g. transport:'acp' for a harness with no
   // ACP surface (or 'stdout' for an ACP-only one) should error immediately with a clear message,
@@ -501,6 +508,7 @@ export async function delegate(
             contextWindow: null,
             activityLog: collectActivityLog(activityEvents),
             output: streamedFull,
+            warning,
           }),
         );
       } catch (_e) {
@@ -569,6 +577,7 @@ export async function delegate(
       output: result.result || result.streamedText,
       verify,
       budget,
+      warning,
     }),
   );
   pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts);
@@ -577,7 +586,7 @@ export async function delegate(
 
   const output = result.result || result.streamedText || '(empty result)';
   return {
-    content: budget?.message ? `${budget.message}\n\n${output}` : output,
+    content: [warning, budget?.message, output].filter(Boolean).join('\n\n'),
     details: {
       harness: harnessName,
       mode,
@@ -601,6 +610,7 @@ export async function delegate(
       usage: result.usage,
       verify,
       budget,
+      permissionWarning: template.permissionWarning ?? null,
     },
     result,
     activityLog: collectActivityLog(activityEvents),

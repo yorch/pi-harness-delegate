@@ -461,6 +461,8 @@ export function buildTranscript(
     verify?: VerifyResult;
     /** Budget outcome, when `maxBudgetUsd` was set for this run. */
     budget?: BudgetNote;
+    /** A template permission warning (e.g. an unrecognized legacy value failed closed to readonly). */
+    warning?: string;
   } & Record<string, unknown>,
 ): string {
   const harness = (opts.harness as string | undefined) ?? 'claude';
@@ -514,6 +516,7 @@ export function buildTranscript(
     `- context: ${context ?? 'n/a'}`,
     `- duration: ${duration ?? 'n/a'}`,
     `- stop reason: ${opts.stopReason ?? 'n/a'}`,
+    ...(opts.warning ? [`- warning: ${opts.warning}`] : []),
     ...(opts.budget ? [formatBudgetLine(opts.budget)] : []),
     ...(opts.budget?.message ? ['', opts.budget.message] : []),
     '',
