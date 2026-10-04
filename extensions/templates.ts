@@ -23,8 +23,12 @@ export interface DelegateTemplate {
   nativePermission?: string;
   /** Legacy raw permissionMode for transcript compat. */
   permissionMode: PermissionMode;
-  /** Why an unrecognized legacy `permissionMode:`/`sandbox:` value was failed closed to `readonly`. */
-  legacyPermissionError?: string;
+  /**
+   * A problem with the template's permission keys, shown in `/delegate list` and at run time: an
+   * unrecognized legacy `permissionMode:`/`sandbox:` value (failed closed to `readonly`), or a
+   * legacy key that disagrees with `permission:` and was ignored (tier unchanged).
+   */
+  permissionWarning?: string;
   model?: string;
   maxBudgetUsd?: number;
   skill?: string;
@@ -70,7 +74,7 @@ interface LegacyPermission {
   permission: NormalizedPermission;
   permissionMode: PermissionMode;
   /** Set when a legacy value was unrecognized and the template was failed closed to `readonly`. */
-  legacyPermissionError?: string;
+  permissionWarning?: string;
 }
 
 /**
@@ -78,7 +82,7 @@ interface LegacyPermission {
  * vocabularies (claude PermissionMode names and codex sandbox values), case/whitespace/`-`/`_`-insensitive.
  * Returns `null` for an unrecognized value — the caller fails that closed.
  */
-function classifyLegacyValue(value: string): Omit<LegacyPermission, 'legacyPermissionError'> | null {
+function classifyLegacyValue(value: string): Omit<LegacyPermission, 'permissionWarning'> | null {
   const lower = value.trim().toLowerCase();
   // Claude names have no separators of their own, so `accept-edits`/`bypass_permissions` can only
   // ever mean that same name (and tier) — danger stays gated behind allowDangerous downstream.
@@ -92,12 +96,20 @@ function classifyLegacyValue(value: string): Omit<LegacyPermission, 'legacyPermi
   return tier ? { permission: tier, permissionMode: TIER_PERMISSION_MODE[tier] } : null;
 }
 
+/** The legacy keys actually set (non-empty), as `[key, value]` pairs. */
+function legacyEntries(permissionMode: string | undefined, sandbox: string | undefined): [string, string][] {
+  return [
+    ['permissionMode', permissionMode?.trim()],
+    ['sandbox', sandbox?.trim()],
+  ].filter((e): e is [string, string] => Boolean(e[1]));
+}
+
 /**
  * Legacy `permissionMode:`/`sandbox:` keys → normalized tier. Only consulted when `permission:` is
  * absent. An empty/absent value means "not set" (default `edit`, as always).
  *
  * **Fails closed:** an unrecognized value (a typo, a value from some other harness's vocabulary)
- * yields `readonly` plus `legacyPermissionError` — never the old silent `edit`, and never a refusal
+ * yields `readonly` plus `permissionWarning` — never the old silent `edit`, and never a refusal
  * to load. Not loading would let a same-named lower tier (e.g. the builtin `implement`, `edit`)
  * silently win instead, which can be MORE permissive than an author who wrote `sandbox: readonyl`
  * meant; `readonly` is the one tier that can never exceed what any author meant (and it also skips
@@ -107,19 +119,16 @@ export function normalizeLegacyPermission(
   permissionMode: string | undefined,
   sandbox: string | undefined,
 ): LegacyPermission {
-  const set = [
-    ['permissionMode', permissionMode?.trim()],
-    ['sandbox', sandbox?.trim()],
-  ].filter((e): e is [string, string] => Boolean(e[1]));
+  const set = legacyEntries(permissionMode, sandbox);
   if (set.length === 0) return { permission: 'edit', permissionMode: 'acceptEdits' };
-  let best: Omit<LegacyPermission, 'legacyPermissionError'> | null = null;
+  let best: Omit<LegacyPermission, 'permissionWarning'> | null = null;
   for (const [key, value] of set) {
     const c = classifyLegacyValue(value);
     if (!c) {
       return {
         permission: 'readonly',
         permissionMode: 'plan',
-        legacyPermissionError: `unrecognized ${key}: ${quoteValue(value)} — loaded as readonly (fail closed)`,
+        permissionWarning: `unrecognized ${key}: ${quoteValue(value)} — loaded as readonly (fail closed)`,
       };
     }
     if (!best || TIER_RANK[c.permission] < TIER_RANK[best.permission]) best = c;
@@ -135,27 +144,45 @@ export function normalizePermission(
   permission: NormalizedPermission;
   nativePermission?: string;
   permissionMode: PermissionMode;
-  legacyPermissionError?: string;
+  permissionWarning?: string;
 } {
   // Prefer normalized permission
   if (raw) {
-    const lower = raw.trim().toLowerCase();
-    if (lower === 'readonly' || lower === 'read-only' || lower === 'read_only')
-      return { permission: 'readonly', permissionMode: 'plan' };
-    if (lower === 'edit' || lower === 'acceptedits' || lower === 'accept-edits')
-      return { permission: 'edit', permissionMode: 'acceptEdits' };
-    if (
-      lower === 'danger' ||
-      lower === 'bypasspermissions' ||
-      lower === 'danger-full-access' ||
-      lower === 'danger_full_access'
-    )
-      return { permission: 'danger', permissionMode: 'bypassPermissions' };
-    // Unknown native — treat as native escape hatch
-    return { permission: 'edit', nativePermission: raw.trim(), permissionMode: 'acceptEdits' };
+    const resolved = normalizeTierValue(raw);
+    // `permission:` always wins; a legacy key that disagrees is ignored, but said so — an author who
+    // wrote `sandbox: read-only` next to `permission: edit` should see which one ran. Skipped for a
+    // native value: its tier is only known per harness at run time, so "disagrees" isn't decidable here.
+    const legacy = legacyEntries(fallbackMode, sandbox);
+    if (resolved.nativePermission || legacy.length === 0) return resolved;
+    const l = normalizeLegacyPermission(fallbackMode, sandbox);
+    if (!l.permissionWarning && l.permission === resolved.permission) return resolved;
+    const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
+    return { ...resolved, permissionWarning: `permission: ${resolved.permission} overrides ${ignored} (ignored)` };
   }
   // Legacy permissionMode/sandbox mapping — fails closed to readonly on an unrecognized value
   return normalizeLegacyPermission(fallbackMode, sandbox);
+}
+
+/** One `permission:` value → tier, or (unknown value) the native escape hatch. */
+function normalizeTierValue(raw: string): {
+  permission: NormalizedPermission;
+  nativePermission?: string;
+  permissionMode: PermissionMode;
+} {
+  const lower = raw.trim().toLowerCase();
+  if (lower === 'readonly' || lower === 'read-only' || lower === 'read_only')
+    return { permission: 'readonly', permissionMode: 'plan' };
+  if (lower === 'edit' || lower === 'acceptedits' || lower === 'accept-edits')
+    return { permission: 'edit', permissionMode: 'acceptEdits' };
+  if (
+    lower === 'danger' ||
+    lower === 'bypasspermissions' ||
+    lower === 'danger-full-access' ||
+    lower === 'danger_full_access'
+  )
+    return { permission: 'danger', permissionMode: 'bypassPermissions' };
+  // Unknown native — treat as native escape hatch
+  return { permission: 'edit', nativePermission: raw.trim(), permissionMode: 'acceptEdits' };
 }
 
 /** Comma-separated frontmatter list (`a, b`) — undefined when absent or empty. */
@@ -190,14 +217,14 @@ export function parseTemplate(text: string): DelegateTemplate | null {
 
   return {
     name,
-    // An unrecognized legacy value is surfaced where the template is listed (`/delegate list`).
-    description: norm.legacyPermissionError
-      ? `⚠ ${norm.legacyPermissionError}${description ? ` · ${description}` : ''}`
+    // A permission-key problem is surfaced where the template is listed (`/delegate list`).
+    description: norm.permissionWarning
+      ? `⚠ ${norm.permissionWarning}${description ? ` · ${description}` : ''}`
       : description,
     permission: norm.permission,
     nativePermission: norm.nativePermission,
     permissionMode: norm.permissionMode,
-    legacyPermissionError: norm.legacyPermissionError,
+    permissionWarning: norm.permissionWarning,
     model: meta.model || undefined,
     maxBudgetUsd: Number.isFinite(budget) && budget > 0 ? budget : undefined,
     skill: meta.skill || undefined,

@@ -51,13 +51,13 @@ test('parseTemplate fails an invalid permissionMode closed to readonly (never a 
   assert.equal(t?.permission, 'readonly');
   assert.equal(t?.permissionMode, 'plan');
   assert.equal(t?.nativePermission, undefined);
-  assert.match(t?.legacyPermissionError ?? '', /unrecognized permissionMode: "nope"/);
-  assert.equal(t?.description, `⚠ ${t?.legacyPermissionError} · d`);
+  assert.match(t?.permissionWarning ?? '', /unrecognized permissionMode: "nope"/);
+  assert.equal(t?.description, `⚠ ${t?.permissionWarning} · d`);
 });
 
 const tierOf = (fm: string) => {
   const t = parseTemplate(`---\nname: x\n${fm}\n---\nbody`);
-  return [t?.permission, t?.permissionMode, t?.nativePermission, t?.legacyPermissionError];
+  return [t?.permission, t?.permissionMode, t?.nativePermission, t?.permissionWarning];
 };
 
 test('legacy sandbox: codex values map onto the matching tier, case/whitespace/underscore-insensitive', () => {
@@ -108,14 +108,14 @@ test('legacy keys: an unrecognized value fails closed to readonly, with a warnin
 test('legacy keys: the echoed value is JSON-quoted (no raw control chars/ANSI) and capped', () => {
   const t = parseTemplate('---\nname: x\nsandbox: \u001b[31mred\u0007\n---\nb');
   assert.equal(t?.permission, 'readonly');
-  const err = String(t?.legacyPermissionError);
+  const err = String(t?.permissionWarning);
   assert.ok(err.includes('"\\u001b[31mred\\u0007"'), err);
   // no raw C0 control character survives into the warning or the description it prefixes
   // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
   const ctrl = /[\u0000-\u001f\u007f]/;
   assert.doesNotMatch(err, ctrl);
   assert.doesNotMatch(String(t?.description), ctrl);
-  const long = String(parseTemplate(`---\nname: x\nsandbox: ${'z'.repeat(500)}\n---\nb`)?.legacyPermissionError);
+  const long = String(parseTemplate(`---\nname: x\nsandbox: ${'z'.repeat(500)}\n---\nb`)?.permissionWarning);
   assert.ok(long.length < 140, long);
   assert.ok(!long.includes('z'.repeat(60)), 'value capped at 60 chars including quotes');
 });
@@ -141,17 +141,28 @@ test('legacy keys: an empty value means unset — the edit default, no warning',
   assert.equal(parseTemplate('---\nname: x\ndescription: d\nsandbox:\n---\nb')?.description, 'd');
 });
 
-test('permission: still wins over the legacy keys, exactly as before', () => {
-  assert.deepEqual(tierOf('permission: edit\nsandbox: read-only'), ['edit', 'acceptEdits', undefined, undefined]);
-  assert.deepEqual(tierOf('permission: readonly\nsandbox: danger-full-access'), [
+test('permission: still wins over the legacy keys — same tier, but a disagreeing legacy key is flagged', () => {
+  const edit = tierOf('permission: edit\nsandbox: read-only');
+  assert.deepEqual(edit.slice(0, 3), ['edit', 'acceptEdits', undefined]);
+  assert.equal(edit[3], 'permission: edit overrides sandbox: "read-only" (ignored)');
+  const ro = tierOf('permission: readonly\nsandbox: danger-full-access');
+  assert.deepEqual(ro.slice(0, 3), ['readonly', 'plan', undefined]);
+  assert.match(String(ro[3]), /^permission: readonly overrides sandbox: "danger-full-access" \(ignored\)$/);
+  // an unrecognized legacy value is still ignored (no fail-closed) — only flagged
+  const bogus = tierOf('permission: danger\nsandbox: bogus\npermissionMode: plan');
+  assert.deepEqual(bogus.slice(0, 3), ['danger', 'bypassPermissions', undefined]);
+  assert.equal(bogus[3], 'permission: danger overrides permissionMode: "plan", sandbox: "bogus" (ignored)');
+  // the warning reaches /delegate list through the description
+  const t = parseTemplate('---\nname: x\ndescription: d\npermission: edit\nsandbox: read-only\n---\nb');
+  assert.equal(t?.description, `⚠ ${t?.permissionWarning} · d`);
+  // agreeing legacy keys are not noise
+  assert.deepEqual(tierOf('permission: readonly\nsandbox: read-only\npermissionMode: plan'), [
     'readonly',
     'plan',
     undefined,
     undefined,
   ]);
-  // an unrecognized legacy value is ignored when permission: is present — no fail-closed, no warning
-  assert.deepEqual(tierOf('permission: danger\nsandbox: bogus'), ['danger', 'bypassPermissions', undefined, undefined]);
-  // the native escape hatch on permission: is unchanged
+  // the native escape hatch on permission: is unchanged, and not flagged (its tier is per-harness)
   assert.deepEqual(tierOf('permission: workspace-write\nsandbox: read-only'), [
     'edit',
     'acceptEdits',
@@ -192,7 +203,7 @@ test('every bundled template classifies exactly as before the legacy sandbox fix
       const want = READONLY.has(f.replace(/\.md$/, '')) ? ['readonly', 'plan'] : ['edit', 'acceptEdits'];
       assert.deepEqual([t?.permission, t?.permissionMode], want, `${sub}/${f}`);
       assert.equal(t?.nativePermission, undefined, `${sub}/${f}`);
-      assert.equal(t?.legacyPermissionError, undefined, `${sub}/${f}`);
+      assert.equal(t?.permissionWarning, undefined, `${sub}/${f}`);
       count++;
     }
   }
