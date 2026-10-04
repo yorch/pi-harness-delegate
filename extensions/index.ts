@@ -28,6 +28,7 @@ import {
   aliasUsage,
   delegateUsage,
   isFanoutSpec,
+  normalizeHarnessSpec,
   parseDelegateCommand,
   resolveDefaults,
   resolveHarnessFilter,
@@ -144,8 +145,14 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [...DELEGATE_TOOL_GUIDELINES],
     parameters: DELEGATE_TOOL_PARAMS,
     async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
-      // the deprecated alias pins its harness; everything below sees the effective params
-      const params: DelegateToolParams = spec.forceHarness ? { ...rawParams, harness: spec.forceHarness } : rawParams;
+      // the deprecated alias pins its harness; everything below sees the effective params. The spec is
+      // normalized exactly as /delegate does (normalizeHarnessSpec), so `claude,` is a single run —
+      // fail-fast at capacity, single-run result shape — not a one-harness fan-out, and `omp` is `amp`.
+      const harnessSpec = spec.forceHarness ?? rawParams.harness;
+      const params: DelegateToolParams = {
+        ...rawParams,
+        harness: harnessSpec === undefined ? undefined : normalizeHarnessSpec(harnessSpec),
+      };
       const config = loadConfig();
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.

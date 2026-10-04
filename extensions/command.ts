@@ -68,11 +68,12 @@ function looksLikeHarnessSpec(word: string, knownHarnesses: ReadonlySet<string>)
 }
 
 /**
- * Normalize a harness spec the same way whether it came from `--harness=` or the first word:
- * lowercased, empty list elements dropped (`claude,` -> `claude`, `,` -> none), and a single name
- * alias-normalized (`omp` -> `amp`). A real list / `all` is left for `resolveHarnessList`.
+ * Normalize a harness spec the same way whether it came from `--harness=`, the first word, or the
+ * `delegate` tool's `harness` param: lowercased, empty list elements dropped (`claude,` -> `claude`,
+ * `,` -> none), and a single name alias-normalized (`omp` -> `amp`). A real list / `all` is left for
+ * `resolveHarnessList`. Sharing it is what keeps both paths agreeing on single run vs fan-out.
  */
-function normalizeHarnessSpec(spec: string): string | undefined {
+export function normalizeHarnessSpec(spec: string): string | undefined {
   const parts = spec
     .toLowerCase()
     .split(',')

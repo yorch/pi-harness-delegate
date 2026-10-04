@@ -865,10 +865,10 @@ test('fan-out comparison rows report real prompt tokens on both the tool and the
     await withFakeBinaries(['claude'], [line], async () => {
       const { tools, commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
       const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
-      // `claude,` normalizes away on the command path; the tool path keeps it a (one-harness) fan-out
+      // `claude,` normalizes to a single run on both paths; `claude,claude` stays a (one-harness) fan-out
       const out = (await tools
         .get('delegate')
-        ?.execute('t', { harness: 'claude,', mode: 'tinker', task: 'x' }, undefined, undefined, ctx)) as {
+        ?.execute('t', { harness: 'claude,claude', mode: 'tinker', task: 'x' }, undefined, undefined, ctx)) as {
         content: { text: string }[];
       };
       assert.match(out.content[0].text, /12k tok/);
@@ -914,6 +914,57 @@ test('/delegate command: parser notices are shown — notify(warning) with UI, s
       assert.ok(readArgs(argsFile), 'headless run proceeds too');
       takePendingReport();
     });
+  });
+});
+
+test('delegate tool: a trailing-comma / mixed-case single harness is a single run, like /delegate', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { existsSync, rmSync: rm } = await import('node:fs');
+    const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT], async argsFile => {
+      for (const harness of ['claude,', 'Claude, ', ',CLAUDE']) {
+        for (const n of ['claude', 'codex']) rm(`${argsFile}.${n}`, { force: true });
+        const res = (await tool.execute('t', { harness, mode: 'general', task: 'x' }, undefined, undefined, ctx)) as {
+          details: Record<string, unknown>;
+        };
+        assert.ok(existsSync(`${argsFile}.claude`), `${harness}: claude must run`);
+        assert.ok(!existsSync(`${argsFile}.codex`), `${harness}: codex must not run`);
+        // single-run result shape, not a one-row fan-out comparison report
+        assert.equal(res.details.fanout, undefined, harness);
+        assert.equal(res.details.harness, 'claude', harness);
+        assert.equal(res.details.mode, 'general', harness);
+      }
+    });
+  });
+});
+
+test('delegate tool: `claude,` at capacity fails fast like any single run instead of queueing', async () => {
+  await withSandbox({ maxConcurrent: 1, templates: {} }, async ({ cwd }) => {
+    const { acquireSlot } = await import('../extensions/concurrency.ts');
+    const { loadConfig } = await import('../extensions/config.ts');
+    const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    const release = await acquireSlot({ harness: 'claude', mode: 'held', config: loadConfig(), wait: false });
+    try {
+      // a fan-out would wait for the held slot (waitForSlot:true); the timeout only bounds that wrong path
+      const signal = AbortSignal.timeout(2000);
+      await assert.rejects(
+        () =>
+          tool.execute('t', { harness: 'claude,', mode: 'general', task: 'x' }, signal, undefined, {
+            cwd,
+            hasUI: false,
+            isProjectTrusted: () => true,
+          }),
+        /already in progress|claimed the last available slot/,
+      );
+      assert.equal(signal.aborted, false, 'rejected immediately, not after waiting');
+    } finally {
+      release();
+    }
   });
 });
 

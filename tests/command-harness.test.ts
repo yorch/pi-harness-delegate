@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isFanoutSpec, parseDelegateCommand, resolveHarnessFilter, resolveHarnessList } from '../extensions/command.ts';
+import {
+  isFanoutSpec,
+  normalizeHarnessSpec,
+  parseDelegateCommand,
+  resolveHarnessFilter,
+  resolveHarnessList,
+} from '../extensions/command.ts';
 
 const MODES = new Set(['review', 'plan', 'implement', 'general']);
 const HARNESSES = new Set(['claude', 'codex', 'opencode', 'amp', 'omp']);
@@ -274,4 +280,26 @@ test('parseDelegateCommand: even quote counts keep the existing flag/prose split
   assert.equal(r.task, 'explain "--mode=plan" and "x"');
   // the real bare flag outside quotes still works
   assert.equal(parseDelegateCommand('review "quoted" --allow-dangerous go', MODES, HARNESSES).allowDangerous, true);
+});
+
+test('normalizeHarnessSpec: the single-run vs fan-out decision the tool and command paths share', () => {
+  const cases: Array<[string, string | undefined, boolean]> = [
+    ['claude', 'claude', false],
+    ['claude,', 'claude', false],
+    [',claude', 'claude', false],
+    ['Claude, ', 'claude', false],
+    ['OMP', 'amp', false],
+    ['omp,', 'amp', false],
+    [',', undefined, false],
+    ['', undefined, false],
+    ['claude,codex', 'claude,codex', true],
+    ['Claude,,Codex,', 'claude,codex', true],
+    ['ALL', 'all', true],
+  ];
+  for (const [raw, normalized, fanout] of cases) {
+    assert.equal(normalizeHarnessSpec(raw), normalized, JSON.stringify(raw));
+    assert.equal(isFanoutSpec(normalizeHarnessSpec(raw)), fanout, JSON.stringify(raw));
+  }
+  // the un-normalized spec is what the tool path used to test — and got wrong
+  assert.equal(isFanoutSpec('claude,'), true);
 });
