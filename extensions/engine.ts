@@ -559,6 +559,7 @@ export async function delegate(
             activityLog: collectActivityLog(activityEvents),
             output: streamedFull,
             warning,
+            timeoutMs,
           }),
         );
       } catch (_e) {
@@ -628,6 +629,7 @@ export async function delegate(
       verify,
       budget,
       warning,
+      timeoutMs,
     }),
   );
   pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts);

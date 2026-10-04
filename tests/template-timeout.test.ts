@@ -288,3 +288,22 @@ test('delegate: an invalid template timeout is ignored with a run-time warning, 
     });
   });
 });
+
+/** The `- timeout: Ns` line of a transcript file. */
+function transcriptTimeout(file: unknown): string | undefined {
+  return readFileSync(String(file), 'utf8').match(/^- timeout: (\d+s)$/m)?.[1];
+}
+
+test('transcript: records the harness timeout the run was given', async () => {
+  await withSandbox({ templates: { 'claude/t': tpl('t', 'edit', 'timeout: 75') } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async () => {
+      const run = await delegate(
+        fakePi(async () => ({})),
+        fakeCtx(cwd),
+        { harness: 'claude', mode: 't', task: 'x' },
+      );
+      assert.equal(transcriptTimeout(run.details.file), '75s');
+    });
+  });
+});
