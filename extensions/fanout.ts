@@ -274,6 +274,7 @@ export async function runFanoutConcurrent(
       model: spec.model,
       maxBudgetUsd: spec.budget,
       timeoutSec: spec.timeoutSec,
+      timeoutSecMayRaise: true, // command path only: --timeout= is human-typed
       sessionId: spec.sessionId,
       pr: spec.pr,
       addDirs: spec.addDirs,

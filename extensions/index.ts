@@ -88,6 +88,7 @@ const DELEGATE_TOOL_GUIDELINES: readonly string[] = [
   'pr must be a PR number, an http(s) pull-request URL (https://<host>/<owner>/<repo>/pull/<n>), or owner/repo#123.',
   'addDirs inside the working directory are accepted as-is; any entry outside it asks the human to confirm interactively and is refused in a non-interactive session.',
   'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
+  "timeoutSec can only shorten a run: it never raises the timeout the template or the user's config sets (a larger value has no effect).",
   'If you are unsure which mode or harness to use, call delegate_modes first: it lists every available mode with its permission tier per harness and which harnesses are installed, without running anything.',
 ];
 
@@ -140,7 +141,7 @@ const DELEGATE_TOOL_PARAMS = Type.Object({
   timeoutSec: Type.Optional(
     Type.Integer({
       description:
-        "Harness timeout for this call, in whole seconds (10–7200). Overrides the mode's template timeout and the config. Omit to use those.",
+        "Shorter harness timeout for this call, in whole seconds (10–7200). Can only lower the timeout the mode's template / config would give the run, never raise it — a larger value is ignored. Omit to use that timeout.",
     }),
   ),
   sessionId: Type.Optional(
@@ -496,6 +497,7 @@ export default function (pi: ExtensionAPI) {
       model,
       maxBudgetUsd: budget,
       timeoutSec,
+      timeoutSecMayRaise: true, // human-typed --timeout= — the tool path never sets this
       sessionId,
       pr,
       addDirs,

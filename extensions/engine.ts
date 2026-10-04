@@ -73,10 +73,16 @@ export interface DelegateOptions {
    *  paths resolve against the run's cwd). Per-harness limits apply — see each `buildArgs`. */
   addDirs?: string[];
   /**
-   * Per-call harness timeout in seconds — wins over the template's `timeout:` and the config (see
-   * `resolveRunTimeoutMs`). Bounded like a template timeout; an out-of-range value fails the run.
+   * Per-call harness timeout in seconds, bounded like a template timeout (an out-of-range value fails
+   * the run). By default it can only **lower** the configured timeout (template > per-harness >
+   * global) — the model-settable `delegate` tool's semantics; see `resolveRunTimeoutMs`.
    */
   timeoutSec?: number;
+  /**
+   * The per-call `timeoutSec` was typed by a human (`/delegate --timeout=`), so it may also raise the
+   * configured timeout. Only the command paths set this — never the tool path, never from config.
+   */
+  timeoutSecMayRaise?: boolean;
   /**
    * Host-run verification command override — takes precedence over the template's `verify`
    * frontmatter. Internal engine option only, not exposed on the `delegate` tool's schema — see
@@ -450,8 +456,15 @@ export async function delegate(
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);
   const maxBudgetUsd =
     opts.maxBudgetUsd ?? template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd;
-  // call > template `timeout:` > per-harness config > global config, never past the hard cap — see config.ts
-  const timeoutMs = resolveRunTimeoutMs(config, harnessName, template.timeoutSec, opts.timeoutSec);
+  // template `timeout:` > per-harness config > global config; a per-call timeout only lowers that unless
+  // a human typed it — never past the hard cap. See config.ts.
+  const timeoutMs = resolveRunTimeoutMs(
+    config,
+    harnessName,
+    template.timeoutSec,
+    opts.timeoutSec,
+    opts.timeoutSecMayRaise === true,
+  );
 
   // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
   // exactly as before; fan-out passes waitForSlot:true to queue instead.
@@ -740,7 +753,8 @@ export interface DelegateToolParams {
   sessionId?: string;
   pr?: string;
   addDirs?: string[];
-  /** Per-call harness timeout in seconds, bounded — see `DelegateOptions.timeoutSec`. */
+  /** Per-call harness timeout in seconds, bounded — can only lower the configured timeout, never
+   *  raise it (model-settable). See `DelegateOptions.timeoutSec` / `resolveRunTimeoutMs`. */
   timeoutSec?: number;
 }
 
