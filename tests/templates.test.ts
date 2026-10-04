@@ -95,6 +95,21 @@ test('legacy keys: an unrecognized value fails closed to readonly, with a warnin
   assert.equal(tierOf('permissionMode: nope\nsandbox: danger-full-access')[0], 'readonly');
 });
 
+test('legacy keys: the echoed value is JSON-quoted (no raw control chars/ANSI) and capped', () => {
+  const t = parseTemplate('---\nname: x\nsandbox: \u001b[31mred\u0007\n---\nb');
+  assert.equal(t?.permission, 'readonly');
+  const err = String(t?.legacyPermissionError);
+  assert.ok(err.includes('"\\u001b[31mred\\u0007"'), err);
+  // no raw C0 control character survives into the warning or the description it prefixes
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
+  const ctrl = /[\u0000-\u001f\u007f]/;
+  assert.doesNotMatch(err, ctrl);
+  assert.doesNotMatch(String(t?.description), ctrl);
+  const long = String(parseTemplate(`---\nname: x\nsandbox: ${'z'.repeat(500)}\n---\nb`)?.legacyPermissionError);
+  assert.ok(long.length < 140, long);
+  assert.ok(!long.includes('z'.repeat(60)), 'value capped at 60 chars including quotes');
+});
+
 test('legacy keys: when both are set and disagree, the less permissive tier wins', () => {
   assert.deepEqual(tierOf('permissionMode: acceptEdits\nsandbox: read-only'), [
     'readonly',

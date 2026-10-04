@@ -58,6 +58,14 @@ const LEGACY_SANDBOX_TIERS: Record<string, NormalizedPermission> = {
   'danger-full-access': 'danger',
 };
 
+/**
+ * A frontmatter value echoed back in a warning (`/delegate list`, run-time notes): JSON-quoted so
+ * control characters / ANSI escapes are inert, and capped so a huge value can't flood the line.
+ */
+function quoteValue(value: string): string {
+  return JSON.stringify(value).slice(0, 60);
+}
+
 interface LegacyPermission {
   permission: NormalizedPermission;
   permissionMode: PermissionMode;
@@ -109,7 +117,7 @@ export function normalizeLegacyPermission(
       return {
         permission: 'readonly',
         permissionMode: 'plan',
-        legacyPermissionError: `unrecognized ${key}: "${value}" — loaded as readonly (fail closed)`,
+        legacyPermissionError: `unrecognized ${key}: ${quoteValue(value)} — loaded as readonly (fail closed)`,
       };
     }
     if (!best || TIER_RANK[c.permission] < TIER_RANK[best.permission]) best = c;
