@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NormalizedPermission } from './harnesses/types.ts';
 
+/** Where a loaded template came from: shipped with the package, the user's own dirs, or the project. */
+export type TemplateSource = 'builtin' | 'user' | 'project';
+
 export type PermissionMode = 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk' | 'auto' | 'manual';
 
 const PERMISSION_MODES = new Set<PermissionMode>([
@@ -46,6 +49,8 @@ export interface DelegateTemplate {
   addDirs?: string[];
   prompt: string;
   harness?: string;
+  /** Which tier this template was loaded from — set by `loadTemplates`, absent from `parseTemplate`. */
+  source?: TemplateSource;
   /**
    * Per-run harness timeout in seconds (`timeout: 900`), an integer within
    * [`TEMPLATE_TIMEOUT_MIN_SEC`, `TEMPLATE_TIMEOUT_MAX_SEC`]. An out-of-range or non-integer value is
@@ -462,13 +467,13 @@ export function parseTemplate(text: string): DelegateTemplate | null {
   };
 }
 
-function loadDir(dir: string, out: Map<string, DelegateTemplate>): void {
+function loadDir(dir: string, out: Map<string, DelegateTemplate>, source: TemplateSource): void {
   if (!existsSync(dir)) return;
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.md')) continue;
     try {
       const t = parseTemplate(readFileSync(join(dir, f), 'utf8'));
-      if (t) out.set(t.name, t);
+      if (t) out.set(t.name, { ...t, source });
     } catch {
       // skip unreadable files
     }
@@ -521,20 +526,20 @@ export function loadTemplates(cwd: string, harnessName?: string, trusted = false
   const out = new Map<string, DelegateTemplate>();
   const harness = harnessName ?? 'claude';
   // legacy root builtins (templates/*.md) lowest — for migration from pi-claude-delegate
-  loadDir(builtinTemplatesDir(), out);
+  loadDir(builtinTemplatesDir(), out, 'builtin');
   // shared canonical bodies
-  loadDir(sharedTemplatesDir(), out);
+  loadDir(sharedTemplatesDir(), out, 'builtin');
   // harness-specific builtins override shared
-  loadDir(builtinHarnessTemplatesDir(harness), out);
+  loadDir(builtinHarnessTemplatesDir(harness), out, 'builtin');
   // user globals: legacy before new so new wins
-  loadDir(legacyUserTemplatesDir(), out);
-  loadDir(userTemplatesDir(), out);
-  loadDir(userTemplatesDir(harness), out);
+  loadDir(legacyUserTemplatesDir(), out, 'user');
+  loadDir(userTemplatesDir(), out, 'user');
+  loadDir(userTemplatesDir(harness), out, 'user');
   // project locals: legacy before new so new wins — only if trusted
   if (trusted) {
-    loadDir(legacyProjectTemplatesDir(cwd), out);
-    loadDir(projectTemplatesDir(cwd), out);
-    loadDir(projectTemplatesDir(cwd, harness), out);
+    loadDir(legacyProjectTemplatesDir(cwd), out, 'project');
+    loadDir(projectTemplatesDir(cwd), out, 'project');
+    loadDir(projectTemplatesDir(cwd, harness), out, 'project');
   }
   return out;
 }
