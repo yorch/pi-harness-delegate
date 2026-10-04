@@ -1454,3 +1454,29 @@ test('delegate: headless, the permission warning goes to stderr; a clean templat
     assert.match(written.join(''), /⚠ template "typo": unrecognized permissionMode: "nope"/);
   });
 });
+
+test('delegate: the run-time permission warning names the key as the author spelled it', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeCodexTemplate(cwd, 'typo', 'SANDBOX: workspace-wrte');
+    writeCodexTemplate(cwd, 'over', 'Permission: edit\nSandbox: read-only');
+    const { delegate } = await import('../extensions/engine.ts');
+    const pi = fakePi(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const notes: string[] = [];
+    const ctx = {
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: { notify: (msg: string) => notes.push(msg) },
+    } as never;
+    await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async () => {
+      const typo = await delegate(pi, ctx, { harness: 'codex', mode: 'typo', task: 'x' });
+      const want = '⚠ template "typo": unrecognized SANDBOX: "workspace-wrte" — loaded as readonly (fail closed)';
+      assert.ok(typo.content.startsWith(`${want}\n\n`), typo.content);
+      assert.ok(readFileSync(String(typo.details.file), 'utf8').includes(`\n- warning: ${want}\n`));
+      const over = await delegate(pi, ctx, { harness: 'codex', mode: 'over', task: 'x' });
+      assert.equal(over.details.permission, 'edit');
+      assert.equal(over.details.permissionWarning, 'Permission: edit overrides Sandbox: "read-only" (ignored)');
+      assert.deepEqual(notes, [want, '⚠ template "over": Permission: edit overrides Sandbox: "read-only" (ignored)']);
+    });
+  });
+});

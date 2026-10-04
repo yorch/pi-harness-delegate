@@ -6,7 +6,9 @@ import { test } from 'node:test';
 import { HARNESS_NAMES } from '../extensions/harnesses/registry.ts';
 import {
   describeSkippedProjectTemplates,
+  displayKey,
   loadTemplates,
+  normalizePermission,
   parseTemplate,
   projectTemplatePresence,
   resolveNativePermission,
@@ -177,11 +179,47 @@ test('permission keys are case-insensitive — `Sandbox:`/`SANDBOX:`/`Permission
     assert.deepEqual(tierOf(fm), ['readonly', 'plan', undefined, undefined], fm);
   assert.deepEqual(tierOf('PermissionMode: bypassPermissions'), ['danger', 'bypassPermissions', undefined, undefined]);
   assert.equal(tierOf('Sandbox: nope')[0], 'readonly');
-  assert.match(String(tierOf('Sandbox: nope')[3]), /unrecognized sandbox: "nope"/);
+  assert.match(String(tierOf('Sandbox: nope')[3]), /unrecognized Sandbox: "nope"/);
   // `Permission:` still outranks the legacy keys, whatever their case
   assert.equal(tierOf('SANDBOX: danger-full-access\nPermission: readonly')[0], 'readonly');
   // other keys keep their exact-case behavior
   assert.equal(parseTemplate('---\nname: x\nVerify: touch pwned\n---\nb')?.verify, undefined);
+});
+
+test('permission warnings echo the key as the author spelled it, not the canonical name', () => {
+  assert.equal(tierOf('SANDBOX: nope')[3], 'unrecognized SANDBOX: "nope" — loaded as readonly (fail closed)');
+  assert.match(String(tierOf('PermissionMode: yolo')[3]), /^unrecognized PermissionMode: "yolo"/);
+  assert.equal(
+    tierOf('Permission: edit\nSandbox: read-only')[3],
+    'Permission: edit overrides Sandbox: "read-only" (ignored)',
+  );
+  assert.equal(
+    tierOf('PERMISSION: danger\nPermissionMode: plan\nsandbox: bogus')[3],
+    'PERMISSION: danger overrides PermissionMode: "plan", sandbox: "bogus" (ignored)',
+  );
+});
+
+test('displayKey: only a plain [A-Za-z_] case variant of the canonical key is echoed — anything else is canonical', () => {
+  assert.equal(displayKey('Sandbox', 'sandbox'), 'Sandbox');
+  assert.equal(displayKey(' SANDBOX ', 'sandbox'), 'SANDBOX');
+  for (const raw of ['\u001b[31mSandbox', 'Sand\u0007box', 'sandb0x', 'other', '', 'Sandbox\u202e', 'S'.repeat(40)])
+    assert.equal(displayKey(raw, 'sandbox'), 'sandbox', JSON.stringify(raw));
+  // a hostile key never reaches the warning raw, even when handed straight to normalizePermission
+  const w = String(
+    normalizePermission([{ key: 'Permission\u001b[2J', value: 'edit' }], undefined, [
+      { key: '\u001b[31mSandbox', value: 'read-only' },
+    ]).permissionWarning,
+  );
+  assert.equal(w, 'permission: edit overrides sandbox: "read-only" (ignored)');
+});
+
+test('permission keys: an ANSI/control-char key is not a permission key, and nothing raw reaches a warning', () => {
+  const t = parseTemplate('---\nname: x\ndescription: d\n\u001b[31mSandbox: read-only\nsandbox: nope\n---\nb');
+  // the escape-prefixed line is not `sandbox:` at all — only the plain one counts (and fails closed)
+  assert.equal(t?.permission, 'readonly');
+  assert.equal(t?.permissionWarning, 'unrecognized sandbox: "nope" — loaded as readonly (fail closed)');
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
+  assert.doesNotMatch(String(t?.description), /[\u0000-\u001f\u007f]/);
 });
 
 test('permission keys duplicated by case: the least permissive value wins, in either order', () => {

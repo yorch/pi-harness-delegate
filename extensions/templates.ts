@@ -96,23 +96,48 @@ function classifyLegacyValue(value: string): Omit<LegacyPermission, 'permissionW
   return tier ? { permission: tier, permissionMode: TIER_PERMISSION_MODE[tier] } : null;
 }
 
-/** The legacy keys actually set (non-empty), as `[key, value]` pairs. */
+/** The legacy keys actually set (non-empty), as `[key, value]` pairs — `key` as the author spelled it. */
 function legacyEntries(permissionMode: FrontmatterValues, sandbox: FrontmatterValues): [string, string][] {
-  return [
-    ...values(permissionMode).map(v => ['permissionMode', v] as [string, string]),
-    ...values(sandbox).map(v => ['sandbox', v] as [string, string]),
-  ];
+  return [...entries(permissionMode, 'permissionMode'), ...entries(sandbox, 'sandbox')];
+}
+
+/** One occurrence of a permission key: its value, plus the key as the author spelled it (`Sandbox`). */
+export interface FrontmatterEntry {
+  key: string;
+  value: string;
 }
 
 /**
  * A permission key's value(s): the keys are read case-insensitively and every occurrence is kept
  * (`sandbox:` + `Sandbox:` is two values), so callers take an array; a single string still works.
+ * A bare string element is attributed to the canonical key; a `FrontmatterEntry` keeps the author's.
  */
-type FrontmatterValues = string | readonly string[] | undefined;
+type FrontmatterValues = string | readonly (string | FrontmatterEntry)[] | undefined;
+
+/** Non-empty trimmed `[key, value]` pairs — an empty value means "not set". */
+function entries(v: FrontmatterValues, canonical: string): [string, string][] {
+  return (typeof v === 'string' ? [v] : (v ?? []))
+    .map((x): [string, string] =>
+      typeof x === 'string' ? [canonical, x.trim()] : [displayKey(x.key, canonical), x.value.trim()],
+    )
+    .filter(([, value]) => value !== '');
+}
 
 /** Non-empty trimmed values — an empty value means "not set". */
 function values(v: FrontmatterValues): string[] {
-  return (typeof v === 'string' ? [v] : (v ?? [])).map(x => x.trim()).filter(Boolean);
+  return entries(v, '').map(([, value]) => value);
+}
+
+/**
+ * A frontmatter key echoed back in a warning: the author's own spelling (`Sandbox`, `SANDBOX`) so
+ * the warning points at the line they actually wrote — but only when it is a plain case variant of
+ * the canonical key made of `[A-Za-z_]` (capped). Keys come from template files a hostile project
+ * controls, so anything else (control chars, ANSI escapes, Unicode look-alikes) falls back to the
+ * canonical name rather than reaching the terminal.
+ */
+export function displayKey(raw: string, canonical: string): string {
+  const key = raw.trim();
+  return /^[A-Za-z_]{1,32}$/.test(key) && key.toLowerCase() === canonical.toLowerCase() ? key : canonical;
 }
 
 /**
@@ -189,8 +214,12 @@ export function normalizePermission(
     if (resolved.nativePermission || legacy.length === 0) return resolved;
     const l = normalizeLegacyPermission(fallbackMode, sandbox);
     if (!l.permissionWarning && l.permission === resolved.permission) return resolved;
+    const [[permissionKey]] = entries(raw, 'permission');
     const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
-    return { ...resolved, permissionWarning: `permission: ${resolved.permission} overrides ${ignored} (ignored)` };
+    return {
+      ...resolved,
+      permissionWarning: `${permissionKey}: ${resolved.permission} overrides ${ignored} (ignored)`,
+    };
   }
   // Legacy permissionMode/sandbox mapping — fails closed to readonly on an unrecognized value
   return normalizeLegacyPermission(fallbackMode, sandbox);
@@ -242,14 +271,15 @@ export function parseTemplate(text: string): DelegateTemplate | null {
   const meta: Record<string, string> = {};
   // The keys that decide the tier are matched case-insensitively and keep every occurrence: an
   // exact-case lookup let `Sandbox: read-only` be silently ignored (→ the `edit` default, verify on).
-  const perm: Record<PermissionKey, string[]> = { permission: [], permissionMode: [], sandbox: [] };
+  // Each occurrence keeps the author's key spelling, so a warning names the line they wrote.
+  const perm: Record<PermissionKey, FrontmatterEntry[]> = { permission: [], permissionMode: [], sandbox: [] };
   for (const line of m[1].split('\n')) {
     const i = line.indexOf(':');
     if (i <= 0) continue;
     const key = line.slice(0, i).trim();
     const value = line.slice(i + 1).trim();
     const permKey = PERMISSION_KEYS.get(key.toLowerCase());
-    if (permKey) perm[permKey].push(value);
+    if (permKey) perm[permKey].push({ key, value });
     else meta[key] = value;
   }
 
