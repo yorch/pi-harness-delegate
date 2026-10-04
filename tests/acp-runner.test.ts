@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -111,7 +111,8 @@ function fakeHarness(mode: string, pidFile?: string): Harness {
 }
 
 function tmpPidFile(name: string): string {
-  return join(tmpdir(), `acp-runner-test-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.pid`);
+  // its own fresh mkdtemp dir — unique by construction, no clock/random collision
+  return join(mkdtempSync(join(tmpdir(), `acp-runner-test-${name}-`)), 'agent.pid');
 }
 
 test('acpView: falls back to stdout-shaped fields for an ACP-only harness (Devin needs zero changes)', () => {
