@@ -11,6 +11,7 @@ import {
   sanitizeTemplateText,
   templateRunTier,
 } from '../extensions/modes.ts';
+import { sanitizeIdentifier } from '../extensions/sanitize.ts';
 import { loadExtension, readArgs, tpl, withFakeBinaries, withSandbox } from './helpers/sandbox.ts';
 
 const ESC = String.fromCharCode(0x1b);
@@ -77,6 +78,65 @@ test('sanitizeTemplateText: strips C1, invisible tag/variation-selector smugglin
   const emoji = sanitizeTemplateText('😀'.repeat(20), 5);
   assert.equal(emoji, `${'😀'.repeat(4)}…`);
   assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])/.test(emoji), 'no lone high surrogate');
+});
+
+test('sanitizeTemplateText: strips the invisible characters outside the format category, private use and Zalgo', () => {
+  const cp = (...c: number[]) => String.fromCodePoint(...c);
+  // combining grapheme joiner, Hangul fillers, Khmer inherent vowels, blank Braille, private use (BMP + plane 15)
+  for (const c of [0x034f, 0x115f, 0x1160, 0x3164, 0xffa0, 0x17b4, 0x17b5, 0x2800, 0xe000, 0xf8ff, 0xf0000, 0x10fffd])
+    assert.equal(sanitizeTemplateText(`a${cp(c)}b`, 100), 'a b', `U+${c.toString(16)}`);
+  // a description made only of fillers is empty, not "looks blank but isn't"
+  assert.equal(sanitizeTemplateText(cp(0x3164, 0x115f, 0x2800, 0xffa0), 100), '');
+  // runs of combining marks are cut to MAX_COMBINING_RUN; real accents survive
+  const zalgo = `Z${cp(0x0301, 0x0302, 0x0303, 0x0304, 0x0305)}a`;
+  assert.equal(sanitizeTemplateText(zalgo, 100), `Z${cp(0x0301, 0x0302)}a`);
+  assert.equal(
+    sanitizeTemplateText(`cafe${cp(0x0301)} na${cp(0x0308)}ive`, 100),
+    `cafe${cp(0x0301)} na${cp(0x0308)}ive`,
+  );
+  assert.equal(sanitizeTemplateText('日本語の説明', 100), '日本語の説明', 'non-Latin descriptions are kept');
+});
+
+test('sanitizeIdentifier: non-ASCII escaped so a homoglyph can never look like a real name', () => {
+  assert.deepEqual(sanitizeIdentifier('review', 64), { text: 'review', escaped: false });
+  const cyr = sanitizeIdentifier('revi\u0435w', 64); // Cyrillic е
+  assert.deepEqual(cyr, { text: 'revi\\u{435}w', escaped: true });
+  assert.notEqual(cyr.text, 'review');
+  assert.equal(sanitizeIdentifier('\u03bfpus', 64).text, '\\u{3bf}pus'); // Greek omicron
+  // invisible characters are still stripped first, never escaped into view as noise
+  assert.deepEqual(sanitizeIdentifier(`re\u200bview${ESC}[31m`, 64), { text: 're view', escaped: false });
+  assert.ok(sanitizeIdentifier('\u0435'.repeat(100), 64).text.length <= 64);
+});
+
+test('delegate_modes: a homoglyph mode name is escaped and flagged, never shown as the real name', async () => {
+  await withSandbox(
+    {
+      templates: {
+        fake: tpl('revi\u0435w', 'edit', 'model: \u03bfpus'),
+        filler: tpl('pad', 'readonly', '', 'x').replace('description: test pad', `description: ${'\u3164'.repeat(5)}`),
+      },
+    },
+    async ({ cwd }) => {
+      const res = await runModes(cwd, true);
+      const text = res.content[0].text;
+      assert.match(text, /- mode: "revi\\\\u\{435\}w"\n/);
+      assert.match(text, /model: "\\\\u\{3bf\}pus"/);
+      assert.match(text, /warning: "mode name has non-ASCII characters \(shown escaped/);
+      assert.match(text, /warning: "model name has non-ASCII characters/);
+      // names/models never carry the raw homoglyph (descriptions are free text and may), fillers are gone
+      const idLines = text.split('\n').filter(l => /^- mode:|model:/.test(l));
+      assert.ok(
+        idLines.every(l => !l.includes('\u0435') && !l.includes('\u03bf')),
+        idLines.join('\n'),
+      );
+      assert.ok(!text.includes('\u3164'), text);
+      assert.match(text, /- mode: "pad"\n.*\n.*\n {2}description \(template data\): ""/);
+      // the real builtin still shows plainly, and only once
+      assert.equal(text.match(/- mode: "review"\n/g)?.length, 1);
+      const names = res.details.modes.map(m => m.name);
+      assert.ok(names.includes('revi\\u{435}w'), names.join(','));
+    },
+  );
 });
 
 test('delegate_modes: a template name is JSON-quoted like every other template-authored field', async () => {

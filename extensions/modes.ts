@@ -9,14 +9,17 @@
  * a fixed allowlist of fields: never a template's `verify:` command (only whether one is configured),
  * never its prompt body, never `defaultTask`/`defaultScope` text (only whether they are set), never a
  * file path. Template-authored strings (name, description, model, warnings) are attacker-influenceable
- * in a trusted-but-hostile repo, so each is stripped of ANSI/control/bidi characters, collapsed to one
- * line and length-capped, and the model-facing output labels descriptions as data, not instructions.
+ * in a trusted-but-hostile repo, so each goes through sanitize.ts — ANSI/control/invisible characters
+ * stripped, combining-mark runs capped, collapsed to one line and length-capped; mode and model names
+ * additionally have every non-ASCII character escaped so a homoglyph can't pass for a real name — and
+ * the model-facing output labels descriptions as data, not instructions.
  */
 
 import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { classifyNativePermission, getHarness, HARNESS_NAMES, nativePermissionTier } from './harnesses/registry.ts';
 import type { NormalizedPermission } from './harnesses/types.ts';
+import { sanitizeIdentifier, sanitizeTemplateText } from './sanitize.ts';
 import { type DelegateTemplate, loadTemplates, type TemplateSource } from './templates.ts';
 
 /**
@@ -29,32 +32,8 @@ export const MODE_TEXT_LIMITS = { name: 64, description: 240, model: 64, warning
 /** Listing order of source tiers: what ships with the extension first, a project's own last. */
 const SOURCE_ORDER: readonly TemplateSource[] = ['builtin', 'user', 'project'];
 
-// ANSI CSI / OSC / two-byte escape sequences.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping terminal escapes is the point
-const ANSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-Z\\-_]/g;
-// C0/C1 controls, DEL, soft hyphen, zero-width and bidi-override/isolate characters (incl. the
-// Arabic letter mark and Mongolian vowel separator), line/paragraph separators, BOM, interlinear
-// annotation anchors, variation selectors, and Unicode tag characters (U+E0000–E007F — invisible
-// "ASCII smuggling" text a model still reads).
-const UNSAFE_CHARS_RE = new RegExp(
-  [
-    '[\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u206f',
-    '\\ufe00-\\ufe0f\\ufeff\\ufff9-\\ufffb]|[\\u{e0000}-\\u{e007f}\\u{e0100}-\\u{e01ef}]',
-  ].join(''),
-  'gu',
-);
-
-/**
- * Make template-authored text safe to show to a model or a terminal: ANSI escapes removed, control /
- * zero-width / bidi characters replaced by a space, whitespace (including newlines) collapsed to a
- * single line, and the result capped at `max` characters (with `…`).
- */
-export function sanitizeTemplateText(text: string, max: number): string {
-  const clean = text.replace(ANSI_RE, '').replace(UNSAFE_CHARS_RE, ' ').replace(/\s+/g, ' ').trim();
-  // cap by code point, so the cut never leaves half a surrogate pair behind
-  const chars = Array.from(clean);
-  return chars.length > max ? `${chars.slice(0, Math.max(0, max - 1)).join('')}…` : clean;
-}
+// One shared sanitizer (sanitize.ts) — re-exported so existing callers keep importing it from here.
+export { sanitizeTemplateText };
 
 /**
  * Is `binary` an executable file on PATH? A pure filesystem check — deliberately not the harness's
@@ -191,8 +170,15 @@ function plainDescription(t: DelegateTemplate): string {
   return t.description.slice(prefix.length).replace(/^ · /, '');
 }
 
-function warningsOf(t: DelegateTemplate): string[] {
-  return [t.permissionWarning, ...(t.fieldWarnings ?? [])]
+function warningsOf(t: DelegateTemplate, nameEscaped: boolean, modelEscaped: boolean): string[] {
+  return [
+    nameEscaped
+      ? "mode name has non-ASCII characters (shown escaped as \\u{…}) — it may be imitating another mode's name"
+      : undefined,
+    modelEscaped ? 'model name has non-ASCII characters (shown escaped as \\u{…})' : undefined,
+    t.permissionWarning,
+    ...(t.fieldWarnings ?? []),
+  ]
     .filter((w): w is string => Boolean(w))
     .map(w => sanitizeTemplateText(w, MODE_TEXT_LIMITS.warning));
 }
@@ -231,12 +217,14 @@ export function collectModes(
         continue;
       }
       const defaults = templateForHarnessDefault(view, defaultHarness, t.name);
+      const name = sanitizeIdentifier(t.name, MODE_TEXT_LIMITS.name);
+      const model = t.model ? sanitizeIdentifier(t.model, MODE_TEXT_LIMITS.model) : undefined;
       byName.set(t.name, {
         first: t,
         info: {
-          name: sanitizeTemplateText(t.name, MODE_TEXT_LIMITS.name),
+          name: name.text,
           description: sanitizeTemplateText(plainDescription(t), MODE_TEXT_LIMITS.description),
-          model: t.model ? sanitizeTemplateText(t.model, MODE_TEXT_LIMITS.model) : undefined,
+          model: model?.text,
           availability: [availability],
           variesByHarness: false,
           hasDefaultTask: Boolean(t.defaultTask),
@@ -245,7 +233,7 @@ export function collectModes(
           defaultHarnesses: defaults?.harnesses?.map(n => sanitizeTemplateText(n, MODE_TEXT_LIMITS.name)),
           needsHarness: !defaults,
           timeoutSec: t.timeoutSec,
-          warnings: warningsOf(t),
+          warnings: warningsOf(t, name.escaped, model?.escaped === true),
         },
       });
     }
