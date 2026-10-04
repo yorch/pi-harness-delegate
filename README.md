@@ -72,7 +72,7 @@ Some modes have **default tasks** when the prompt is omitted:
 
 The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff, `pr` = PR diff, path list, or whole repo), `model`, `maxBudgetUsd`, `allowDangerous`, `sessionId`, `pr`, `addDirs`. (`verify` is deliberately *not* a tool parameter — see below.) Setting `allowDangerous` from the tool always asks you to confirm interactively, and is refused outright in a non-interactive session — see [Security model](#security-model).
 
-`claude_delegate` remains as a deprecated alias for `delegate{harness:claude}`.
+`claude_delegate` remains as a deprecated alias for `delegate{harness:claude}`. A read-only `delegate_modes` tool lets the model list the available modes, their permission tier per harness and the installed harnesses before it delegates (see [Discovering modes](#modes-templates)).
 
 ### Fan out to multiple harnesses
 
@@ -148,7 +148,7 @@ All frontmatter keys (one `key: value` per line; only `name` is required):
 | Key | Meaning |
 | --- | --- |
 | `name` | The mode name used to select it (`--mode=`/`mode`) |
-| `description` | Shown by `/delegate list` |
+| `description` | Shown by `/delegate list` and the `delegate_modes` tool (sanitized, as data) |
 | `permission` | `readonly` \| `edit` \| `danger` (default `edit`). Any other value is treated as a native permission string |
 | `permissionMode` / `sandbox` | Legacy tier keys, only read when `permission` is absent (see below) |
 | `model` | Default model for this mode (call → template → harness → global) |
@@ -159,6 +159,8 @@ All frontmatter keys (one `key: value` per line; only `name` is required):
 | `verify` | Host-run check command (see below) |
 | `addDirs` | Comma-separated extra directories the harness may access (merged with the call's `addDirs`/`--add-dir`) |
 | `harness` | Informational: which harness a template targets (shown by `/delegate list`) |
+| `harnesses` | Default harness(es) for this mode, used **only when no harness is given** (comma list, e.g. `codex` or `claude, codex`). See below |
+| `timeout` | Per-run harness timeout in whole seconds, `10`–`7200`. See below |
 
 **Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, put the native value in `permission:` (e.g. `permission: ask` in a `devin/` template) — it is passed to that harness as-is. Legacy `permissionMode:`/`sandbox:` keys only map onto the normalized tiers, and only when `permission:` is absent (`permission:` always wins; a legacy key that disagrees with it — or legacy keys that disagree with each other — is ignored but flagged with a `⚠` warning — for a native `permission:` value, such as `permission: plan` next to `sandbox: workspace-write`, the check happens at run time against what that value means on the harness actually running it, e.g. `⚠ template "x": permission: "plan" (readonly on claude) overrides sandbox: "workspace-write" (ignored)`, so it appears on the run rather than in `/delegate list`). Both keys accept both vocabularies, case-, whitespace- and `_`/`-`-insensitively: Claude's `plan` and Codex's `read-only` → `readonly`; `acceptEdits`/`dontAsk`/`auto`/`manual` and `workspace-write` → `edit`; `bypassPermissions` and `danger-full-access` → `danger` (gated behind `allowDangerous` / `--allow-dangerous` like any danger template). The three permission key names (`permission`, `permissionMode`, `sandbox`) are themselves case-insensitive (`Sandbox: read-only` counts, and warnings name the key as you wrote it); if a key appears more than once, or both legacy keys are set, the least permissive tier wins. An **unrecognized** legacy value fails closed: the template still loads, but as `readonly` (so it cannot write, and any `verify:` is skipped), with a `⚠ unrecognized sandbox: "…"` warning prefixed to its description in `/delegate list` and repeated on every run (a notification, a `- warning:` transcript line, and a prefix on the returned result). It is not dropped, because a dropped override would let a same-named builtin (e.g. `implement`, which is `edit`) run in its place, and that can be wider than what the author meant.
 
@@ -177,6 +179,17 @@ Native values are checked against a per-harness **allowlist** of readonly/edit-e
 - **Sources, deliberately limited:** a verify command can only come from a template's `verify:` frontmatter, or a human typing `/delegate --verify="<cmd>"` (quotes needed for multi-word commands) — the call-level value wins over the template's. **It is not a parameter on the `delegate` tool** — that's on purpose, not an oversight: a tool param is set by the model, and the model's context includes repo content and delegated-harness output, both of which an attacker could influence, so a model-settable verify command would be a prompt-injection → arbitrary-host-command path. A model that wants verification simply picks a template that declares one.
 - **Never runs on a `readonly` template** — including a native read-only one (`permission: plan`, codex `read-only`; see the table above). `readonly` (`review`/`plan`/`security-audit`) guarantees no execution or modification — a verify command riding along on one would quietly break that guarantee. If a `readonly` template (or override) has a `verify` configured, it's recorded as skipped (`### Verify: \`cmd\`` / `⊘ skipped (readonly run)`) rather than run, and never silently dropped.
 - A project-local template's `verify` command is gated by the same project-trust check as the rest of the template.
+
+**Default harnesses (`harnesses:`):** consulted only when the caller names no harness — an explicit `--harness=`, harness-as-first-word, alias command (`/codex`, …) or the tool's `harness` param always wins. The template is looked up in the `defaultHarness`'s view, with the same project-trust gate as a run (an untrusted project's template can never pick the harness).
+- `/delegate <mode> …` runs the whole list. Several names make it a normal [fan-out](#fan-out-to-multiple-harnesses): uninstalled/unknown names are skipped and reported, runs queue for `maxConcurrent` slots, `--allow-dangerous` asks once naming every harness (refused headless), and `--resume` is rejected (a session belongs to one harness — pass `--harness=`).
+- The `delegate` **tool** runs only the **first known** harness of the list (a normal single run: fails fast at capacity) and says so in its result. A template never turns the model's single call into a fan-out — that would multiply spend the model didn't ask for. The model can still fan out explicitly with `harness: "a,b"`.
+- `all` is not accepted (name the harnesses), and anything that isn't a plain harness-shaped word is dropped; both are flagged with a `⚠` warning. A template can't change permission through this — every harness runs the mode at its own tier, with the usual gates.
+
+**Timeout (`timeout:`):** whole seconds from `10` to `7200` (2 h). It replaces the global `timeoutMs` default for that mode, but an explicit per-harness `harnesses.<name>.timeoutMs` stays a **ceiling** (a template can shorten a run on that harness, never lengthen it), and nothing exceeds 7200 s. An invalid value (out of range, fractional, `600s`, …) is ignored — the configured timeout applies — and flagged with a `⚠` warning in `/delegate list`, `delegate_modes` and on every run (same places as a permission warning). There is no per-call timeout parameter.
+
+**Discovering modes:** `/delegate list [harness]` shows every mode with its permission tier on each harness, where it came from (`builtin`/`user`/`project`), its defaults and any warnings. The model gets the same data from the read-only **`delegate_modes`** tool (optional `harness` filter), so it can pick a mode before delegating: per-harness tier (danger and unlisted native modes are marked as needing `allowDangerous`), whether a default task/scope or a host-run check is configured, the `harnesses:`/`timeout:` defaults, and which harnesses are on `PATH`. It runs nothing (a `PATH` lookup, not a `--version` probe — so "on PATH" isn't a guarantee it works), lists project-local templates only for a trusted project, and never shows a `verify:` command, prompt body, `defaultTask`/`defaultScope` text or file paths. Template text is untrusted: names, descriptions, models and warnings are stripped of ANSI/control/bidi characters, kept to one line, length-capped, and in the tool's output descriptions are also quoted and labelled as data, not instructions. `/delegate list` gets the same sanitizing, so a hostile description can't drive your terminal. At most 100 modes are listed.
+
+Templates have no variable substitution (`{{task}}` etc.) — the task and scope are always appended by the extension.
 
 **Template sources (later wins):**
 
