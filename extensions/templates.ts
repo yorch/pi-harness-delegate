@@ -29,6 +29,12 @@ export interface DelegateTemplate {
    * legacy key that disagrees with `permission:` and was ignored (tier unchanged).
    */
   permissionWarning?: string;
+  /**
+   * Set when `permission:` is a native value and legacy `permissionMode:`/`sandbox:` keys were also
+   * present (and ignored). Whether they *disagree* depends on the native value's tier, which is only
+   * known per harness — so `delegate()` decides, via `nativeOverrideWarning()`. Never changes the tier.
+   */
+  ignoredLegacyPermission?: IgnoredLegacyPermission;
   model?: string;
   maxBudgetUsd?: number;
   skill?: string;
@@ -40,6 +46,13 @@ export interface DelegateTemplate {
   addDirs?: string[];
   prompt: string;
   harness?: string;
+}
+
+/** The legacy keys ignored next to a native `permission:` value — keys already sanitized (`displayKey`). */
+export interface IgnoredLegacyPermission {
+  /** The `permission:` key as the author spelled it. */
+  permissionKey: string;
+  legacy: FrontmatterEntry[];
 }
 
 /** Tier order, least permissive first — used to pick the safer of two conflicting legacy keys. */
@@ -96,23 +109,48 @@ function classifyLegacyValue(value: string): Omit<LegacyPermission, 'permissionW
   return tier ? { permission: tier, permissionMode: TIER_PERMISSION_MODE[tier] } : null;
 }
 
-/** The legacy keys actually set (non-empty), as `[key, value]` pairs. */
+/** The legacy keys actually set (non-empty), as `[key, value]` pairs — `key` as the author spelled it. */
 function legacyEntries(permissionMode: FrontmatterValues, sandbox: FrontmatterValues): [string, string][] {
-  return [
-    ...values(permissionMode).map(v => ['permissionMode', v] as [string, string]),
-    ...values(sandbox).map(v => ['sandbox', v] as [string, string]),
-  ];
+  return [...entries(permissionMode, 'permissionMode'), ...entries(sandbox, 'sandbox')];
+}
+
+/** One occurrence of a permission key: its value, plus the key as the author spelled it (`Sandbox`). */
+export interface FrontmatterEntry {
+  key: string;
+  value: string;
 }
 
 /**
  * A permission key's value(s): the keys are read case-insensitively and every occurrence is kept
  * (`sandbox:` + `Sandbox:` is two values), so callers take an array; a single string still works.
+ * A bare string element is attributed to the canonical key; a `FrontmatterEntry` keeps the author's.
  */
-type FrontmatterValues = string | readonly string[] | undefined;
+type FrontmatterValues = string | readonly (string | FrontmatterEntry)[] | undefined;
+
+/** Non-empty trimmed `[key, value]` pairs — an empty value means "not set". */
+function entries(v: FrontmatterValues, canonical: string): [string, string][] {
+  return (typeof v === 'string' ? [v] : (v ?? []))
+    .map((x): [string, string] =>
+      typeof x === 'string' ? [canonical, x.trim()] : [displayKey(x.key, canonical), x.value.trim()],
+    )
+    .filter(([, value]) => value !== '');
+}
 
 /** Non-empty trimmed values — an empty value means "not set". */
 function values(v: FrontmatterValues): string[] {
-  return (typeof v === 'string' ? [v] : (v ?? [])).map(x => x.trim()).filter(Boolean);
+  return entries(v, '').map(([, value]) => value);
+}
+
+/**
+ * A frontmatter key echoed back in a warning: the author's own spelling (`Sandbox`, `SANDBOX`) so
+ * the warning points at the line they actually wrote — but only when it is a plain case variant of
+ * the canonical key made of `[A-Za-z_]` (capped). Keys come from template files a hostile project
+ * controls, so anything else (control chars, ANSI escapes, Unicode look-alikes) falls back to the
+ * canonical name rather than reaching the terminal.
+ */
+export function displayKey(raw: string, canonical: string): string {
+  const key = raw.trim();
+  return /^[A-Za-z_]{1,32}$/.test(key) && key.toLowerCase() === canonical.toLowerCase() ? key : canonical;
 }
 
 /**
@@ -156,6 +194,7 @@ export function normalizePermission(
   nativePermission?: string;
   permissionMode: PermissionMode;
   permissionWarning?: string;
+  ignoredLegacyPermission?: IgnoredLegacyPermission;
 } {
   // Prefer normalized permission
   const raws = values(raw);
@@ -183,17 +222,62 @@ export function normalizePermission(
   if (raws.length > 0) {
     const resolved = normalizeTierValue(raws[0]);
     // `permission:` always wins; a legacy key that disagrees is ignored, but said so — an author who
-    // wrote `sandbox: read-only` next to `permission: edit` should see which one ran. Skipped for a
-    // native value: its tier is only known per harness at run time, so "disagrees" isn't decidable here.
+    // wrote `sandbox: read-only` next to `permission: edit` should see which one ran. For a native
+    // value the tier is only known per harness, so the ignored keys are carried for delegate() to judge.
     const legacy = legacyEntries(fallbackMode, sandbox);
-    if (resolved.nativePermission || legacy.length === 0) return resolved;
-    const l = normalizeLegacyPermission(fallbackMode, sandbox);
-    if (!l.permissionWarning && l.permission === resolved.permission) return resolved;
-    const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
-    return { ...resolved, permissionWarning: `permission: ${resolved.permission} overrides ${ignored} (ignored)` };
+    if (legacy.length === 0) return resolved;
+    const [[permissionKey]] = entries(raw, 'permission');
+    if (resolved.nativePermission)
+      return {
+        ...resolved,
+        ignoredLegacyPermission: { permissionKey, legacy: legacy.map(([key, value]) => ({ key, value })) },
+      };
+    const warning = legacyOverrideWarning(`${permissionKey}: ${resolved.permission}`, resolved.permission, legacy);
+    return warning ? { ...resolved, permissionWarning: warning } : resolved;
   }
   // Legacy permissionMode/sandbox mapping — fails closed to readonly on an unrecognized value
   return normalizeLegacyPermission(fallbackMode, sandbox);
+}
+
+/**
+ * `<label> overrides <legacy keys> (ignored)` when the ignored legacy keys disagree with `tier` (or
+ * hold an unrecognized value); `undefined` when they agree. Keys are echoed as given (already
+ * `displayKey`-sanitized), values JSON-quoted and capped.
+ */
+function legacyOverrideWarning(
+  label: string,
+  tier: NormalizedPermission,
+  legacy: readonly [string, string][],
+): string | undefined {
+  // Same judgement as a legacy-only template: any unrecognized value, or a least-permissive tier
+  // that differs from the one that actually runs.
+  const classified = legacy.map(([, v]) => classifyLegacyValue(v));
+  const least = classified.reduce<NormalizedPermission | undefined>(
+    (acc, c) => (c && (acc === undefined || TIER_RANK[c.permission] < TIER_RANK[acc]) ? c.permission : acc),
+    undefined,
+  );
+  if (classified.every(Boolean) && least === tier) return undefined;
+  const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
+  return `${label} overrides ${ignored} (ignored)`;
+}
+
+/**
+ * The run-time counterpart of the override warning for a native `permission:` value: `delegate()`
+ * passes the tier that value actually runs at on `harnessName` (readonly/edit for an allowlisted
+ * value, danger for one gated as danger); `harnessName` must be the canonical, registry-resolved
+ * name (it is echoed unquoted). Only a warning — the tier is never changed by it.
+ */
+export function nativeOverrideWarning(
+  ignored: IgnoredLegacyPermission,
+  nativePermission: string,
+  tier: NormalizedPermission,
+  harnessName: string,
+): string | undefined {
+  return legacyOverrideWarning(
+    `${ignored.permissionKey}: ${quoteValue(nativePermission)} (${tier} on ${harnessName})`,
+    tier,
+    ignored.legacy.map(e => [e.key, e.value]),
+  );
 }
 
 /** One `permission:` value → tier, or (unknown value) the native escape hatch. */
@@ -242,14 +326,15 @@ export function parseTemplate(text: string): DelegateTemplate | null {
   const meta: Record<string, string> = {};
   // The keys that decide the tier are matched case-insensitively and keep every occurrence: an
   // exact-case lookup let `Sandbox: read-only` be silently ignored (→ the `edit` default, verify on).
-  const perm: Record<PermissionKey, string[]> = { permission: [], permissionMode: [], sandbox: [] };
+  // Each occurrence keeps the author's key spelling, so a warning names the line they wrote.
+  const perm: Record<PermissionKey, FrontmatterEntry[]> = { permission: [], permissionMode: [], sandbox: [] };
   for (const line of m[1].split('\n')) {
     const i = line.indexOf(':');
     if (i <= 0) continue;
     const key = line.slice(0, i).trim();
     const value = line.slice(i + 1).trim();
     const permKey = PERMISSION_KEYS.get(key.toLowerCase());
-    if (permKey) perm[permKey].push(value);
+    if (permKey) perm[permKey].push({ key, value });
     else meta[key] = value;
   }
 
@@ -271,6 +356,7 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     nativePermission: norm.nativePermission,
     permissionMode: norm.permissionMode,
     permissionWarning: norm.permissionWarning,
+    ignoredLegacyPermission: norm.ignoredLegacyPermission,
     model: meta.model || undefined,
     maxBudgetUsd: Number.isFinite(budget) && budget > 0 ? budget : undefined,
     skill: meta.skill || undefined,

@@ -1454,3 +1454,128 @@ test('delegate: headless, the permission warning goes to stderr; a clean templat
     assert.match(written.join(''), /⚠ template "typo": unrecognized permissionMode: "nope"/);
   });
 });
+
+test('delegate: the run-time permission warning names the key as the author spelled it', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeCodexTemplate(cwd, 'typo', 'SANDBOX: workspace-wrte');
+    writeCodexTemplate(cwd, 'over', 'Permission: edit\nSandbox: read-only');
+    const { delegate } = await import('../extensions/engine.ts');
+    const pi = fakePi(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const notes: string[] = [];
+    const ctx = {
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: { notify: (msg: string) => notes.push(msg) },
+    } as never;
+    await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async () => {
+      const typo = await delegate(pi, ctx, { harness: 'codex', mode: 'typo', task: 'x' });
+      const want = '⚠ template "typo": unrecognized SANDBOX: "workspace-wrte" — loaded as readonly (fail closed)';
+      assert.ok(typo.content.startsWith(`${want}\n\n`), typo.content);
+      assert.ok(readFileSync(String(typo.details.file), 'utf8').includes(`\n- warning: ${want}\n`));
+      const over = await delegate(pi, ctx, { harness: 'codex', mode: 'over', task: 'x' });
+      assert.equal(over.details.permission, 'edit');
+      assert.equal(over.details.permissionWarning, 'Permission: edit overrides Sandbox: "read-only" (ignored)');
+      assert.deepEqual(notes, [want, '⚠ template "over": Permission: edit overrides Sandbox: "read-only" (ignored)']);
+    });
+  });
+});
+
+// A legacy key next to a *native* `permission:` value can only be judged at run time — the native
+// value's tier is per harness — so delegate() emits the override warning there. The tier never moves.
+function writeHarnessTemplate(cwd: string, harness: string, name: string, frontmatter: string): void {
+  const dir = join(cwd, '.pi', 'delegate', 'templates', harness);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${name}.md`), `---\nname: ${name}\ndescription: t\n${frontmatter}\n---\nDo it.\n`);
+}
+
+function notifyCtx(cwd: string, notes: string[]): never {
+  return {
+    cwd,
+    hasUI: true,
+    isProjectTrusted: () => true,
+    ui: { notify: (msg: string, level: string) => notes.push(`${level}: ${msg}`) },
+  } as never;
+}
+
+test('delegate: a legacy key ignored next to a native permission: is flagged at run time; the tier is unchanged', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    // `Workspace-Write` is codex's native edit mode (not a normalized tier value)
+    writeHarnessTemplate(cwd, 'codex', 'ww', 'permission: Workspace-Write\nSandbox: read-only\nverify: bun test');
+    const { delegate } = await import('../extensions/engine.ts');
+    const { pi, calls } = recordingPi();
+    const notes: string[] = [];
+    await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async argsFile => {
+      const run = await delegate(pi, notifyCtx(cwd, notes), { harness: 'codex', mode: 'ww', task: 'x' });
+      // permission: still wins — the native edit value runs (not the ignored read-only), verify runs
+      assert.equal(run.details.permission, 'edit');
+      assert.equal(sandboxArg(argsFile), 'workspace-write');
+      assert.deepEqual(calls, [['sh', '-c', 'bun test']]);
+      const msg = 'permission: "Workspace-Write" (edit on codex) overrides Sandbox: "read-only" (ignored)';
+      const want = `⚠ template "ww": ${msg}`;
+      assert.equal(run.details.permissionWarning, msg);
+      assert.ok(run.content.startsWith(`${want}\n\n`), run.content);
+      assert.ok(run.content.endsWith('all good'), run.content);
+      assert.deepEqual(notes, [`warning: ${want}`]);
+      assert.ok(readFileSync(String(run.details.file), 'utf8').includes(`\n- warning: ${want}\n`));
+    });
+  });
+});
+
+test('delegate: claude `permission: plan` + `sandbox: workspace-write` warns; agreeing native/legacy pairs do not', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeHarnessTemplate(cwd, 'claude', 'plan', 'permission: plan\nsandbox: workspace-write');
+    writeHarnessTemplate(cwd, 'claude', 'agree', 'permission: plan\nsandbox: read-only\npermissionMode: plan');
+    writeHarnessTemplate(cwd, 'claude', 'edits', 'permission: acceptEdits\nsandbox: workspace-write');
+    writeHarnessTemplate(cwd, 'claude', 'plain', 'permission: plan');
+    const { delegate } = await import('../extensions/engine.ts');
+    const { pi } = recordingPi();
+    const notes: string[] = [];
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const run = await delegate(pi, notifyCtx(cwd, notes), { harness: 'claude', mode: 'plan', task: 'x' });
+      assert.equal(run.details.permission, 'readonly');
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'plan');
+      assert.equal(
+        run.details.permissionWarning,
+        'permission: "plan" (readonly on claude) overrides sandbox: "workspace-write" (ignored)',
+      );
+      for (const mode of ['agree', 'edits', 'plain']) {
+        const clean = await delegate(pi, notifyCtx(cwd, notes), { harness: 'claude', mode, task: 'x' });
+        assert.equal(clean.content, 'all good', mode);
+        assert.equal(clean.details.permissionWarning, null, mode);
+        assert.doesNotMatch(readFileSync(String(clean.details.file), 'utf8'), /- warning:/, mode);
+      }
+      assert.equal(notes.length, 1, notes.join('\n'));
+    });
+  });
+});
+
+test('delegate: a native value gated as danger is judged as danger — flagged even when the run is refused', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    // `auto` is not on claude's allowlist → unlisted → danger-gated; the legacy key is ignored
+    writeHarnessTemplate(cwd, 'claude', 'auto', 'permission: auto\nSANDBOX: read-only');
+    const { delegate } = await import('../extensions/engine.ts');
+    const { pi } = recordingPi();
+    const notes: string[] = [];
+    const want =
+      'warning: ⚠ template "auto": permission: "auto" (danger on claude) overrides SANDBOX: "read-only" (ignored)';
+    await assert.rejects(
+      () => delegate(pi, notifyCtx(cwd, notes), { harness: 'claude', mode: 'auto', task: 'x' }),
+      /requires danger permission/,
+    );
+    assert.deepEqual(notes, [want]);
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const run = await delegate(pi, notifyCtx(cwd, notes), {
+        harness: 'claude',
+        mode: 'auto',
+        task: 'x',
+        allowDangerous: true,
+      });
+      assert.equal(run.details.permission, 'danger');
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'auto');
+      assert.match(String(run.details.permissionWarning), /\(danger on claude\) overrides SANDBOX/);
+    });
+  });
+});

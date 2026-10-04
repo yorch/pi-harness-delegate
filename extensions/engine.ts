@@ -46,6 +46,7 @@ import {
   type DelegateTemplate,
   describeSkippedProjectTemplates,
   loadTemplates,
+  nativeOverrideWarning,
   projectTemplatePresence,
   resolveNativePermission,
 } from './templates.ts';
@@ -351,19 +352,6 @@ export async function delegate(
     );
   const task = opts.task || template.defaultTask;
   if (!task) throw new Error(`delegate mode "${mode}" requires a task`);
-  // A template permission problem (an unrecognized legacy value failed closed to readonly, or an
-  // ignored legacy key) is otherwise only visible in `/delegate list` — say so where the run happens.
-  const warning = template.permissionWarning && `⚠ template "${mode}": ${template.permissionWarning}`;
-  if (warning) {
-    if (ctx.hasUI) ctx.ui.notify?.(warning, 'warning');
-    else process.stderr.write(`${warning}\n`);
-  }
-
-  // Fail-fast, before acquireSlot()/spawn — configuring e.g. transport:'acp' for a harness with no
-  // ACP surface (or 'stdout' for an ACP-only one) should error immediately with a clear message,
-  // not spawn the process and surface a cryptic native failure. See config.ts's resolveTransport.
-  const transport = resolveTransport(config, harnessName, harness);
-
   // permission: normalized, danger requires explicit per-call allowDangerous:true (tool: model-set,
   // human-confirmed in execute(); command: --allow-dangerous, human-confirmed in the handler). Resolved (and
   // the danger refusal thrown) before acquireSlot() — it's pure, so a refused run never occupies
@@ -377,6 +365,34 @@ export async function delegate(
     nativeClass === 'safe'
       ? (nativePermissionTier(harness, template.nativePermission) ?? template.permission)
       : template.permission;
+  const isNativeDanger = nativeClass === 'danger' || nativeClass === 'unlisted';
+
+  // A template permission problem (an unrecognized legacy value failed closed to readonly, or an
+  // ignored legacy key) is otherwise only visible in `/delegate list` — say so where the run happens.
+  // A legacy key ignored next to a *native* `permission:` can only be judged here, where the native
+  // value's tier on this harness is known (danger/unlisted run as danger once confirmed). Report-only:
+  // the tier above is untouched — `permission:` still wins.
+  const permissionWarning =
+    template.permissionWarning ??
+    (template.ignoredLegacyPermission && template.nativePermission
+      ? nativeOverrideWarning(
+          template.ignoredLegacyPermission,
+          template.nativePermission,
+          isNativeDanger ? 'danger' : templateTier,
+          harness.name,
+        )
+      : undefined);
+  const warning = permissionWarning && `⚠ template "${mode}": ${permissionWarning}`;
+  if (warning) {
+    if (ctx.hasUI) ctx.ui.notify?.(warning, 'warning');
+    else process.stderr.write(`${warning}\n`);
+  }
+
+  // Fail-fast, before acquireSlot()/spawn — configuring e.g. transport:'acp' for a harness with no
+  // ACP surface (or 'stdout' for an ACP-only one) should error immediately with a clear message,
+  // not spawn the process and surface a cryptic native failure. See config.ts's resolveTransport.
+  const transport = resolveTransport(config, harnessName, harness);
+
   let permission: NormalizedPermission = templateTier;
   // A safe native matches its allowlist case-insensitively (`Plan`), but what reaches argv/ACP is
   // always the allowlist's canonical spelling (`plan`, claude's camelCase `acceptEdits`) — never the
@@ -385,7 +401,6 @@ export async function delegate(
     nativeClass === 'safe'
       ? canonicalSafeNativePermission(harness, template.nativePermission)
       : template.nativePermission;
-  const isNativeDanger = nativeClass === 'danger' || nativeClass === 'unlisted';
   if (template.permission === 'danger' || isNativeDanger) {
     if (opts.allowDangerous !== true) {
       const why =
@@ -610,7 +625,7 @@ export async function delegate(
       usage: result.usage,
       verify,
       budget,
-      permissionWarning: template.permissionWarning ?? null,
+      permissionWarning: permissionWarning ?? null,
     },
     result,
     activityLog: collectActivityLog(activityEvents),

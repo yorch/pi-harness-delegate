@@ -6,7 +6,10 @@ import { test } from 'node:test';
 import { HARNESS_NAMES } from '../extensions/harnesses/registry.ts';
 import {
   describeSkippedProjectTemplates,
+  displayKey,
   loadTemplates,
+  nativeOverrideWarning,
+  normalizePermission,
   parseTemplate,
   projectTemplatePresence,
   resolveNativePermission,
@@ -162,7 +165,8 @@ test('permission: still wins over the legacy keys — same tier, but a disagreei
     undefined,
     undefined,
   ]);
-  // the native escape hatch on permission: is unchanged, and not flagged (its tier is per-harness)
+  // the native escape hatch on permission: is unchanged, and not flagged here (its tier is per-harness —
+  // delegate() judges the carried ignoredLegacyPermission at run time)
   assert.deepEqual(tierOf('permission: workspace-write\nsandbox: read-only'), [
     'edit',
     'acceptEdits',
@@ -172,16 +176,108 @@ test('permission: still wins over the legacy keys — same tier, but a disagreei
   assert.deepEqual(tierOf('permission: ask'), ['edit', 'acceptEdits', 'ask', undefined]);
 });
 
+test('a native permission: carries the ignored legacy keys (author spelling) for the engine to judge', () => {
+  const t = parseTemplate(
+    '---\nname: x\ndescription: d\nPermission: plan\nSandbox: workspace-write\npermissionMode: plan\n---\nb',
+  );
+  assert.equal(t?.permission, 'edit');
+  assert.equal(t?.nativePermission, 'plan');
+  assert.equal(t?.permissionWarning, undefined);
+  assert.equal(t?.description, 'd');
+  assert.deepEqual(t?.ignoredLegacyPermission, {
+    permissionKey: 'Permission',
+    legacy: [
+      { key: 'permissionMode', value: 'plan' },
+      { key: 'Sandbox', value: 'workspace-write' },
+    ],
+  });
+  // nothing to carry without a legacy key, or without a native value
+  assert.equal(parseTemplate('---\nname: x\npermission: plan\n---\nb')?.ignoredLegacyPermission, undefined);
+  assert.equal(
+    parseTemplate('---\nname: x\npermission: edit\nsandbox: read-only\n---\nb')?.ignoredLegacyPermission,
+    undefined,
+  );
+});
+
+test('nativeOverrideWarning: flags a disagreeing or unrecognized legacy key against the run-time tier', () => {
+  const ignored = (...legacy: [string, string][]) => ({
+    permissionKey: 'permission',
+    legacy: legacy.map(([key, value]) => ({ key, value })),
+  });
+  assert.equal(
+    nativeOverrideWarning(ignored(['sandbox', 'workspace-write']), 'plan', 'readonly', 'claude'),
+    'permission: "plan" (readonly on claude) overrides sandbox: "workspace-write" (ignored)',
+  );
+  assert.equal(nativeOverrideWarning(ignored(['sandbox', 'read-only']), 'plan', 'readonly', 'claude'), undefined);
+  // least permissive of the legacy keys is what is compared, as for a legacy-only template
+  assert.equal(
+    nativeOverrideWarning(
+      ignored(['permissionMode', 'acceptEdits'], ['sandbox', 'read-only']),
+      'plan',
+      'readonly',
+      'claude',
+    ),
+    undefined,
+  );
+  assert.match(
+    String(nativeOverrideWarning(ignored(['sandbox', 'bogus']), 'write', 'edit', 'amp')),
+    /^permission: "write" \(edit on amp\) overrides sandbox: "bogus" \(ignored\)$/,
+  );
+  // the native value is JSON-quoted and capped like any other echoed value
+  const w = String(
+    nativeOverrideWarning(ignored(['sandbox', 'read-only']), '\u001b[31mx'.repeat(30), 'danger', 'claude'),
+  );
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
+  assert.doesNotMatch(w, /[\u0000-\u001f\u007f]/);
+  assert.ok(w.length < 200, w);
+});
+
 test('permission keys are case-insensitive — `Sandbox:`/`SANDBOX:`/`Permission:` are never silently ignored', () => {
   for (const fm of ['Sandbox: read-only', 'SANDBOX: read-only', 'Permission: readonly', 'PERMISSIONMODE: plan'])
     assert.deepEqual(tierOf(fm), ['readonly', 'plan', undefined, undefined], fm);
   assert.deepEqual(tierOf('PermissionMode: bypassPermissions'), ['danger', 'bypassPermissions', undefined, undefined]);
   assert.equal(tierOf('Sandbox: nope')[0], 'readonly');
-  assert.match(String(tierOf('Sandbox: nope')[3]), /unrecognized sandbox: "nope"/);
+  assert.match(String(tierOf('Sandbox: nope')[3]), /unrecognized Sandbox: "nope"/);
   // `Permission:` still outranks the legacy keys, whatever their case
   assert.equal(tierOf('SANDBOX: danger-full-access\nPermission: readonly')[0], 'readonly');
   // other keys keep their exact-case behavior
   assert.equal(parseTemplate('---\nname: x\nVerify: touch pwned\n---\nb')?.verify, undefined);
+});
+
+test('permission warnings echo the key as the author spelled it, not the canonical name', () => {
+  assert.equal(tierOf('SANDBOX: nope')[3], 'unrecognized SANDBOX: "nope" — loaded as readonly (fail closed)');
+  assert.match(String(tierOf('PermissionMode: yolo')[3]), /^unrecognized PermissionMode: "yolo"/);
+  assert.equal(
+    tierOf('Permission: edit\nSandbox: read-only')[3],
+    'Permission: edit overrides Sandbox: "read-only" (ignored)',
+  );
+  assert.equal(
+    tierOf('PERMISSION: danger\nPermissionMode: plan\nsandbox: bogus')[3],
+    'PERMISSION: danger overrides PermissionMode: "plan", sandbox: "bogus" (ignored)',
+  );
+});
+
+test('displayKey: only a plain [A-Za-z_] case variant of the canonical key is echoed — anything else is canonical', () => {
+  assert.equal(displayKey('Sandbox', 'sandbox'), 'Sandbox');
+  assert.equal(displayKey(' SANDBOX ', 'sandbox'), 'SANDBOX');
+  for (const raw of ['\u001b[31mSandbox', 'Sand\u0007box', 'sandb0x', 'other', '', 'Sandbox\u202e', 'S'.repeat(40)])
+    assert.equal(displayKey(raw, 'sandbox'), 'sandbox', JSON.stringify(raw));
+  // a hostile key never reaches the warning raw, even when handed straight to normalizePermission
+  const w = String(
+    normalizePermission([{ key: 'Permission\u001b[2J', value: 'edit' }], undefined, [
+      { key: '\u001b[31mSandbox', value: 'read-only' },
+    ]).permissionWarning,
+  );
+  assert.equal(w, 'permission: edit overrides sandbox: "read-only" (ignored)');
+});
+
+test('permission keys: an ANSI/control-char key is not a permission key, and nothing raw reaches a warning', () => {
+  const t = parseTemplate('---\nname: x\ndescription: d\n\u001b[31mSandbox: read-only\nsandbox: nope\n---\nb');
+  // the escape-prefixed line is not `sandbox:` at all — only the plain one counts (and fails closed)
+  assert.equal(t?.permission, 'readonly');
+  assert.equal(t?.permissionWarning, 'unrecognized sandbox: "nope" — loaded as readonly (fail closed)');
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
+  assert.doesNotMatch(String(t?.description), /[\u0000-\u001f\u007f]/);
 });
 
 test('permission keys duplicated by case: the least permissive value wins, in either order', () => {
