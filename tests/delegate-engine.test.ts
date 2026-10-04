@@ -16,7 +16,7 @@ interface Sandbox {
 }
 
 async function withSandbox<T>(
-  opts: { maxConcurrent?: number; templates?: Record<string, string> },
+  opts: { maxConcurrent?: number; templates?: Record<string, string>; settings?: Record<string, unknown> },
   fn: (s: Sandbox) => Promise<T>,
 ): Promise<T> {
   const root = mkdtempSync(join(tmpdir(), 'delegate-engine-'));
@@ -27,7 +27,7 @@ async function withSandbox<T>(
   mkdirSync(tplDir, { recursive: true });
   writeFileSync(
     join(agentDir, 'settings.json'),
-    JSON.stringify({ delegate: { maxConcurrent: opts.maxConcurrent ?? 1, maxTranscripts: 5 } }),
+    JSON.stringify({ delegate: { maxConcurrent: opts.maxConcurrent ?? 1, maxTranscripts: 5, ...opts.settings } }),
   );
   for (const [name, body] of Object.entries(opts.templates ?? {})) writeFileSync(join(tplDir, `${name}.md`), body);
   const prev = process.env.PI_CODING_AGENT_DIR;
@@ -1199,4 +1199,76 @@ test('delegate: a native edit permission still runs its verify command, and dang
       assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'bypassPermissions');
     });
   });
+});
+
+/**
+ * Put a fake ACP agent named `<name>` first on PATH: it answers the handshake (advertising `modes`),
+ * records every `session/set_mode` modeId (one per line) to `$FAKE_MODE_FILE`, and answers the prompt.
+ */
+async function withFakeAcpAgent<T>(name: string, fn: (modeFile: string) => Promise<T>): Promise<T> {
+  const { chmodSync } = await import('node:fs');
+  const binDir = mkdtempSync(join(tmpdir(), 'fake-acp-'));
+  const modeFile = join(binDir, 'modes.txt');
+  const agent = join(binDir, 'agent.js');
+  writeFileSync(
+    agent,
+    `const fs = require('node:fs');
+const rl = require('node:readline').createInterface({ input: process.stdin });
+const send = o => process.stdout.write(JSON.stringify(o) + '\\n');
+rl.on('line', line => {
+  let m; try { m = JSON.parse(line); } catch { return; }
+  if (m.method === 'initialize') return send({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (m.method === 'session/new') return send({ jsonrpc: '2.0', id: m.id, result: { sessionId: 'fake-session', modes: {} } });
+  if (m.method === 'session/set_mode') { fs.appendFileSync(process.env.FAKE_MODE_FILE, m.params.modeId + '\\n'); return send({ jsonrpc: '2.0', id: m.id, result: {} }); }
+  if (m.method === 'session/prompt') {
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ACP OK' } } } });
+    return send({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`,
+  );
+  writeFileSync(join(binDir, name), `#!/bin/sh\nexec '${process.execPath}' '${agent}' "$@"\n`);
+  chmodSync(join(binDir, name), 0o755);
+  const prevPath = process.env.PATH;
+  const prevMode = process.env.FAKE_MODE_FILE;
+  process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.FAKE_MODE_FILE = modeFile;
+  try {
+    return await fn(modeFile);
+  } finally {
+    process.env.PATH = prevPath;
+    if (prevMode === undefined) delete process.env.FAKE_MODE_FILE;
+    else process.env.FAKE_MODE_FILE = prevMode;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test('delegate over ACP: a case-variant native permission reaches session/set_mode in its canonical spelling', async () => {
+  const { readFileSync } = await import('node:fs');
+  // [harness, native value as written, expected ACP mode id, expected recorded tier, extra settings]
+  const cases: Array<[string, string, string, string, Record<string, unknown>]> = [
+    ['devin', 'ASK', 'ask', 'edit', {}],
+    ['devin', 'Plan', 'plan', 'readonly', {}],
+    ['opencode', 'PLAN', 'plan', 'readonly', { harnesses: { opencode: { transport: 'acp' } } }],
+  ];
+  for (const [i, [harness, native, modeId, tier, settings]] of cases.entries()) {
+    await withSandbox({ settings }, async ({ cwd }) => {
+      writeSharedTemplates(cwd, { [`acp${i}`]: verifyTemplate(`acp${i}`, native) });
+      const { delegate } = await import('../extensions/engine.ts');
+      const { pi, calls } = recordingPi();
+      await withFakeAcpAgent(harness, async modeFile => {
+        const run = await delegate(pi, fakeCtx(cwd), { harness, mode: `acp${i}`, task: 'x' });
+        const label = `${harness}:${native}`;
+        assert.equal(run.content, 'ACP OK', label);
+        assert.deepEqual(readFileSync(modeFile, 'utf8').trim().split('\n'), [modeId], label);
+        assert.equal(run.details.permission, tier, label);
+        if (tier === 'readonly') {
+          assert.deepEqual(calls, [], `${label}: verify must not execute on a read-only native mode`);
+          assert.equal(run.verify?.skipped, 'readonly run', label);
+        } else {
+          assert.deepEqual(calls, [['sh', '-c', 'touch pwned']], label);
+        }
+      });
+    });
+  }
 });
