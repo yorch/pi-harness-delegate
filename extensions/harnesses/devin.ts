@@ -208,6 +208,9 @@ export const devinHarness: Harness = {
   // action, which the ACP runner always declines. Not listed (=> danger): `bypass`, and `smart`
   // ("additionally auto-runs actions a fast model judges safe" per `devin --help`).
   safeNativePermissions: ['plan', 'accept-edits', 'ask'],
+  // `ask` is not listed: it is read-only here only because the ACP runner declines every permission
+  // request — a property of this client, not of the mode.
+  readonlyNativePermissions: ['plan'],
   // ACP-only — no stdout mode exists to select between, so there's nothing to configure.
   supportsTransports: ['acp'],
 };

@@ -96,6 +96,13 @@ export interface Harness {
    *  never heard of — is treated as danger (fail closed) by `isNativeDangerPermission` in registry.ts.
    *  Omitted -> no native value is considered safe. Covers both transports' vocabularies. */
   safeNativePermissions?: readonly string[];
+  /** The subset of `safeNativePermissions` that is genuinely read-only (no writes, no command
+   *  execution) on this harness. A native escape-hatch value listed here runs as the normalized
+   *  `readonly` tier — recorded as `readonly` and, crucially, never lets a `verify:` command execute
+   *  host-side (see `resolveVerifyPlan`). Conservative by design: only list a mode whose read-only
+   *  behavior is documented for a non-interactive run; anything else stays `edit`. Must be spelled
+   *  exactly as in `safeNativePermissions` (matching is case-insensitive via that allowlist). */
+  readonlyNativePermissions?: readonly string[];
   /** True when `buildArgs` passes `maxBudgetUsd` to a native CLI budget flag (claude's
    *  `--max-budget-usd`). Otherwise the runners enforce it host-side from the streamed
    *  `totalCostUsd` — possible only when the harness actually reports cost. */

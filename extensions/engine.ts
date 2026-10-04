@@ -38,6 +38,7 @@ import {
   classifyNativePermission,
   getHarness,
   HARNESS_NAMES,
+  nativePermissionTier,
 } from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { runHarness } from './runner.ts';
@@ -360,8 +361,16 @@ export async function delegate(
   // human-confirmed in execute(); command: --allow-dangerous, human-confirmed in the handler). Resolved (and
   // the danger refusal thrown) before acquireSlot() — it's pure, so a refused run never occupies
   // (or, for fan-out, waits for) a concurrency slot it can't use.
-  let permission: NormalizedPermission = template.permission;
   const nativeClass = classifyNativePermission(harness, template.nativePermission);
+  // The tier the template actually runs at: a native read-only value (`permission: plan`) is filed
+  // under `edit` by normalizePermission, but runs as `readonly` — recorded as such and, above all,
+  // subject to resolveVerifyPlan's readonly skip. Only ever narrows (never `danger`), and the
+  // canonical native value below is still what reaches argv/ACP.
+  const templateTier: NormalizedPermission =
+    nativeClass === 'safe'
+      ? (nativePermissionTier(harness, template.nativePermission) ?? template.permission)
+      : template.permission;
+  let permission: NormalizedPermission = templateTier;
   // A safe native matches its allowlist case-insensitively (`Plan`), but what reaches argv/ACP is
   // always the allowlist's canonical spelling (`plan`, claude's camelCase `acceptEdits`) — never the
   // template's. Danger/unlisted values keep the template's own spelling (see registry.ts).
@@ -393,7 +402,7 @@ export async function delegate(
   const nativePermissionForRun =
     nativeClass === 'unlisted' && permission === 'danger'
       ? nativePerm
-      : resolveNativePermission(template.permission, permission, nativePerm);
+      : resolveNativePermission(templateTier, permission, nativePerm);
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);

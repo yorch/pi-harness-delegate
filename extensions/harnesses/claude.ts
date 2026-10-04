@@ -161,6 +161,9 @@ export const claudeHarness: Harness = {
   // `auto` (a classifier auto-approves actions), and `dontAsk` — its effective reach is whatever the
   // user's allow rules grant, which this extension can't see, so it fails closed.
   safeNativePermissions: ['plan', 'acceptEdits', 'manual', 'default'],
+  // `plan` is claude's read-only mode. `manual`/`default` are not listed: under `-p` they deny what
+  // would need approval, but that is a consequence of the user's allow rules, not a no-write mode.
+  readonlyNativePermissions: ['plan'],
   // `--max-budget-usd` (see buildArgs) — claude enforces the cap itself.
   nativeBudget: true,
   // No `acp` subcommand exists (docs/acp-harness-assessment.md §2) — confirmed against the full

@@ -3,7 +3,7 @@ import { claudeHarness } from './claude.ts';
 import { codexHarness } from './codex.ts';
 import { devinHarness } from './devin.ts';
 import { opencodeHarness } from './opencode.ts';
-import type { Harness } from './types.ts';
+import type { Harness, NormalizedPermission } from './types.ts';
 
 export const HARNESSES: Record<string, Harness> = {
   claude: claudeHarness,
@@ -102,6 +102,25 @@ export function canonicalSafeNativePermission(
   const native = nativePermission?.trim().toLowerCase();
   if (!native) return undefined;
   return harness?.safeNativePermissions?.find(v => v.toLowerCase() === native);
+}
+
+/**
+ * The normalized tier a native escape-hatch value actually runs at, when it is narrower than the
+ * `edit` tier `normalizePermission` files every native value under: `readonly` for a value on the
+ * harness's `readonlyNativePermissions` (claude/devin/opencode `plan`, codex `read-only`), matched
+ * case-insensitively through the same allowlist as `canonicalSafeNativePermission`. `undefined`
+ * otherwise — the template's own tier stands. Only ever narrows: it never reports `danger`, so it
+ * can't touch the danger gate, and it changes nothing about what reaches argv/ACP (the canonical
+ * native value is still what the harness gets). What it does change is the recorded permission and
+ * `resolveVerifyPlan`'s readonly skip — a native read-only run must never execute a `verify:` command.
+ */
+export function nativePermissionTier(
+  harness: Harness | undefined,
+  nativePermission: string | undefined,
+): NormalizedPermission | undefined {
+  const canonical = canonicalSafeNativePermission(harness, nativePermission);
+  if (canonical === undefined) return undefined;
+  return harness?.readonlyNativePermissions?.includes(canonical) ? 'readonly' : undefined;
 }
 
 /**

@@ -489,7 +489,8 @@ test('delegate: a case-variant safe native permission runs ungated, with its can
         },
       );
       assert.equal(run.result.isError, false);
-      assert.equal(run.details.permission, 'edit');
+      // claude's `plan` is read-only — recorded as the readonly tier it actually runs at
+      assert.equal(run.details.permission, 'readonly');
       assert.equal(run.details.nativePermission, 'plan');
       const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
       assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'plan');
@@ -1064,6 +1065,96 @@ test('delegate: free-text scope reaches the harness as a delimited restriction, 
       const end = argv.lastIndexOf(`END SCOPE ${nonce}`);
       assert.ok(heading >= 0 && heading < restrict && restrict < begin && begin < paths && paths < end);
       assert.doesNotMatch(argv, /UNTRUSTED DATA|Analyze it as input/);
+    });
+  });
+});
+
+// ── native read-only permissions: verify never executes ────────────────────
+
+/** Project-local templates under the shared root, so every harness loads them. */
+function writeSharedTemplates(cwd: string, templates: Record<string, string>): void {
+  const dir = join(cwd, '.pi', 'delegate', 'templates');
+  mkdirSync(dir, { recursive: true });
+  for (const [name, body] of Object.entries(templates)) writeFileSync(join(dir, `${name}.md`), body);
+}
+
+const verifyTemplate = (name: string, permission: string) =>
+  `---\nname: ${name}\ndescription: t\npermission: ${permission}\nverify: touch pwned\n---\nDo it.\n`;
+
+/** A fake `pi` that records every exec (a verify command arrives as `sh -c <cmd>`). */
+function recordingPi() {
+  const calls: string[][] = [];
+  const pi = fakePi(async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    return { stdout: '', stderr: '', code: 0 };
+  });
+  return { pi, calls };
+}
+
+const OPENCODE_LINES = [
+  JSON.stringify({ type: 'text', sessionID: 's', part: { text: 'ok' } }),
+  JSON.stringify({ type: 'step_finish', sessionID: 's', part: { cost: 0.001, tokens: {} } }),
+];
+
+test('delegate: a native read-only permission (any casing) never runs its verify command, on every stdout harness', async () => {
+  const { readFileSync } = await import('node:fs');
+  const codexLines = readFileSync(join(import.meta.dirname, 'fixtures', 'codex.jsonl'), 'utf8')
+    .trim()
+    .split('\n');
+  // [harness, native value as written, canonical value expected in argv, argv flag, fake output]
+  const cases: Array<[string, string, string, string, string[]]> = [
+    ['claude', 'plan', 'plan', '--permission-mode', [CLAUDE_RESULT]],
+    ['claude', 'Plan', 'plan', '--permission-mode', [CLAUDE_RESULT]],
+    ['claude', 'PLAN', 'plan', '--permission-mode', [CLAUDE_RESULT]],
+    ['opencode', 'Plan', 'plan', '--agent', OPENCODE_LINES],
+    ['codex', 'read-only', 'read-only', '--sandbox', codexLines],
+  ];
+  for (const [i, [harness, native, canonical, flag, lines]] of cases.entries()) {
+    await withSandbox({}, async ({ cwd }) => {
+      // distinct names per case: macOS filesystems are case-insensitive
+      writeSharedTemplates(cwd, { [`ro${i}`]: verifyTemplate(`ro${i}`, native) });
+      const { delegate } = await import('../extensions/engine.ts');
+      const { pi, calls } = recordingPi();
+      await withFakeBinaries([harness], lines, async argsFile => {
+        const run = await delegate(pi, fakeCtx(cwd), { harness, mode: `ro${i}`, task: 'x' });
+        const label = `${harness}:${native}`;
+        assert.deepEqual(calls, [], `${label}: pi.exec must never be called`);
+        assert.equal(run.verify?.skipped, 'readonly run', label);
+        assert.equal(run.details.permission, 'readonly', label);
+        const transcript = readFileSync(run.details.file as string, 'utf8');
+        assert.ok(transcript.includes('⊘ skipped (readonly run)'), label);
+        assert.match(transcript, /- permission: readonly/, label);
+        // what reaches argv is unchanged: the canonical native value
+        const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+        assert.equal(argv[argv.indexOf(flag) + 1], canonical, label);
+      });
+    });
+  }
+});
+
+test('delegate: a native edit permission still runs its verify command, and danger gating is unchanged', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeSharedTemplates(cwd, { edits: verifyTemplate('edits', 'acceptEdits'), ro: verifyTemplate('ro', 'plan') });
+    const { delegate } = await import('../extensions/engine.ts');
+    const { readFileSync } = await import('node:fs');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const edit = recordingPi();
+      const run = await delegate(edit.pi, fakeCtx(cwd), { harness: 'claude', mode: 'edits', task: 'x' });
+      assert.deepEqual(edit.calls, [['sh', '-c', 'touch pwned']]);
+      assert.equal(run.details.permission, 'edit');
+      assert.equal(run.verify?.skipped, undefined);
+      // an explicit escalation of a native read-only template is still danger, native dropped
+      const danger = recordingPi();
+      const esc = await delegate(danger.pi, fakeCtx(cwd), {
+        harness: 'claude',
+        mode: 'ro',
+        task: 'x',
+        allowDangerous: true,
+      });
+      assert.equal(esc.details.permission, 'danger');
+      assert.deepEqual(danger.calls, [['sh', '-c', 'touch pwned']]);
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'bypassPermissions');
     });
   });
 });

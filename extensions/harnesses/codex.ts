@@ -293,6 +293,7 @@ export const codexHarness: Harness = {
   permissionMap: { readonly: ['read-only'], edit: ['workspace-write'], danger: ['danger-full-access'] },
   // `codex exec --sandbox` values: read-only, workspace-write, danger-full-access.
   safeNativePermissions: ['read-only', 'workspace-write'],
+  readonlyNativePermissions: ['read-only'],
   // No `acp` subcommand exists; `app-server` is a different, codex-proprietary JSON-RPC protocol,
   // not ACP (docs/acp-harness-assessment.md §2) — confirmed against the full `--help` output of
   // `codex`, `codex mcp-server`, `codex app-server`, and `codex exec`.

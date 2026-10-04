@@ -10,6 +10,7 @@ import {
   getHarness,
   HARNESS_NAMES,
   isNativeDangerPermission,
+  nativePermissionTier,
   resolveHarnessName,
 } from '../extensions/harnesses/registry.ts';
 
@@ -360,4 +361,49 @@ test('amp: turn_end without usage.cost reports totalCostUsd null, not $0', () =>
     state,
   );
   assert.equal(out2.result?.totalCostUsd, 0.5);
+});
+
+test('nativePermissionTier: only a genuinely read-only native value narrows to readonly, any casing', () => {
+  const readonly: Array<[string, string]> = [
+    ['claude', 'plan'],
+    ['claude', 'Plan'],
+    ['claude', ' PLAN '],
+    ['devin', 'plan'],
+    ['devin', 'PLAN'],
+    ['opencode', 'plan'],
+    ['opencode', 'Plan'],
+    ['codex', 'read-only'],
+    ['codex', 'READ-ONLY'],
+  ];
+  for (const [name, v] of readonly) assert.equal(nativePermissionTier(getHarness(name), v), 'readonly', `${name}:${v}`);
+  const notReadonly: Array<[string, string | undefined]> = [
+    ['claude', 'acceptEdits'],
+    ['claude', 'manual'],
+    ['claude', 'default'],
+    ['devin', 'ask'],
+    ['devin', 'accept-edits'],
+    ['opencode', 'build'],
+    ['codex', 'workspace-write'],
+    // amp `always-ask`: undocumented what `-p` does with an unanswerable ask — conservatively edit
+    ['amp', 'always-ask'],
+    ['amp', 'write'],
+    // never narrows a danger/unlisted value or a value that's only another harness's read-only mode
+    ['claude', 'bypassPermissions'],
+    ['claude', 'auto'],
+    ['codex', 'plan'],
+    ['claude', undefined],
+  ];
+  for (const [name, v] of notReadonly)
+    assert.equal(nativePermissionTier(getHarness(name), v), undefined, `${name}:${v}`);
+  assert.equal(nativePermissionTier(undefined, 'plan'), undefined);
+});
+
+test('readonlyNativePermissions: every entry is on its own allowlist, canonically spelled, and non-danger', () => {
+  for (const name of HARNESS_NAMES) {
+    const h = getHarness(name);
+    for (const v of h?.readonlyNativePermissions ?? []) {
+      assert.ok(h?.safeNativePermissions?.includes(v), `${name}:${v} is on safeNativePermissions`);
+      assert.equal(classifyNativePermission(h, v), 'safe', `${name}:${v}`);
+    }
+  }
 });
