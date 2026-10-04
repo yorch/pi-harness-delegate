@@ -103,6 +103,49 @@ export function templateRunTier(
   return { tier: template.permission, requiresAllowDangerous: false };
 }
 
+/**
+ * The one template copy whose `harnesses:` decides where a run that names **no** harness goes — the
+ * single rule shared by the `delegate` tool, `/delegate`, and `delegate_modes` (so discovery
+ * advertises exactly what a run does):
+ *
+ * 1. the config default harness's own view has `mode` → that copy, and only that copy (its
+ *    `harnesses:`, or none — the default harness then runs it);
+ * 2. otherwise (a mode stored only under other harnesses' partitions) → the first copy, in registry
+ *    order, that declares `harnesses:`; without one there is no default and the run fails as an
+ *    unknown mode on the default harness, exactly as before.
+ *
+ * `harnesses:` is always taken from one whole copy — never merged across copies. `view(h)` must be
+ * `loadTemplates(cwd, h, trusted)` with the run's own trust verdict, so an untrusted project's copies
+ * never get a say.
+ */
+export function templateForHarnessDefault(
+  view: (harness: string) => ReadonlyMap<string, DelegateTemplate>,
+  defaultHarness: string,
+  mode: string,
+): DelegateTemplate | undefined {
+  const own = view(defaultHarness).get(mode);
+  if (own) return own;
+  for (const h of HARNESS_NAMES) {
+    if (h === defaultHarness) continue;
+    const copy = view(h).get(mode);
+    if (copy?.harnesses && copy.harnesses.length > 0) return copy;
+  }
+  return undefined;
+}
+
+/** `loadTemplates` memoized per harness — one disk read per view per call site. */
+export function templateViews(cwd: string, trusted: boolean): (harness: string) => Map<string, DelegateTemplate> {
+  const cache = new Map<string, Map<string, DelegateTemplate>>();
+  return h => {
+    let v = cache.get(h);
+    if (!v) {
+      v = loadTemplates(cwd, h, trusted);
+      cache.set(h, v);
+    }
+    return v;
+  };
+}
+
 /** One mode as discovery shows it — every string here is already sanitized. */
 export interface ModeInfo {
   name: string;
@@ -116,8 +159,11 @@ export interface ModeInfo {
   hasDefaultScope: boolean;
   /** A host-run check command is configured (its text is never shown). */
   hasVerify: boolean;
-  /** `harnesses:` default (sanitized names). */
+  /** Where a run that names no harness goes: the `harnesses:` of the copy `templateForHarnessDefault`
+   *  picks (sanitized names) — the same copy the `delegate` tool and `/delegate` use. */
   defaultHarnesses?: string[];
+  /** No copy on the default harness and none that declares `harnesses:` — a run must name a harness. */
+  needsHarness: boolean;
   timeoutSec?: number;
   warnings: string[];
 }
@@ -146,11 +192,19 @@ function warningsOf(t: DelegateTemplate): string[] {
 /**
  * Every mode available on `harnesses` (default: all registered), as each harness's own run would
  * load it (`loadTemplates(cwd, harness, trusted)`). Sorted by name, capped at `maxModes`.
+ * `defaultHarness` (the resolved config default) decides each mode's no-harness default — see
+ * `templateForHarnessDefault`; that is judged over every harness's view, whatever `harnesses` lists.
  */
-export function collectModes(cwd: string, trusted: boolean, harnesses: readonly string[] = HARNESS_NAMES): ModesReport {
+export function collectModes(
+  cwd: string,
+  trusted: boolean,
+  harnesses: readonly string[] = HARNESS_NAMES,
+  defaultHarness = 'claude',
+): ModesReport {
+  const view = templateViews(cwd, trusted);
   const byName = new Map<string, { info: ModeInfo; first: DelegateTemplate }>();
   for (const h of harnesses) {
-    for (const t of loadTemplates(cwd, h, trusted).values()) {
+    for (const t of view(h).values()) {
       const { tier, requiresAllowDangerous } = templateRunTier(h, t);
       const availability: ModeAvailability = {
         harness: h,
@@ -166,6 +220,7 @@ export function collectModes(cwd: string, trusted: boolean, harnesses: readonly 
         entry.info.availability.push(availability);
         continue;
       }
+      const defaults = templateForHarnessDefault(view, defaultHarness, t.name);
       byName.set(t.name, {
         first: t,
         info: {
@@ -177,7 +232,8 @@ export function collectModes(cwd: string, trusted: boolean, harnesses: readonly 
           hasDefaultTask: Boolean(t.defaultTask),
           hasDefaultScope: Boolean(t.defaultScope),
           hasVerify: Boolean(t.verify),
-          defaultHarnesses: t.harnesses?.map(n => sanitizeTemplateText(n, MODE_TEXT_LIMITS.name)),
+          defaultHarnesses: defaults?.harnesses?.map(n => sanitizeTemplateText(n, MODE_TEXT_LIMITS.name)),
+          needsHarness: !defaults,
           timeoutSec: t.timeoutSec,
           warnings: warningsOf(t),
         },
@@ -258,6 +314,8 @@ export function formatModesForModel(
       extras.push(
         `default harness when none given: ${m.defaultHarnesses.join(', ')}${m.defaultHarnesses.length > 1 ? ' (fans out to each installed one)' : ''}`,
       );
+    else if (m.needsHarness)
+      extras.push(`default harness when none given: none — not available on ${ctx.defaultHarness}, pass harness`);
     if (m.timeoutSec !== undefined) extras.push(`timeout: ${m.timeoutSec}s`);
     if (m.model) extras.push(`model: ${JSON.stringify(m.model)}`);
     lines.push(`  ${extras.join(' · ')}`);

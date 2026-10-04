@@ -59,7 +59,14 @@ import {
 import type { ActivityEvent } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
 import { showHistory } from './history.ts';
-import { collectModes, formatModesForModel, type ModesReport, onPath } from './modes.ts';
+import {
+  collectModes,
+  formatModesForModel,
+  type ModesReport,
+  onPath,
+  templateForHarnessDefault,
+  templateViews,
+} from './modes.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
 import { callTimeoutError, type DelegateTemplate, loadTemplates } from './templates.ts';
@@ -168,17 +175,20 @@ export default function (pi: ExtensionAPI) {
   const ui: RunUiState = { activeRunId: 0, activeOverlay: null };
 
   /**
-   * The template a run with no explicit harness would use for `mode` — looked up in the config
-   * default harness's view, the same one the run would otherwise get — so its `harnesses:` default
-   * can be honored. Project-local templates only when pi's trust store trusts the project, exactly
-   * as for the run itself.
+   * The template copy whose `harnesses:` decides a run that names no harness — the config default
+   * harness's own copy of `mode`, else (a mode kept only under other harnesses' partitions) the first
+   * copy that declares `harnesses:`. One shared rule (`templateForHarnessDefault`, modes.ts), so
+   * `delegate_modes` advertises exactly what the run does. Project-local templates only when pi's
+   * trust store trusts the project, exactly as for the run itself.
    */
   const templateForDefaults = (
     ctx: ExtensionContext,
     config: DelegateConfig,
     mode: string | undefined,
   ): DelegateTemplate | undefined =>
-    loadTemplates(ctx.cwd, resolveHarnessName(config.defaultHarness), isProjectTrusted(ctx)).get(
+    templateForHarnessDefault(
+      templateViews(ctx.cwd, isProjectTrusted(ctx)),
+      resolveHarnessName(config.defaultHarness),
       mode || config.defaultMode,
     );
 
@@ -341,12 +351,13 @@ export default function (pi: ExtensionAPI) {
       }
       const config = loadConfig();
       const names = filter ? [filter] : HARNESS_NAMES;
-      const report = collectModes(ctx.cwd, isProjectTrusted(ctx), names);
+      const defaultHarness = resolveHarnessName(config.defaultHarness);
+      const report = collectModes(ctx.cwd, isProjectTrusted(ctx), names, defaultHarness);
       const harnesses = names.map(name => ({ name, onPath: onPath(getHarness(name)?.binary ?? name) }));
       const details: ModesToolDetails = {
         ...report,
         harnesses,
-        defaultHarness: resolveHarnessName(config.defaultHarness),
+        defaultHarness,
         defaultMode: config.defaultMode,
       };
       return { content: [{ type: 'text', text: formatModesForModel(report, details) }], details };

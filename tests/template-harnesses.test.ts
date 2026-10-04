@@ -346,3 +346,155 @@ test('an untrusted project template cannot pick the harness — its harnesses: i
     });
   });
 });
+
+/** The `delegate_modes` block for one mode (from its `- mode:` line up to the next blank line). */
+async function modesBlock(cwd: string, mode: string, trusted = true): Promise<string> {
+  const { tools } = await loadExtension();
+  const res = (await tools
+    .get('delegate_modes')
+    ?.execute('t', {}, undefined, undefined, { cwd, hasUI: false, isProjectTrusted: () => trusted })) as {
+    content: { text: string }[];
+  };
+  const text = res.content[0].text;
+  const start = text.indexOf(`- mode: ${JSON.stringify(mode)}`);
+  assert.ok(start >= 0, text);
+  const end = text.indexOf('\n\n', start);
+  return text.slice(start, end < 0 ? undefined : end);
+}
+
+test('a mode kept only in another harness partition: its harnesses: picks the harness (tool, command, delegate_modes agree)', async () => {
+  await withSandbox(
+    { userTemplates: { 'codex/onlycodex': tpl('onlycodex', 'readonly', 'harnesses: codex') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+        const { rmSync } = await import('node:fs');
+        assert.match(await modesBlock(cwd, 'onlycodex'), /default harness when none given: codex\b/);
+        const { tools, commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const res = (await tools
+          .get('delegate')
+          ?.execute('t', { mode: 'onlycodex', task: 'x' }, undefined, undefined, headless(cwd))) as {
+          details: Record<string, unknown>;
+        };
+        assert.equal(res.details.harness, 'codex');
+        assert.ok(ran(argsFile, 'codex'));
+        assert.equal(readArgs(`${argsFile}.claude`), null, 'claude neither probed nor run');
+        rmSync(`${argsFile}.codex`, { force: true });
+        const { ctx, notes } = uiCtx(cwd, true);
+        await commands.get('delegate')?.handler('onlycodex check things', ctx);
+        assert.ok(ran(argsFile, 'codex'), notes.join(' | '));
+        assert.equal(readArgs(`${argsFile}.claude`), null);
+        // an explicit harness still wins — the mode doesn't exist there, so it fails as before
+        await assert.rejects(
+          () =>
+            tools
+              .get('delegate')
+              ?.execute(
+                't',
+                { harness: 'claude', mode: 'onlycodex', task: 'x' },
+                undefined,
+                undefined,
+                headless(cwd),
+              ) ?? Promise.resolve(),
+          /unknown delegate mode "onlycodex" for harness "claude"/,
+        );
+      });
+    },
+  );
+});
+
+test('harness-partition defaults: the default harness copy alone decides; other copies never mix in', async () => {
+  await withSandbox(
+    {
+      userTemplates: {
+        // the default harness (claude) has its own copy without harnesses: — it runs on claude, the
+        // codex copy's harnesses: is never consulted
+        'claude/both': tpl('both', 'readonly'),
+        'codex/both': tpl('both', 'readonly', 'harnesses: codex'),
+        // only in other partitions: the first copy (registry order) declaring harnesses: decides,
+        // a copy without one is skipped, and the lists are never merged
+        'codex/split': tpl('split', 'readonly'),
+        'opencode/split': tpl('split', 'readonly', 'harnesses: opencode'),
+        'amp/split': tpl('split', 'readonly', 'harnesses: codex, amp'),
+        // no copy anywhere declares harnesses:
+        'codex/bare': tpl('bare', 'readonly'),
+      },
+    },
+    async ({ cwd }) => {
+      const { templateForHarnessDefault, templateViews } = await import('../extensions/modes.ts');
+      const view = templateViews(cwd, true);
+      assert.equal(templateForHarnessDefault(view, 'claude', 'both')?.harnesses, undefined);
+      assert.deepEqual(templateForHarnessDefault(view, 'claude', 'split')?.harnesses, ['opencode']);
+      assert.equal(templateForHarnessDefault(view, 'claude', 'bare'), undefined);
+      // a different default harness sees its own copy
+      assert.deepEqual(templateForHarnessDefault(view, 'codex', 'both')?.harnesses, ['codex']);
+      const both = await modesBlock(cwd, 'both');
+      assert.doesNotMatch(both, /default harness when none given/);
+      assert.match(await modesBlock(cwd, 'split'), /default harness when none given: opencode\b/);
+      assert.match(
+        await modesBlock(cwd, 'bare'),
+        /default harness when none given: none — not available on claude, pass harness/,
+      );
+      await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+        const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const res = (await tools
+          .get('delegate')
+          ?.execute('t', { mode: 'both', task: 'x' }, undefined, undefined, headless(cwd))) as {
+          details: Record<string, unknown>;
+        };
+        assert.equal(res.details.harness, 'claude');
+        assert.equal(readArgs(`${argsFile}.codex`), null);
+      });
+    },
+  );
+});
+
+test('an untrusted project harness-partition copy never picks the harness', async () => {
+  await withSandbox(
+    { templates: { 'codex/onlycodex': tpl('onlycodex', 'readonly', 'harnesses: codex') } },
+    async ({ cwd }) => {
+      const { templateForHarnessDefault, templateViews } = await import('../extensions/modes.ts');
+      assert.equal(templateForHarnessDefault(templateViews(cwd, false), 'claude', 'onlycodex'), undefined);
+      assert.deepEqual(templateForHarnessDefault(templateViews(cwd, true), 'claude', 'onlycodex')?.harnesses, [
+        'codex',
+      ]);
+      await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+        const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        await assert.rejects(
+          () =>
+            tools.get('delegate')?.execute('t', { mode: 'onlycodex', task: 'x' }, undefined, undefined, {
+              cwd,
+              hasUI: false,
+              isProjectTrusted: () => false,
+            }) ?? Promise.resolve(),
+          /unknown delegate mode "onlycodex" for harness "claude"/,
+        );
+        assert.equal(readArgs(`${argsFile}.codex`), null);
+      });
+    },
+  );
+});
+
+test('harness-partition fan-out default keeps the single allowDangerous confirm naming every harness', async () => {
+  await withSandbox(
+    { userTemplates: { 'codex/pfan': tpl('pfan', 'edit', 'harnesses: codex, claude') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const declined = uiCtx(cwd, false);
+          await assert.rejects(
+            () =>
+              tools
+                .get('delegate')
+                ?.execute('t', { mode: 'pfan', task: 'x', allowDangerous: true }, undefined, undefined, declined.ctx) ??
+              Promise.resolve(),
+            /declined/,
+          );
+          assert.equal(declined.asked.length, 1);
+          assert.match(declined.asked[0], /run codex,claude pfan with DANGER/);
+          assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
+        });
+      });
+    },
+  );
+});

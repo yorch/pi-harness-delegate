@@ -16,7 +16,14 @@ import {
   writeDelegateConfig,
 } from './config.ts';
 import { isProjectTrusted } from './engine.ts';
-import { ALIASES, detectAll, getHarness, HARNESS_NAMES, isKnownHarness } from './harnesses/registry.ts';
+import {
+  ALIASES,
+  detectAll,
+  getHarness,
+  HARNESS_NAMES,
+  isKnownHarness,
+  resolveHarnessName,
+} from './harnesses/registry.ts';
 import { readAllHistory } from './history.ts';
 import { collectModes, formatModeRow } from './modes.ts';
 import { loadTemplates, projectTemplatePresence } from './templates.ts';
@@ -27,7 +34,12 @@ import { loadTemplates, projectTemplatePresence } from './templates.ts';
  */
 export async function showModes(ctx: ExtensionContext, harnessFilter?: string): Promise<void> {
   const trusted = isProjectTrusted(ctx);
-  const report = collectModes(ctx.cwd, trusted, harnessFilter ? [harnessFilter] : HARNESS_NAMES);
+  const report = collectModes(
+    ctx.cwd,
+    trusted,
+    harnessFilter ? [harnessFilter] : HARNESS_NAMES,
+    resolveHarnessName(loadConfigWithSource().config.defaultHarness),
+  );
   const rows = report.modes.map(formatModeRow);
   if (report.omitted > 0) rows.push(`… +${report.omitted} more not shown`);
   if (!trusted && projectTemplatePresence(ctx.cwd, HARNESS_NAMES).dirs.length > 0)

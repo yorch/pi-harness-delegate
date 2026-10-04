@@ -289,6 +289,7 @@ test('formatModeRow: shows warnings ahead of the description', () => {
     hasDefaultTask: false,
     hasDefaultScope: false,
     hasVerify: true,
+    needsHarness: false,
     warnings: ['bad timeout'],
   });
   assert.equal(row, 'x  [edit on claude]  (user)  ✓ verify  —  ⚠ bad timeout · desc');
