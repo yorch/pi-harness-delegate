@@ -8,6 +8,7 @@ import {
   describeSkippedProjectTemplates,
   displayKey,
   loadTemplates,
+  nativeOverrideWarning,
   normalizePermission,
   parseTemplate,
   projectTemplatePresence,
@@ -164,7 +165,8 @@ test('permission: still wins over the legacy keys — same tier, but a disagreei
     undefined,
     undefined,
   ]);
-  // the native escape hatch on permission: is unchanged, and not flagged (its tier is per-harness)
+  // the native escape hatch on permission: is unchanged, and not flagged here (its tier is per-harness —
+  // delegate() judges the carried ignoredLegacyPermission at run time)
   assert.deepEqual(tierOf('permission: workspace-write\nsandbox: read-only'), [
     'edit',
     'acceptEdits',
@@ -172,6 +174,62 @@ test('permission: still wins over the legacy keys — same tier, but a disagreei
     undefined,
   ]);
   assert.deepEqual(tierOf('permission: ask'), ['edit', 'acceptEdits', 'ask', undefined]);
+});
+
+test('a native permission: carries the ignored legacy keys (author spelling) for the engine to judge', () => {
+  const t = parseTemplate(
+    '---\nname: x\ndescription: d\nPermission: plan\nSandbox: workspace-write\npermissionMode: plan\n---\nb',
+  );
+  assert.equal(t?.permission, 'edit');
+  assert.equal(t?.nativePermission, 'plan');
+  assert.equal(t?.permissionWarning, undefined);
+  assert.equal(t?.description, 'd');
+  assert.deepEqual(t?.ignoredLegacyPermission, {
+    permissionKey: 'Permission',
+    legacy: [
+      { key: 'permissionMode', value: 'plan' },
+      { key: 'Sandbox', value: 'workspace-write' },
+    ],
+  });
+  // nothing to carry without a legacy key, or without a native value
+  assert.equal(parseTemplate('---\nname: x\npermission: plan\n---\nb')?.ignoredLegacyPermission, undefined);
+  assert.equal(
+    parseTemplate('---\nname: x\npermission: edit\nsandbox: read-only\n---\nb')?.ignoredLegacyPermission,
+    undefined,
+  );
+});
+
+test('nativeOverrideWarning: flags a disagreeing or unrecognized legacy key against the run-time tier', () => {
+  const ignored = (...legacy: [string, string][]) => ({
+    permissionKey: 'permission',
+    legacy: legacy.map(([key, value]) => ({ key, value })),
+  });
+  assert.equal(
+    nativeOverrideWarning(ignored(['sandbox', 'workspace-write']), 'plan', 'readonly', 'claude'),
+    'permission: "plan" (readonly on claude) overrides sandbox: "workspace-write" (ignored)',
+  );
+  assert.equal(nativeOverrideWarning(ignored(['sandbox', 'read-only']), 'plan', 'readonly', 'claude'), undefined);
+  // least permissive of the legacy keys is what is compared, as for a legacy-only template
+  assert.equal(
+    nativeOverrideWarning(
+      ignored(['permissionMode', 'acceptEdits'], ['sandbox', 'read-only']),
+      'plan',
+      'readonly',
+      'claude',
+    ),
+    undefined,
+  );
+  assert.match(
+    String(nativeOverrideWarning(ignored(['sandbox', 'bogus']), 'write', 'edit', 'amp')),
+    /^permission: "write" \(edit on amp\) overrides sandbox: "bogus" \(ignored\)$/,
+  );
+  // the native value is JSON-quoted and capped like any other echoed value
+  const w = String(
+    nativeOverrideWarning(ignored(['sandbox', 'read-only']), '\u001b[31mx'.repeat(30), 'danger', 'claude'),
+  );
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
+  assert.doesNotMatch(w, /[\u0000-\u001f\u007f]/);
+  assert.ok(w.length < 200, w);
 });
 
 test('permission keys are case-insensitive — `Sandbox:`/`SANDBOX:`/`Permission:` are never silently ignored', () => {

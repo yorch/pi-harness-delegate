@@ -29,6 +29,12 @@ export interface DelegateTemplate {
    * legacy key that disagrees with `permission:` and was ignored (tier unchanged).
    */
   permissionWarning?: string;
+  /**
+   * Set when `permission:` is a native value and legacy `permissionMode:`/`sandbox:` keys were also
+   * present (and ignored). Whether they *disagree* depends on the native value's tier, which is only
+   * known per harness — so `delegate()` decides, via `nativeOverrideWarning()`. Never changes the tier.
+   */
+  ignoredLegacyPermission?: IgnoredLegacyPermission;
   model?: string;
   maxBudgetUsd?: number;
   skill?: string;
@@ -40,6 +46,13 @@ export interface DelegateTemplate {
   addDirs?: string[];
   prompt: string;
   harness?: string;
+}
+
+/** The legacy keys ignored next to a native `permission:` value — keys already sanitized (`displayKey`). */
+export interface IgnoredLegacyPermission {
+  /** The `permission:` key as the author spelled it. */
+  permissionKey: string;
+  legacy: FrontmatterEntry[];
 }
 
 /** Tier order, least permissive first — used to pick the safer of two conflicting legacy keys. */
@@ -181,6 +194,7 @@ export function normalizePermission(
   nativePermission?: string;
   permissionMode: PermissionMode;
   permissionWarning?: string;
+  ignoredLegacyPermission?: IgnoredLegacyPermission;
 } {
   // Prefer normalized permission
   const raws = values(raw);
@@ -208,21 +222,62 @@ export function normalizePermission(
   if (raws.length > 0) {
     const resolved = normalizeTierValue(raws[0]);
     // `permission:` always wins; a legacy key that disagrees is ignored, but said so — an author who
-    // wrote `sandbox: read-only` next to `permission: edit` should see which one ran. Skipped for a
-    // native value: its tier is only known per harness at run time, so "disagrees" isn't decidable here.
+    // wrote `sandbox: read-only` next to `permission: edit` should see which one ran. For a native
+    // value the tier is only known per harness, so the ignored keys are carried for delegate() to judge.
     const legacy = legacyEntries(fallbackMode, sandbox);
-    if (resolved.nativePermission || legacy.length === 0) return resolved;
-    const l = normalizeLegacyPermission(fallbackMode, sandbox);
-    if (!l.permissionWarning && l.permission === resolved.permission) return resolved;
+    if (legacy.length === 0) return resolved;
     const [[permissionKey]] = entries(raw, 'permission');
-    const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
-    return {
-      ...resolved,
-      permissionWarning: `${permissionKey}: ${resolved.permission} overrides ${ignored} (ignored)`,
-    };
+    if (resolved.nativePermission)
+      return {
+        ...resolved,
+        ignoredLegacyPermission: { permissionKey, legacy: legacy.map(([key, value]) => ({ key, value })) },
+      };
+    const warning = legacyOverrideWarning(`${permissionKey}: ${resolved.permission}`, resolved.permission, legacy);
+    return warning ? { ...resolved, permissionWarning: warning } : resolved;
   }
   // Legacy permissionMode/sandbox mapping — fails closed to readonly on an unrecognized value
   return normalizeLegacyPermission(fallbackMode, sandbox);
+}
+
+/**
+ * `<label> overrides <legacy keys> (ignored)` when the ignored legacy keys disagree with `tier` (or
+ * hold an unrecognized value); `undefined` when they agree. Keys are echoed as given (already
+ * `displayKey`-sanitized), values JSON-quoted and capped.
+ */
+function legacyOverrideWarning(
+  label: string,
+  tier: NormalizedPermission,
+  legacy: readonly [string, string][],
+): string | undefined {
+  // Same judgement as a legacy-only template: any unrecognized value, or a least-permissive tier
+  // that differs from the one that actually runs.
+  const classified = legacy.map(([, v]) => classifyLegacyValue(v));
+  const least = classified.reduce<NormalizedPermission | undefined>(
+    (acc, c) => (c && (acc === undefined || TIER_RANK[c.permission] < TIER_RANK[acc]) ? c.permission : acc),
+    undefined,
+  );
+  if (classified.every(Boolean) && least === tier) return undefined;
+  const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
+  return `${label} overrides ${ignored} (ignored)`;
+}
+
+/**
+ * The run-time counterpart of the override warning for a native `permission:` value: `delegate()`
+ * passes the tier that value actually runs at on `harnessName` (readonly/edit for an allowlisted
+ * value, danger for one gated as danger); `harnessName` must be the canonical, registry-resolved
+ * name (it is echoed unquoted). Only a warning — the tier is never changed by it.
+ */
+export function nativeOverrideWarning(
+  ignored: IgnoredLegacyPermission,
+  nativePermission: string,
+  tier: NormalizedPermission,
+  harnessName: string,
+): string | undefined {
+  return legacyOverrideWarning(
+    `${ignored.permissionKey}: ${quoteValue(nativePermission)} (${tier} on ${harnessName})`,
+    tier,
+    ignored.legacy.map(e => [e.key, e.value]),
+  );
 }
 
 /** One `permission:` value → tier, or (unknown value) the native escape hatch. */
@@ -301,6 +356,7 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     nativePermission: norm.nativePermission,
     permissionMode: norm.permissionMode,
     permissionWarning: norm.permissionWarning,
+    ignoredLegacyPermission: norm.ignoredLegacyPermission,
     model: meta.model || undefined,
     maxBudgetUsd: Number.isFinite(budget) && budget > 0 ? budget : undefined,
     skill: meta.skill || undefined,
