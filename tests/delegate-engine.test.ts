@@ -1653,3 +1653,29 @@ test('delegate: C1/bidi/zero-width/line-separator chars from a template reach no
     assert.doesNotMatch(written, INVISIBLE);
   });
 });
+
+test('delegate: a per-call allowDangerous escalation does not relabel the native value in the override warning', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeHarnessTemplate(cwd, 'claude', 'plan', 'permission: plan\nsandbox: workspace-write');
+    const { delegate } = await import('../extensions/engine.ts');
+    const { pi } = recordingPi();
+    const notes: string[] = [];
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const run = await delegate(pi, notifyCtx(cwd, notes), {
+        harness: 'claude',
+        mode: 'plan',
+        task: 'x',
+        allowDangerous: true,
+      });
+      // the run is escalated (and says so in details.permission / argv) ...
+      assert.equal(run.details.permission, 'danger');
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'bypassPermissions');
+      // ... but the warning is about the template's own keys: `plan` still means readonly on claude
+      assert.equal(
+        run.details.permissionWarning,
+        'permission: "plan" (readonly on claude) overrides sandbox: "workspace-write" (ignored)',
+      );
+    });
+  });
+});
