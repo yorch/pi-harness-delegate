@@ -32,7 +32,13 @@ import {
   resolveModelForHarness,
   resolveTransport,
 } from './config.ts';
-import { ALIASES, classifyNativePermission, getHarness, HARNESS_NAMES } from './harnesses/registry.ts';
+import {
+  ALIASES,
+  canonicalSafeNativePermission,
+  classifyNativePermission,
+  getHarness,
+  HARNESS_NAMES,
+} from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { runHarness } from './runner.ts';
 import {
@@ -355,8 +361,14 @@ export async function delegate(
   // the danger refusal thrown) before acquireSlot() — it's pure, so a refused run never occupies
   // (or, for fan-out, waits for) a concurrency slot it can't use.
   let permission: NormalizedPermission = template.permission;
-  const nativePerm = template.nativePermission;
-  const nativeClass = classifyNativePermission(harness, nativePerm);
+  const nativeClass = classifyNativePermission(harness, template.nativePermission);
+  // A safe native matches its allowlist case-insensitively (`Plan`), but what reaches argv/ACP is
+  // always the allowlist's canonical spelling (`plan`, claude's camelCase `acceptEdits`) — never the
+  // template's. Danger/unlisted values keep the template's own spelling (see registry.ts).
+  const nativePerm =
+    nativeClass === 'safe'
+      ? canonicalSafeNativePermission(harness, template.nativePermission)
+      : template.nativePermission;
   const isNativeDanger = nativeClass === 'danger' || nativeClass === 'unlisted';
   if (template.permission === 'danger' || isNativeDanger) {
     if (opts.allowDangerous !== true) {

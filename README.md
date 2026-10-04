@@ -162,7 +162,7 @@ All frontmatter keys (one `key: value` per line; only `name` is required):
 
 **Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, put the native value in `permission:` (e.g. `permission: ask` in a `devin/` template) — it is passed to that harness as-is. Legacy `permissionMode:`/`sandbox:` keys only map onto the normalized tiers (`plan` → `readonly`, `bypassPermissions` → `danger`, anything else → `edit`).
 
-Native values are checked against a per-harness **allowlist** of readonly/edit-equivalent modes; anything else — the harness's own danger mode *or a value not on the list* — is treated as `danger` and needs `allowDangerous` / `--allow-dangerous` (fail closed). Once confirmed, an unlisted value still runs as declared rather than being swapped for the harness's danger mode.
+Native values are checked against a per-harness **allowlist** of readonly/edit-equivalent modes; anything else — the harness's own danger mode *or a value not on the list* — is treated as `danger` and needs `allowDangerous` / `--allow-dangerous` (fail closed). Once confirmed, an unlisted value still runs as declared rather than being swapped for the harness's danger mode. Matching is case-insensitive (`Plan` is claude's `plan`), and an allowlisted value always reaches the harness in its canonical spelling (e.g. `acceptEdits`); a case variant of a danger mode (`Yolo`, `BYPASSPERMISSIONS`) is still danger.
 
 | Harness | Native values treated as non-danger |
 | --- | --- |

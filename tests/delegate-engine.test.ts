@@ -472,6 +472,31 @@ test('delegate: an unlisted native permission is gated as danger, and runs as de
   });
 });
 
+test('delegate: a case-variant safe native permission runs ungated, with its canonical spelling in argv', async () => {
+  const tpl = '---\nname: tinker\ndescription: t\npermission: Plan\n---\nDo it.\n';
+  await withSandbox({ templates: { tinker: tpl } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/engine.ts');
+    const { readFileSync } = await import('node:fs');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      // no allowDangerous: `Plan` is claude's allowlisted `plan`, not an unlisted mode (it used to be)
+      const run = await delegate(
+        fakePi(async () => ({ stdout: '', stderr: '', code: 0 })),
+        fakeCtx(cwd),
+        {
+          harness: 'claude',
+          mode: 'tinker',
+          task: 'x',
+        },
+      );
+      assert.equal(run.result.isError, false);
+      assert.equal(run.details.permission, 'edit');
+      assert.equal(run.details.nativePermission, 'plan');
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'plan');
+    });
+  });
+});
+
 test('mergeAddDirs: undefined when nothing is declared, so harness args stay unchanged', async () => {
   const { mergeAddDirs } = await import('../extensions/engine.ts');
   assert.equal(mergeAddDirs('/repo'), undefined);

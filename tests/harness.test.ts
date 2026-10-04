@@ -5,6 +5,7 @@ import { parseClaudeLine } from '../extensions/harnesses/claude.ts';
 import { parseCodexLine } from '../extensions/harnesses/codex.ts';
 import { parseOpencodeLine } from '../extensions/harnesses/opencode.ts';
 import {
+  canonicalSafeNativePermission,
   classifyNativePermission,
   getHarness,
   HARNESS_NAMES,
@@ -214,8 +215,8 @@ test('isNativeDangerPermission: unlisted native values fail closed as danger', (
   // Anything never heard of, a custom opencode agent, case variants, another harness's safe value.
   assert.equal(isNativeDangerPermission(getHarness('claude'), 'totally-new-mode'), true);
   assert.equal(isNativeDangerPermission(getHarness('opencode'), 'my-custom-agent'), true);
-  assert.equal(isNativeDangerPermission(getHarness('claude'), 'PLAN'), true);
   assert.equal(isNativeDangerPermission(getHarness('codex'), 'acceptEdits'), true);
+  assert.equal(isNativeDangerPermission(getHarness('codex'), 'ACCEPTEDITS'), true);
   // No harness resolved: nothing is known safe.
   assert.equal(isNativeDangerPermission(undefined, 'plan'), true);
 });
@@ -227,6 +228,85 @@ test('classifyNativePermission: none / safe / danger / unlisted', () => {
   assert.equal(classifyNativePermission(getHarness('amp'), 'yolo'), 'danger');
   assert.equal(classifyNativePermission(getHarness('codex'), 'bypassPermissions'), 'danger');
   assert.equal(classifyNativePermission(getHarness('devin'), 'smart'), 'unlisted');
+});
+
+test('classifyNativePermission: allowlist matching is case-insensitive and canonicalizes, on every harness', () => {
+  const variants = (v: string) => [v, v.toUpperCase(), v[0].toUpperCase() + v.slice(1), ` ${v.toUpperCase()}\t`];
+  for (const name of HARNESS_NAMES) {
+    const h = getHarness(name);
+    const safe = h?.safeNativePermissions ?? [];
+    assert.ok(safe.length > 0, `${name} has an allowlist`);
+    for (const canonical of safe) {
+      for (const v of variants(canonical)) {
+        assert.equal(classifyNativePermission(h, v), 'safe', `${name}:${JSON.stringify(v)}`);
+        // what reaches argv/ACP is the allowlist's own spelling, never the template's
+        assert.equal(canonicalSafeNativePermission(h, v), canonical, `${name}:${JSON.stringify(v)}`);
+      }
+    }
+  }
+  // claude's camelCase edit mode: any casing in, `acceptEdits` out
+  assert.equal(canonicalSafeNativePermission(getHarness('claude'), 'ACCEPTEDITS'), 'acceptEdits');
+  assert.equal(canonicalSafeNativePermission(getHarness('claude'), 'Plan'), 'plan');
+});
+
+test('classifyNativePermission: case variants of danger tokens stay danger, never safe', () => {
+  const danger: Array<[string, string]> = [
+    ['claude', 'BYPASSPERMISSIONS'],
+    ['claude', 'BypassPermissions'],
+    ['amp', 'Yolo'],
+    ['amp', 'YOLO'],
+    ['devin', 'Bypass'],
+    ['codex', 'DANGER-FULL-ACCESS'],
+    ['opencode', 'Build --Auto'],
+    ['opencode', 'BYPASSPERMISSIONS'],
+    ['codex', 'Danger'],
+  ];
+  for (const [name, v] of danger) {
+    assert.equal(classifyNativePermission(getHarness(name), v), 'danger', `${name}:${v}`);
+    assert.equal(isNativeDangerPermission(getHarness(name), v), true, `${name}:${v}`);
+    assert.equal(canonicalSafeNativePermission(getHarness(name), v), undefined, `${name}:${v}`);
+  }
+  // Unlisted stays unlisted (and gated) in any casing; another harness's safe value is not borrowed.
+  for (const [name, v] of [
+    ['claude', 'Auto'],
+    ['claude', 'DONTASK'],
+    ['devin', 'Smart'],
+    ['codex', 'AcceptEdits'],
+    ['opencode', 'My-Custom-Agent'],
+  ]) {
+    assert.equal(classifyNativePermission(getHarness(name), v), 'unlisted', `${name}:${v}`);
+    assert.equal(canonicalSafeNativePermission(getHarness(name), v), undefined, `${name}:${v}`);
+  }
+  assert.equal(classifyNativePermission(undefined, 'Plan'), 'unlisted');
+});
+
+test('every bundled template classifies the same: no native permission, danger only where declared', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { loadTemplates } = await import('../extensions/templates.ts');
+  const { isTemplateDanger } = await import('../extensions/harnesses/registry.ts');
+  // isolate from the user's own ~/.pi/agent templates and the repo's own .pi
+  const agentDir = mkdtempSync(join(tmpdir(), 'bundled-tpl-'));
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    for (const name of HARNESS_NAMES) {
+      const templates = loadTemplates(agentDir, name, false);
+      assert.ok(templates.size > 0, name);
+      for (const t of templates.values()) {
+        assert.equal(classifyNativePermission(getHarness(name), t.nativePermission), 'none', `${name}/${t.name}`);
+        assert.equal(isTemplateDanger(name, t), t.permission === 'danger', `${name}/${t.name}`);
+      }
+      for (const ro of ['review', 'plan', 'security-audit']) {
+        assert.equal(templates.get(ro)?.permission, 'readonly', `${name}/${ro}`);
+      }
+    }
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    rmSync(agentDir, { recursive: true, force: true });
+  }
 });
 
 test('codex buildArgs: resume puts every flag before `--` and the session id/prompt after it', () => {
