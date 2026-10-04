@@ -224,17 +224,28 @@ export function normalizePermission(
     const distinct = new Set(all.map(r => `${r.permission}|${r.nativePermission ?? ''}`));
     if (distinct.size > 1) {
       const listed = raws.map(v => quoteValue(v)).join(', ');
-      if (all.some(r => r.nativePermission))
-        return {
-          permission: 'readonly',
-          permissionMode: 'plan',
-          permissionWarning: `conflicting permission: values ${listed} — loaded as readonly (fail closed)`,
-        };
-      const least = all.reduce((a, b) => (TIER_RANK[b.permission] < TIER_RANK[a.permission] ? b : a));
-      return {
-        ...least,
-        permissionWarning: `conflicting permission: values ${listed} — using the least permissive, ${least.permission}`,
-      };
+      const least = all.some(r => r.nativePermission)
+        ? undefined
+        : all.reduce((a, b) => (TIER_RANK[b.permission] < TIER_RANK[a.permission] ? b : a));
+      const resolved = least
+        ? {
+            ...least,
+            permissionWarning: `conflicting permission: values ${listed} — using the least permissive, ${least.permission}`,
+          }
+        : {
+            permission: 'readonly' as const,
+            permissionMode: 'plan' as const,
+            permissionWarning: `conflicting permission: values ${listed} — loaded as readonly (fail closed)`,
+          };
+      // Legacy keys are ignored here too — judged against the tier this resolved to, and appended
+      // rather than dropped (no native value survives this branch, so delegate() can't judge them).
+      const [[permissionKey]] = entries(raw, 'permission');
+      const ignored = legacyOverrideWarning(
+        `${permissionKey}: ${resolved.permission}`,
+        resolved.permission,
+        legacyEntries(fallbackMode, sandbox),
+      );
+      return ignored ? { ...resolved, permissionWarning: `${resolved.permissionWarning}; ${ignored}` } : resolved;
     }
   }
   if (raws.length > 0) {
@@ -258,23 +269,18 @@ export function normalizePermission(
 }
 
 /**
- * `<label> overrides <legacy keys> (ignored)` when the ignored legacy keys disagree with `tier` (or
- * hold an unrecognized value); `undefined` when they agree. Keys are echoed as given (already
- * `displayKey`-sanitized), values JSON-quoted and capped.
+ * `<label> overrides <legacy keys> (ignored)` unless every ignored legacy value is recognized and maps
+ * to exactly `tier` — so one that disagrees with `tier`, one that is unrecognized, or ignored keys that
+ * disagree with each other (`sandbox: read-only` + `Sandbox: workspace-write`, even when the least
+ * permissive of them matches `tier`) are all flagged; `undefined` when there are none or they all
+ * agree. Keys are echoed as given (already `displayKey`-sanitized), values quoted via `quoteValue`.
  */
 function legacyOverrideWarning(
   label: string,
   tier: NormalizedPermission,
   legacy: readonly [string, string][],
 ): string | undefined {
-  // Same judgement as a legacy-only template: any unrecognized value, or a least-permissive tier
-  // that differs from the one that actually runs.
-  const classified = legacy.map(([, v]) => classifyLegacyValue(v));
-  const least = classified.reduce<NormalizedPermission | undefined>(
-    (acc, c) => (c && (acc === undefined || TIER_RANK[c.permission] < TIER_RANK[acc]) ? c.permission : acc),
-    undefined,
-  );
-  if (classified.every(Boolean) && least === tier) return undefined;
+  if (legacy.every(([, v]) => classifyLegacyValue(v)?.permission === tier)) return undefined;
   const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
   return `${label} overrides ${ignored} (ignored)`;
 }

@@ -272,7 +272,8 @@ test('nativeOverrideWarning: flags a disagreeing or unrecognized legacy key agai
     'permission: "plan" (readonly on claude) overrides sandbox: "workspace-write" (ignored)',
   );
   assert.equal(nativeOverrideWarning(ignored(['sandbox', 'read-only']), 'plan', 'readonly', 'claude'), undefined);
-  // least permissive of the legacy keys is what is compared, as for a legacy-only template
+  // ignored legacy keys that disagree with each other are flagged even when the least permissive of
+  // them matches the run-time tier — the author wrote two conflicting intents, neither of which ran
   assert.equal(
     nativeOverrideWarning(
       ignored(['permissionMode', 'acceptEdits'], ['sandbox', 'read-only']),
@@ -280,6 +281,11 @@ test('nativeOverrideWarning: flags a disagreeing or unrecognized legacy key agai
       'readonly',
       'claude',
     ),
+    'permission: "plan" (readonly on claude) overrides permissionMode: "acceptEdits", sandbox: "read-only" (ignored)',
+  );
+  // several ignored keys that all agree with the tier stay quiet
+  assert.equal(
+    nativeOverrideWarning(ignored(['permissionMode', 'plan'], ['Sandbox', 'read-only']), 'plan', 'readonly', 'claude'),
     undefined,
   );
   assert.match(
@@ -620,4 +626,44 @@ test('parseTemplate: addDirs frontmatter is a comma-separated list', () => {
   const t = parseTemplate('---\nname: x\naddDirs: ../shared, /opt/lib ,\n---\nbody');
   assert.deepEqual(t?.addDirs, ['../shared', '/opt/lib']);
   assert.equal(parseTemplate('---\nname: y\n---\nbody')?.addDirs, undefined);
+});
+
+test('ignored legacy keys that disagree with each other are flagged, even when the least permissive matches', () => {
+  // permission: readonly + two case-variant sandbox keys: read-only agrees, workspace-write does not
+  assert.equal(
+    tierOf('permission: readonly\nsandbox: read-only\nSandbox: workspace-write')[3],
+    'permission: readonly overrides sandbox: "read-only", Sandbox: "workspace-write" (ignored)',
+  );
+  // the native case from the review: permission: plan carries both keys; delegate() judges them as readonly
+  const t = parseTemplate('---\nname: x\npermission: plan\nsandbox: read-only\nSandbox: workspace-write\n---\nb');
+  const ignored = t?.ignoredLegacyPermission;
+  assert.ok(ignored);
+  assert.equal(
+    nativeOverrideWarning(ignored, 'plan', 'readonly', 'claude'),
+    'permission: "plan" (readonly on claude) overrides sandbox: "read-only", Sandbox: "workspace-write" (ignored)',
+  );
+  // keys that all agree with the tier — and with each other — stay quiet
+  assert.equal(tierOf('permission: edit\nsandbox: workspace-write\npermissionMode: acceptEdits')[3], undefined);
+});
+
+test('conflicting permission: values — ignored legacy keys are appended to the warning, not dropped', () => {
+  // least-permissive branch: resolves to readonly; the ignored edit-tier sandbox disagrees
+  assert.equal(
+    tierOf('permission: edit\nPermission: readonly\nsandbox: workspace-write')[3],
+    'conflicting permission: values "edit", "readonly" — using the least permissive, readonly; ' +
+      'permission: readonly overrides sandbox: "workspace-write" (ignored)',
+  );
+  // fail-closed branch (a native value is involved): judged against the readonly it fell back to
+  const native = tierOf('Permission: plan\npermission: edit\nsandbox: danger-full-access');
+  assert.equal(native[0], 'readonly');
+  assert.equal(
+    native[3],
+    'conflicting permission: values "plan", "edit" — loaded as readonly (fail closed); ' +
+      'Permission: readonly overrides sandbox: "danger-full-access" (ignored)',
+  );
+  // an agreeing legacy key adds nothing
+  assert.equal(
+    tierOf('permission: edit\nPermission: readonly\nsandbox: read-only')[3],
+    'conflicting permission: values "edit", "readonly" — using the least permissive, readonly',
+  );
 });
