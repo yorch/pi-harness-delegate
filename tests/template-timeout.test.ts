@@ -12,6 +12,7 @@ import {
 } from '../extensions/templates.ts';
 import {
   CLAUDE_RESULT,
+  CODEX_RESULT_LINES,
   fakeCtx,
   fakePi,
   loadExtension,
@@ -19,6 +20,7 @@ import {
   tpl,
   uiCtx,
   withFakeBinaries,
+  withOnlyFakes,
   withSandbox,
 } from './helpers/sandbox.ts';
 
@@ -100,7 +102,16 @@ test('/delegate --timeout: parsed as whole seconds; out of range, malformed or v
   const modes = new Set(['review']);
   assert.equal(parseDelegateCommand('--timeout=90 review x', modes).timeoutSec, 90);
   assert.equal(parseDelegateCommand('--timeout="120" review x', modes).timeoutSec, 120);
-  for (const raw of ['--timeout=5 x', '--timeout=9000 x', '--timeout=1.5 x', '--timeout=60s x', '--timeout= x']) {
+  // only plain decimal digits: Number() would accept every one of these as an in-range integer
+  const numberLike = ['1e3', '0x3c', '0o74', '0b111100', '+60', '60.0'];
+  for (const raw of [
+    '--timeout=5 x',
+    '--timeout=9000 x',
+    '--timeout=1.5 x',
+    '--timeout=60s x',
+    '--timeout= x',
+    ...numberLike.map(v => `--timeout=${v} x`),
+  ]) {
     const p = parseDelegateCommand(raw, modes);
     assert.equal(p.timeoutSec, undefined, raw);
     assert.match(p.errors?.[0] ?? '', /--timeout must be a whole number of seconds from 10 to 7200/, raw);
@@ -289,9 +300,18 @@ test('delegate: an invalid template timeout is ignored with a run-time warning, 
   });
 });
 
+// ── per-call timeout propagation through every path (the transcript records the timeout the run got) ──
+
+const OUTPUTS = [CLAUDE_RESULT, ...CODEX_RESULT_LINES];
+
 /** The `- timeout: Ns` line of a transcript file. */
 function transcriptTimeout(file: unknown): string | undefined {
   return readFileSync(String(file), 'utf8').match(/^- timeout: (\d+s)$/m)?.[1];
+}
+
+/** Every transcript path named in an injected report (`transcript: <path>` / `_transcript: <path>_`). */
+function reportTranscripts(content: string): string[] {
+  return [...content.matchAll(/transcript: (\S+?\.md)/g)].map(m => m[1]);
 }
 
 test('transcript: records the harness timeout the run was given', async () => {
@@ -304,6 +324,72 @@ test('transcript: records the harness timeout the run was given', async () => {
         { harness: 'claude', mode: 't', task: 'x' },
       );
       assert.equal(transcriptTimeout(run.details.file), '75s');
+    });
+  });
+});
+
+test('delegate tool fan-out: timeoutSec reaches every row', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUTS, async argsFile => {
+      await withOnlyFakes(argsFile, async () => {
+        const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const res = (await tools
+          .get('delegate')
+          ?.execute(
+            't',
+            { harness: 'claude,codex', mode: 'general', task: 'x', timeoutSec: 30 },
+            undefined,
+            undefined,
+            {
+              cwd,
+              hasUI: false,
+              isProjectTrusted: () => true,
+            },
+          )) as { details: { runs: { harness: string; ok: boolean; file?: string }[] } };
+        assert.equal(res.details.runs.length, 2);
+        for (const r of res.details.runs) {
+          assert.ok(r.ok && r.file, JSON.stringify(r));
+          assert.equal(transcriptTimeout(r.file), '30s', r.harness);
+        }
+      });
+    });
+  });
+});
+
+test('/delegate fan-out: a human --timeout reaches every row and may raise the configured timeout', async () => {
+  await withSandbox({ settings: { timeoutMs: 30_000 } }, async ({ cwd }) => {
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude', 'codex'], OUTPUTS, async argsFile => {
+      await withOnlyFakes(argsFile, async () => {
+        const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const { ctx, notes } = uiCtx(cwd, true);
+        await commands.get('delegate')?.handler('--harness=claude,codex --timeout=900 general do it', ctx);
+        const report = takePendingReport();
+        assert.ok(report, notes.join(' | '));
+        const files = reportTranscripts(report.content);
+        assert.equal(files.length, 2, report.content);
+        for (const f of files) assert.equal(transcriptTimeout(f), '900s', f);
+      });
+    });
+  });
+});
+
+test('/delegate single run: a human --timeout reaches the run and may raise the configured timeout', async () => {
+  await withSandbox({ settings: { harnesses: { claude: { timeoutMs: 30_000 } } } }, async ({ cwd }) => {
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async () => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      for (const [args, want] of [
+        ['claude --timeout=900 general do it', '900s'],
+        ['claude --timeout=12 general do it', '12s'],
+      ] as const) {
+        const { ctx, notes } = uiCtx(cwd, true);
+        await commands.get('delegate')?.handler(args, ctx);
+        const report = takePendingReport();
+        assert.ok(report, notes.join(' | '));
+        const [file] = reportTranscripts(report.content);
+        assert.equal(transcriptTimeout(file), want, args);
+      }
     });
   });
 });

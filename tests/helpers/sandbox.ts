@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 /**
  * Shared scaffolding for tests that drive the real extension (`delegate()`, the registered tools and
@@ -153,6 +153,18 @@ export async function withFakeBinaries<T>(
     if (prevArgs === undefined) delete process.env.FAKE_ARGS_FILE;
     else process.env.FAKE_ARGS_FILE = prevArgs;
     rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+/** Restrict PATH to the fake binaries (`dirname(argsFile)`) plus the system dirs, so no real harness
+ *  is detected — for fan-out tests whose resolved harness list must not depend on the machine. */
+export async function withOnlyFakes<T>(argsFile: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.PATH;
+  process.env.PATH = `${dirname(argsFile)}:/usr/bin:/bin`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = prev;
   }
 }
 

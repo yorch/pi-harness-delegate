@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { dirname } from 'node:path';
 import { test } from 'node:test';
 import { templateHarnessDefault } from '../extensions/command.ts';
 import { parseTemplate, parseTemplateHarnesses } from '../extensions/templates.ts';
@@ -11,6 +10,7 @@ import {
   tpl,
   uiCtx,
   withFakeBinaries,
+  withOnlyFakes,
   withSandbox,
 } from './helpers/sandbox.ts';
 
@@ -20,17 +20,6 @@ const OUTPUT = [CLAUDE_RESULT, ...CODEX_RESULT_LINES];
 function ran(argsFile: string, name: string): boolean {
   const argv = readArgs(`${argsFile}.${name}`);
   return argv !== null && !(argv.length === 1 && argv[0] === '--version');
-}
-
-/** Restrict PATH to the fake binaries plus the system dirs, so no real harness is detected. */
-async function withOnlyFakes<T>(argsFile: string, fn: () => Promise<T>): Promise<T> {
-  const prev = process.env.PATH;
-  process.env.PATH = `${dirname(argsFile)}:/usr/bin:/bin`;
-  try {
-    return await fn();
-  } finally {
-    process.env.PATH = prev;
-  }
 }
 
 test('parseTemplateHarnesses: lowercased, deduped; `all` and non-name entries are dropped with a warning', () => {
