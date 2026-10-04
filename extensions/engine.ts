@@ -44,6 +44,7 @@ import {
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { runHarness } from './runner.ts';
 import {
+  callTimeoutError,
   type DelegateTemplate,
   describeSkippedProjectTemplates,
   loadTemplates,
@@ -71,6 +72,11 @@ export interface DelegateOptions {
   /** Extra directories the harness may access, merged with the template's `addDirs` (relative
    *  paths resolve against the run's cwd). Per-harness limits apply — see each `buildArgs`. */
   addDirs?: string[];
+  /**
+   * Per-call harness timeout in seconds — wins over the template's `timeout:` and the config (see
+   * `resolveRunTimeoutMs`). Bounded like a template timeout; an out-of-range value fails the run.
+   */
+  timeoutSec?: number;
   /**
    * Host-run verification command override — takes precedence over the template's `verify`
    * frontmatter. Internal engine option only, not exposed on the `delegate` tool's schema — see
@@ -336,6 +342,11 @@ export async function delegate(
     addDirs: opts.addDirs,
     cwd: ctx.cwd,
   });
+  // a per-call timeout we can't honor is an error, never silently "the configured timeout"
+  if (opts.timeoutSec !== undefined) {
+    const timeoutErr = callTimeoutError(opts.timeoutSec);
+    if (timeoutErr) throw new Error(timeoutErr);
+  }
   const config = loadConfig();
   const harnessName = opts.harness ?? config.defaultHarness ?? 'claude';
   const harness = getHarness(harnessName);
@@ -439,8 +450,8 @@ export async function delegate(
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);
   const maxBudgetUsd =
     opts.maxBudgetUsd ?? template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd;
-  // template `timeout:` over the global default, capped by an explicit per-harness timeout — see config.ts
-  const timeoutMs = resolveRunTimeoutMs(config, harnessName, template.timeoutSec);
+  // call > template `timeout:` > per-harness config > global config, never past the hard cap — see config.ts
+  const timeoutMs = resolveRunTimeoutMs(config, harnessName, template.timeoutSec, opts.timeoutSec);
 
   // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
   // exactly as before; fan-out passes waitForSlot:true to queue instead.
@@ -729,6 +740,8 @@ export interface DelegateToolParams {
   sessionId?: string;
   pr?: string;
   addDirs?: string[];
+  /** Per-call harness timeout in seconds, bounded — see `DelegateOptions.timeoutSec`. */
+  timeoutSec?: number;
 }
 
 /** One `delegate()` call with the tool's live-feed progress reporting (`onUpdate`). Shared by the

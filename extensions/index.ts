@@ -62,7 +62,7 @@ import { showHistory } from './history.ts';
 import { collectModes, formatModesForModel, type ModesReport, onPath } from './modes.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
-import { type DelegateTemplate, loadTemplates } from './templates.ts';
+import { callTimeoutError, type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
 import { confirmDangerousCommand, confirmDangerousToolCall, confirmToolAddDirs } from './validate.ts';
 
@@ -130,6 +130,12 @@ const DELEGATE_TOOL_PARAMS = Type.Object({
   ),
   model: Type.Optional(Type.String({ description: 'Model (e.g. sonnet, opus, gpt-5). Defaults to template/config.' })),
   maxBudgetUsd: Type.Optional(Type.Number({ description: 'Hard spend cap in USD for the run.' })),
+  timeoutSec: Type.Optional(
+    Type.Integer({
+      description:
+        "Harness timeout for this call, in whole seconds (10–7200). Overrides the mode's template timeout and the config. Omit to use those.",
+    }),
+  ),
   sessionId: Type.Optional(
     Type.String({
       description: 'Resume an existing delegated session (pass its session id from a previous run details).',
@@ -215,6 +221,12 @@ export default function (pi: ExtensionAPI) {
           templateHarnessNote = `template "${rawParams.mode || config.defaultMode}" defaults to harnesses ${declared.join(', ')}; the delegate tool runs only ${harness} — pass harness: "${declared.join(',')}" to fan out.\n`;
       }
       const params: DelegateToolParams = { ...rawParams, harness };
+      // an out-of-range per-call timeout fails the call before any confirm prompt, and once — not
+      // once per fan-out row
+      if (params.timeoutSec !== undefined) {
+        const timeoutErr = callTimeoutError(params.timeoutSec);
+        if (timeoutErr) throw new Error(timeoutErr);
+      }
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
       if (params.allowDangerous === true) await confirmDangerousToolCall(ctx, params);
@@ -235,6 +247,7 @@ export default function (pi: ExtensionAPI) {
           scope: params.scope,
           model: params.model,
           maxBudgetUsd: params.maxBudgetUsd,
+          timeoutSec: params.timeoutSec,
           allowDangerous: params.allowDangerous === true, // invariant: never inherit from config.allowDangerous — danger requires explicit per-call approval
           sessionId: params.sessionId,
           pr: params.pr,
@@ -376,6 +389,7 @@ export default function (pi: ExtensionAPI) {
       scope?: string;
       model?: string;
       budget?: number;
+      timeoutSec?: number;
       sessionId?: string;
       pr?: string;
       addDirs?: string[];
@@ -390,7 +404,21 @@ export default function (pi: ExtensionAPI) {
     error: Error | null;
     cancelled: boolean;
   }> => {
-    const { harnessName, mode, task, scope, model, budget, sessionId, pr, addDirs, verify, template, isDanger } = opts;
+    const {
+      harnessName,
+      mode,
+      task,
+      scope,
+      model,
+      budget,
+      timeoutSec,
+      sessionId,
+      pr,
+      addDirs,
+      verify,
+      template,
+      isDanger,
+    } = opts;
     const allowDangerous = opts.allowDangerous === true;
     const modeForDisplay = mode ?? 'general';
 
@@ -459,6 +487,7 @@ export default function (pi: ExtensionAPI) {
       scope,
       model,
       maxBudgetUsd: budget,
+      timeoutSec,
       sessionId,
       pr,
       addDirs,
@@ -684,6 +713,7 @@ export default function (pi: ExtensionAPI) {
       scope: resolved.scope,
       model: parsed.model,
       budget: parsed.budget,
+      timeoutSec: parsed.timeoutSec,
       sessionId: parsed.sessionId,
       pr: parsed.pr,
       addDirs: parsed.addDirs,

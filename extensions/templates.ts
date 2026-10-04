@@ -114,6 +114,25 @@ export function parseTemplateTimeout(raw: string | undefined): { timeoutSec?: nu
   };
 }
 
+/**
+ * A per-call timeout (`delegate` tool `timeoutSec`, `/delegate --timeout=<sec>`) must be a whole
+ * number of seconds within the same bounds as a template's `timeout:`. Unlike a bad frontmatter
+ * value (ignored with a warning — the template author isn't there to ask), a bad per-call value is
+ * an error: the caller asked for a specific limit we can't honor. `null` when valid.
+ */
+export function callTimeoutError(sec: unknown): string | null {
+  if (
+    typeof sec === 'number' &&
+    Number.isInteger(sec) &&
+    sec >= TEMPLATE_TIMEOUT_MIN_SEC &&
+    sec <= TEMPLATE_TIMEOUT_MAX_SEC
+  )
+    return null;
+  const shown =
+    typeof sec === 'number' && Number.isFinite(sec) ? String(sec) : JSON.stringify(String(sec)).slice(0, 40);
+  return `timeout must be a whole number of seconds from ${TEMPLATE_TIMEOUT_MIN_SEC} to ${TEMPLATE_TIMEOUT_MAX_SEC} (got ${shown})`;
+}
+
 /** The legacy keys ignored next to a native `permission:` value — keys already sanitized (`displayKey`). */
 export interface IgnoredLegacyPermission {
   /** The `permission:` key as the author spelled it. */

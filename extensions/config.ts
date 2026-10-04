@@ -433,26 +433,34 @@ export function writeDelegateConfig(delegateSubtree: unknown): WriteConfigResult
 }
 
 /**
- * The harness timeout for one run. Precedence:
+ * The harness timeout for one run. Precedence, most specific first:
  *
- * 1. a template's `timeout:` (seconds) replaces the **global** `timeoutMs` — the global value is
- *    only a default, and a template author knows how long their task takes;
- * 2. an explicit **per-harness** `harnesses.<name>.timeoutMs` is a ceiling — the operator said this
- *    harness must not run longer, so a template can shorten a run on it but never lengthen it;
- * 3. a template can never exceed `TEMPLATE_TIMEOUT_MAX_SEC`, whatever was parsed (re-clamped here as
- *    defense in depth — `parseTemplateTimeout` already rejects out-of-range values).
+ * 1. a **per-call** timeout (`delegate` tool `timeoutSec`, `/delegate --timeout=<sec>`);
+ * 2. the template's `timeout:` frontmatter;
+ * 3. the **per-harness** config `harnesses.<name>.timeoutMs`;
+ * 4. the **global** config `timeoutMs` (always set, defaults to `DEFAULT_TIMEOUT_MS`).
  *
- * There is deliberately no per-call (tool/command) timeout: a model-settable one would be another
- * prompt-injection-reachable spend lever. With no template timeout this is exactly the previous
+ * Never unbounded: a call or template value (seconds) is clamped to `TEMPLATE_TIMEOUT_MAX_SEC` here
+ * as defense in depth — `parseTemplateTimeout` / `validateCallTimeout` already reject out-of-range
+ * values with a clear message — and config values are only ever positive numbers (`loadConfig`).
+ * With neither a call nor a template timeout this is exactly the previous
  * `harnesses.<name>.timeoutMs ?? timeoutMs`.
  */
-export function resolveRunTimeoutMs(cfg: DelegateConfig, harnessName: string, templateTimeoutSec?: number): number {
+export function resolveRunTimeoutMs(
+  cfg: DelegateConfig,
+  harnessName: string,
+  templateTimeoutSec?: number,
+  callTimeoutSec?: number,
+): number {
+  const usable = (v: number | undefined): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  const override = usable(callTimeoutSec)
+    ? callTimeoutSec
+    : usable(templateTimeoutSec)
+      ? templateTimeoutSec
+      : undefined;
+  if (override !== undefined) return Math.min(override, TEMPLATE_TIMEOUT_MAX_SEC) * 1000;
   const raw = cfg.harnesses[harnessName]?.timeoutMs;
-  const harnessMs = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : undefined;
-  if (templateTimeoutSec === undefined || !Number.isFinite(templateTimeoutSec) || templateTimeoutSec <= 0)
-    return harnessMs ?? cfg.timeoutMs;
-  const templateMs = Math.min(templateTimeoutSec, TEMPLATE_TIMEOUT_MAX_SEC) * 1000;
-  return harnessMs !== undefined ? Math.min(templateMs, harnessMs) : templateMs;
+  return usable(raw) ? raw : cfg.timeoutMs;
 }
 
 export function resolveModelForHarness(

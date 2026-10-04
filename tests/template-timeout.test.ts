@@ -1,14 +1,26 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { parseDelegateCommand } from '../extensions/command.ts';
 import { defaultDelegateConfig, resolveRunTimeoutMs } from '../extensions/config.ts';
 import {
+  callTimeoutError,
   parseTemplate,
   parseTemplateTimeout,
   TEMPLATE_TIMEOUT_MAX_SEC,
   TEMPLATE_TIMEOUT_MIN_SEC,
 } from '../extensions/templates.ts';
-import { CLAUDE_RESULT, fakeCtx, fakePi, tpl, withFakeBinaries, withSandbox } from './helpers/sandbox.ts';
+import {
+  CLAUDE_RESULT,
+  fakeCtx,
+  fakePi,
+  loadExtension,
+  readArgs,
+  tpl,
+  uiCtx,
+  withFakeBinaries,
+  withSandbox,
+} from './helpers/sandbox.ts';
 
 test('parseTemplateTimeout: accepts whole seconds within bounds, ignores everything else with a warning', () => {
   assert.deepEqual(parseTemplateTimeout(undefined), {});
@@ -39,25 +51,56 @@ test('parseTemplate: timeout lands on the template; an invalid one is a field wa
   assert.ok(w.length < 250, w);
 });
 
-test('resolveRunTimeoutMs: template over global default, per-harness config is a ceiling, hard cap holds', () => {
+test('resolveRunTimeoutMs: call > template > per-harness config > global, the hard cap always holds', () => {
   const cfg = defaultDelegateConfig();
   cfg.timeoutMs = 600_000;
-  // no template timeout: unchanged precedence (per-harness ?? global)
+  // neither call nor template: unchanged precedence (per-harness ?? global)
   assert.equal(resolveRunTimeoutMs(cfg, 'claude'), 600_000);
   cfg.harnesses.codex = { timeoutMs: 120_000 };
   assert.equal(resolveRunTimeoutMs(cfg, 'codex'), 120_000);
-  // template replaces the global default — up or down
+  // template beats the global default — up or down
   assert.equal(resolveRunTimeoutMs(cfg, 'claude', 1800), 1_800_000);
   assert.equal(resolveRunTimeoutMs(cfg, 'claude', 30), 30_000);
-  // an explicit per-harness timeout caps a template, but a shorter template still wins
-  assert.equal(resolveRunTimeoutMs(cfg, 'codex', 1800), 120_000);
+  // template beats the per-harness config too — up or down
+  assert.equal(resolveRunTimeoutMs(cfg, 'codex', 1800), 1_800_000);
   assert.equal(resolveRunTimeoutMs(cfg, 'codex', 60), 60_000);
-  // defense in depth: never above the template max, whatever reaches here
+  // a per-call timeout beats everything
+  assert.equal(resolveRunTimeoutMs(cfg, 'codex', 1800, 45), 45_000);
+  assert.equal(resolveRunTimeoutMs(cfg, 'codex', undefined, 3000), 3_000_000);
+  assert.equal(resolveRunTimeoutMs(cfg, 'claude', 30, 900), 900_000);
+  // defense in depth: never above the hard cap, whatever reaches here
   assert.equal(resolveRunTimeoutMs(cfg, 'claude', 1_000_000), TEMPLATE_TIMEOUT_MAX_SEC * 1000);
-  // garbage per-harness / template values don't produce a zero/NaN timeout
+  assert.equal(resolveRunTimeoutMs(cfg, 'claude', undefined, 1_000_000), TEMPLATE_TIMEOUT_MAX_SEC * 1000);
+  assert.equal(resolveRunTimeoutMs(cfg, 'claude', 60, Number.POSITIVE_INFINITY), 60_000);
+  // garbage per-harness / template / call values don't produce a zero/NaN timeout
   cfg.harnesses.amp = { timeoutMs: -5 };
   assert.equal(resolveRunTimeoutMs(cfg, 'amp'), 600_000);
-  assert.equal(resolveRunTimeoutMs(cfg, 'amp', Number.NaN), 600_000);
+  assert.equal(resolveRunTimeoutMs(cfg, 'amp', Number.NaN, 0), 600_000);
+});
+
+test('callTimeoutError: whole seconds within the template bounds, anything else is an error', () => {
+  assert.equal(callTimeoutError(TEMPLATE_TIMEOUT_MIN_SEC), null);
+  assert.equal(callTimeoutError(TEMPLATE_TIMEOUT_MAX_SEC), null);
+  for (const bad of [9, 7201, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '60', null])
+    assert.match(
+      callTimeoutError(bad) ?? '',
+      /^timeout must be a whole number of seconds from 10 to 7200/,
+      String(bad),
+    );
+});
+
+test('/delegate --timeout: parsed as whole seconds; out of range, malformed or valueless is an error', () => {
+  const modes = new Set(['review']);
+  assert.equal(parseDelegateCommand('--timeout=90 review x', modes).timeoutSec, 90);
+  assert.equal(parseDelegateCommand('--timeout="120" review x', modes).timeoutSec, 120);
+  for (const raw of ['--timeout=5 x', '--timeout=9000 x', '--timeout=1.5 x', '--timeout=60s x', '--timeout= x']) {
+    const p = parseDelegateCommand(raw, modes);
+    assert.equal(p.timeoutSec, undefined, raw);
+    assert.match(p.errors?.[0] ?? '', /--timeout must be a whole number of seconds from 10 to 7200/, raw);
+  }
+  const spaced = parseDelegateCommand('--timeout 60 x', modes);
+  assert.equal(spaced.timeoutSec, undefined);
+  assert.match(spaced.errors?.[0] ?? '', /--timeout needs a value: use --timeout=<sec>/);
 });
 
 test('delegate: a template timeout replaces a short global timeout for the real run', async () => {
@@ -84,7 +127,7 @@ test('delegate: a template timeout replaces a short global timeout for the real 
   );
 });
 
-test('delegate: an explicit per-harness timeout still caps a longer template timeout', async () => {
+test('delegate: a template timeout beats a short per-harness timeout; a per-call timeout beats both', async () => {
   await withSandbox(
     {
       settings: { harnesses: { claude: { timeoutMs: 200 } } },
@@ -96,20 +139,68 @@ test('delegate: an explicit per-harness timeout still caps a longer template tim
         ['claude'],
         [CLAUDE_RESULT],
         async () => {
-          await assert.rejects(
-            () =>
-              delegate(
-                fakePi(async () => ({})),
-                fakeCtx(cwd),
-                { harness: 'claude', mode: 'slow', task: 'x' },
-              ),
-            /timed out after 200ms/,
+          const run = await delegate(
+            fakePi(async () => ({})),
+            fakeCtx(cwd),
+            { harness: 'claude', mode: 'slow', task: 'x' },
           );
+          assert.equal(run.content, 'all good');
+          assert.equal(run.details.timeoutMs, 3_600_000);
+          const call = await delegate(
+            fakePi(async () => ({})),
+            fakeCtx(cwd),
+            { harness: 'claude', mode: 'slow', task: 'x', timeoutSec: 30 },
+          );
+          assert.equal(call.details.timeoutMs, 30_000);
         },
-        { sleepAfterSec: 5 },
+        { sleepAfterSec: 0.8 },
       );
     },
   );
+});
+
+test('delegate: an out-of-range per-call timeout fails before anything runs', async () => {
+  await withSandbox({ templates: { 'claude/t': tpl('t', 'edit') } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      await assert.rejects(
+        () =>
+          delegate(
+            fakePi(async () => ({})),
+            fakeCtx(cwd),
+            { harness: 'claude', mode: 't', task: 'x', timeoutSec: 86_400 },
+          ),
+        /timeout must be a whole number of seconds from 10 to 7200 \(got 86400\)/,
+      );
+      assert.equal(readArgs(`${argsFile}.claude`), null, 'nothing spawned');
+    });
+  });
+});
+
+test('delegate tool: timeoutSec reaches the run; an invalid one is refused before any confirm prompt', async () => {
+  await withSandbox({ templates: { 'claude/t': tpl('t', 'edit', 'timeout: 60') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async () => {
+      const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const res = (await tools
+        .get('delegate')
+        ?.execute('t', { harness: 'claude', mode: 't', task: 'x', timeoutSec: 600 }, undefined, undefined, {
+          cwd,
+          hasUI: false,
+          isProjectTrusted: () => true,
+        })) as { details: Record<string, unknown> };
+      assert.equal(res.details.timeoutMs, 600_000);
+      const { ctx, asked } = uiCtx(cwd, true);
+      await assert.rejects(
+        () =>
+          tools
+            .get('delegate')
+            ?.execute('t', { mode: 't', task: 'x', timeoutSec: 5, allowDangerous: true }, undefined, undefined, ctx) ??
+          Promise.resolve(),
+        /timeout must be a whole number of seconds/,
+      );
+      assert.equal(asked.length, 0, 'no confirm for a call that cannot run');
+    });
+  });
 });
 
 test('delegate: an invalid template timeout is ignored with a run-time warning, config timeout applies', async () => {
