@@ -145,21 +145,25 @@ export function parseMaxConcurrent(raw: unknown): DelegateConfig['maxConcurrent'
  * that changes a default (maxConcurrent 1 -> 4 already did) would never reach that user.
  */
 export function nonDefaultConfig(cfg: DelegateConfig): Partial<DelegateConfig> {
-  const defaults = defaultDelegateConfig() as unknown as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(cfg as unknown as Record<string, unknown>)) {
-    if (v === undefined) continue;
+  const defaults = defaultDelegateConfig();
+  const out: Partial<DelegateConfig> = {};
+  // Typed per key so each value is copied into `out` under its own field type — no casts.
+  const keep = <K extends keyof DelegateConfig>(k: K): void => {
+    const v = cfg[k];
+    if (v !== undefined && JSON.stringify(v) !== JSON.stringify(defaults[k])) out[k] = v;
+  };
+  for (const k of Object.keys(cfg) as (keyof DelegateConfig)[]) {
     if (k === 'modelAliases') {
       // The loader merges aliases additively onto the defaults, so only the keys that differ need
       // writing — whole-object diffing would pin the untouched default aliases next to a custom one.
-      const d = defaults.modelAliases as Record<string, string>;
-      const diff = Object.fromEntries(Object.entries(v as Record<string, string>).filter(([a, t]) => d[a] !== t));
-      if (Object.keys(diff).length > 0) out[k] = diff;
+      const d = defaults.modelAliases;
+      const diff = Object.fromEntries(Object.entries(cfg.modelAliases ?? {}).filter(([a, t]) => d[a] !== t));
+      if (Object.keys(diff).length > 0) out.modelAliases = diff;
       continue;
     }
-    if (JSON.stringify(v) !== JSON.stringify(defaults[k])) out[k] = v;
+    keep(k);
   }
-  return out as Partial<DelegateConfig>;
+  return out;
 }
 
 /**

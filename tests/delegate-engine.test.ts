@@ -16,7 +16,7 @@ interface Sandbox {
 }
 
 async function withSandbox<T>(
-  opts: { maxConcurrent?: number; templates?: Record<string, string> },
+  opts: { maxConcurrent?: number; templates?: Record<string, string>; settings?: Record<string, unknown> },
   fn: (s: Sandbox) => Promise<T>,
 ): Promise<T> {
   const root = mkdtempSync(join(tmpdir(), 'delegate-engine-'));
@@ -27,7 +27,7 @@ async function withSandbox<T>(
   mkdirSync(tplDir, { recursive: true });
   writeFileSync(
     join(agentDir, 'settings.json'),
-    JSON.stringify({ delegate: { maxConcurrent: opts.maxConcurrent ?? 1, maxTranscripts: 5 } }),
+    JSON.stringify({ delegate: { maxConcurrent: opts.maxConcurrent ?? 1, maxTranscripts: 5, ...opts.settings } }),
   );
   for (const [name, body] of Object.entries(opts.templates ?? {})) writeFileSync(join(tplDir, `${name}.md`), body);
   const prev = process.env.PI_CODING_AGENT_DIR;
@@ -166,6 +166,20 @@ test('delegate tool: claude_delegate is the same definition as delegate, differi
   assert.equal(alias.parameters, primary.parameters);
   assert.equal(typeof alias.renderCall, 'function');
   assert.equal(typeof alias.renderResult, 'function');
+});
+
+test('claude_delegate renderCall shows the pinned harness, not the ignored harness param', async () => {
+  const { tools } = await loadExtension();
+  const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s };
+  const render = (name: string) => {
+    const t = tools.get(name) as unknown as {
+      renderCall: (p: unknown, th: unknown) => { render: (w: number) => string[] };
+    };
+    return t.renderCall({ harness: 'codex', mode: 'review', task: 'x' }, theme).render(80).join('\n');
+  };
+  assert.match(render('claude_delegate'), /claude review/);
+  assert.doesNotMatch(render('claude_delegate'), /codex/);
+  assert.match(render('delegate'), /codex review/);
 });
 
 test('delegate tool: allowDangerous with no UI is refused before anything runs', async () => {
@@ -468,6 +482,32 @@ test('delegate: an unlisted native permission is gated as danger, and runs as de
       const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
       // the declared mode, not silently widened to bypassPermissions
       assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'auto');
+    });
+  });
+});
+
+test('delegate: a case-variant safe native permission runs ungated, with its canonical spelling in argv', async () => {
+  const tpl = '---\nname: tinker\ndescription: t\npermission: Plan\n---\nDo it.\n';
+  await withSandbox({ templates: { tinker: tpl } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/engine.ts');
+    const { readFileSync } = await import('node:fs');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      // no allowDangerous: `Plan` is claude's allowlisted `plan`, not an unlisted mode (it used to be)
+      const run = await delegate(
+        fakePi(async () => ({ stdout: '', stderr: '', code: 0 })),
+        fakeCtx(cwd),
+        {
+          harness: 'claude',
+          mode: 'tinker',
+          task: 'x',
+        },
+      );
+      assert.equal(run.result.isError, false);
+      // claude's `plan` is read-only — recorded as the readonly tier it actually runs at
+      assert.equal(run.details.permission, 'readonly');
+      assert.equal(run.details.nativePermission, 'plan');
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'plan');
     });
   });
 });
@@ -840,10 +880,10 @@ test('fan-out comparison rows report real prompt tokens on both the tool and the
     await withFakeBinaries(['claude'], [line], async () => {
       const { tools, commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
       const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
-      // `claude,` normalizes away on the command path; the tool path keeps it a (one-harness) fan-out
+      // `claude,` normalizes to a single run on both paths; `claude,claude` stays a (one-harness) fan-out
       const out = (await tools
         .get('delegate')
-        ?.execute('t', { harness: 'claude,', mode: 'tinker', task: 'x' }, undefined, undefined, ctx)) as {
+        ?.execute('t', { harness: 'claude,claude', mode: 'tinker', task: 'x' }, undefined, undefined, ctx)) as {
         content: { text: string }[];
       };
       assert.match(out.content[0].text, /12k tok/);
@@ -889,6 +929,99 @@ test('/delegate command: parser notices are shown — notify(warning) with UI, s
       assert.ok(readArgs(argsFile), 'headless run proceeds too');
       takePendingReport();
     });
+  });
+});
+
+test('delegate tool: a trailing-comma / mixed-case single harness is a single run, like /delegate', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { existsSync, rmSync: rm } = await import('node:fs');
+    const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT], async argsFile => {
+      for (const harness of ['claude,', 'Claude, ', ',CLAUDE']) {
+        for (const n of ['claude', 'codex']) rm(`${argsFile}.${n}`, { force: true });
+        const res = (await tool.execute('t', { harness, mode: 'general', task: 'x' }, undefined, undefined, ctx)) as {
+          details: Record<string, unknown>;
+        };
+        assert.ok(existsSync(`${argsFile}.claude`), `${harness}: claude must run`);
+        assert.ok(!existsSync(`${argsFile}.codex`), `${harness}: codex must not run`);
+        // single-run result shape, not a one-row fan-out comparison report
+        assert.equal(res.details.fanout, undefined, harness);
+        assert.equal(res.details.harness, 'claude', harness);
+        assert.equal(res.details.mode, 'general', harness);
+      }
+    });
+  });
+});
+
+test('delegate tool: a harness spec that normalizes to nothing is refused, not run on the default harness', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { existsSync } = await import('node:fs');
+    const { tools } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      for (const harness of [',', ' , ', ',,', ' ']) {
+        await assert.rejects(
+          () => tool.execute('t', { harness, mode: 'general', task: 'x' }, undefined, undefined, ctx),
+          /names no harness/,
+          JSON.stringify(harness),
+        );
+      }
+      assert.ok(!existsSync(argsFile), 'nothing ran');
+      // `""` is "unset", the same as omitting the field: the default harness (claude) runs
+      await tool.execute('t', { harness: '', mode: 'general', task: 'x' }, undefined, undefined, ctx);
+      assert.ok(existsSync(argsFile), 'an empty harness runs the default');
+    });
+  });
+});
+
+test('/delegate --harness that names no harness is reported and runs nothing', async () => {
+  await withSandbox({ templates: {} }, async ({ cwd }) => {
+    const { commands } = await loadExtension(async () => {
+      throw new Error('must not run');
+    });
+    const ctx = { cwd, hasUI: false, isProjectTrusted: () => true };
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { existsSync } = await import('node:fs');
+      for (const args of ['--harness=, general do it', '--harness=" , " general do it']) {
+        const err = await captureStderr(() => commands.get('delegate')?.handler(args, ctx) ?? Promise.resolve());
+        assert.match(err, /names no harness/, args);
+      }
+      assert.ok(!existsSync(argsFile), 'nothing ran');
+    });
+  });
+});
+
+test('delegate tool: `claude,` at capacity fails fast like any single run instead of queueing', async () => {
+  await withSandbox({ maxConcurrent: 1, templates: {} }, async ({ cwd }) => {
+    const { acquireSlot } = await import('../extensions/concurrency.ts');
+    const { loadConfig } = await import('../extensions/config.ts');
+    const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const tool = tools.get('delegate');
+    assert.ok(tool);
+    const release = await acquireSlot({ harness: 'claude', mode: 'held', config: loadConfig(), wait: false });
+    try {
+      // a fan-out would wait for the held slot (waitForSlot:true); the timeout only bounds that wrong path
+      const signal = AbortSignal.timeout(2000);
+      await assert.rejects(
+        () =>
+          tool.execute('t', { harness: 'claude,', mode: 'general', task: 'x' }, signal, undefined, {
+            cwd,
+            hasUI: false,
+            isProjectTrusted: () => true,
+          }),
+        /already in progress|claimed the last available slot/,
+      );
+      assert.equal(signal.aborted, false, 'rejected immediately, not after waiting');
+    } finally {
+      release();
+    }
   });
 });
 
@@ -990,4 +1123,166 @@ test('delegate: free-text scope reaches the harness as a delimited restriction, 
       assert.doesNotMatch(argv, /UNTRUSTED DATA|Analyze it as input/);
     });
   });
+});
+
+// ── native read-only permissions: verify never executes ────────────────────
+
+/** Project-local templates under the shared root, so every harness loads them. */
+function writeSharedTemplates(cwd: string, templates: Record<string, string>): void {
+  const dir = join(cwd, '.pi', 'delegate', 'templates');
+  mkdirSync(dir, { recursive: true });
+  for (const [name, body] of Object.entries(templates)) writeFileSync(join(dir, `${name}.md`), body);
+}
+
+const verifyTemplate = (name: string, permission: string) =>
+  `---\nname: ${name}\ndescription: t\npermission: ${permission}\nverify: touch pwned\n---\nDo it.\n`;
+
+/** A fake `pi` that records every exec (a verify command arrives as `sh -c <cmd>`). */
+function recordingPi() {
+  const calls: string[][] = [];
+  const pi = fakePi(async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    return { stdout: '', stderr: '', code: 0 };
+  });
+  return { pi, calls };
+}
+
+const OPENCODE_LINES = [
+  JSON.stringify({ type: 'text', sessionID: 's', part: { text: 'ok' } }),
+  JSON.stringify({ type: 'step_finish', sessionID: 's', part: { cost: 0.001, tokens: {} } }),
+];
+
+test('delegate: a native read-only permission (any casing) never runs its verify command, on every stdout harness', async () => {
+  const { readFileSync } = await import('node:fs');
+  const codexLines = readFileSync(join(import.meta.dirname, 'fixtures', 'codex.jsonl'), 'utf8')
+    .trim()
+    .split('\n');
+  // [harness, native value as written, canonical value expected in argv, argv flag, fake output]
+  const cases: Array<[string, string, string, string, string[]]> = [
+    ['claude', 'plan', 'plan', '--permission-mode', [CLAUDE_RESULT]],
+    ['claude', 'Plan', 'plan', '--permission-mode', [CLAUDE_RESULT]],
+    ['claude', 'PLAN', 'plan', '--permission-mode', [CLAUDE_RESULT]],
+    ['opencode', 'Plan', 'plan', '--agent', OPENCODE_LINES],
+    ['codex', 'read-only', 'read-only', '--sandbox', codexLines],
+  ];
+  for (const [i, [harness, native, canonical, flag, lines]] of cases.entries()) {
+    await withSandbox({}, async ({ cwd }) => {
+      // distinct names per case: macOS filesystems are case-insensitive
+      writeSharedTemplates(cwd, { [`ro${i}`]: verifyTemplate(`ro${i}`, native) });
+      const { delegate } = await import('../extensions/engine.ts');
+      const { pi, calls } = recordingPi();
+      await withFakeBinaries([harness], lines, async argsFile => {
+        const run = await delegate(pi, fakeCtx(cwd), { harness, mode: `ro${i}`, task: 'x' });
+        const label = `${harness}:${native}`;
+        assert.deepEqual(calls, [], `${label}: pi.exec must never be called`);
+        assert.equal(run.verify?.skipped, 'readonly run', label);
+        assert.equal(run.details.permission, 'readonly', label);
+        const transcript = readFileSync(run.details.file as string, 'utf8');
+        assert.ok(transcript.includes('⊘ skipped (readonly run)'), label);
+        assert.match(transcript, /- permission: readonly/, label);
+        // what reaches argv is unchanged: the canonical native value
+        const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+        assert.equal(argv[argv.indexOf(flag) + 1], canonical, label);
+      });
+    });
+  }
+});
+
+test('delegate: a native edit permission still runs its verify command, and danger gating is unchanged', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeSharedTemplates(cwd, { edits: verifyTemplate('edits', 'acceptEdits'), ro: verifyTemplate('ro', 'plan') });
+    const { delegate } = await import('../extensions/engine.ts');
+    const { readFileSync } = await import('node:fs');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const edit = recordingPi();
+      const run = await delegate(edit.pi, fakeCtx(cwd), { harness: 'claude', mode: 'edits', task: 'x' });
+      assert.deepEqual(edit.calls, [['sh', '-c', 'touch pwned']]);
+      assert.equal(run.details.permission, 'edit');
+      assert.equal(run.verify?.skipped, undefined);
+      // an explicit escalation of a native read-only template is still danger, native dropped
+      const danger = recordingPi();
+      const esc = await delegate(danger.pi, fakeCtx(cwd), {
+        harness: 'claude',
+        mode: 'ro',
+        task: 'x',
+        allowDangerous: true,
+      });
+      assert.equal(esc.details.permission, 'danger');
+      assert.deepEqual(danger.calls, [['sh', '-c', 'touch pwned']]);
+      const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'bypassPermissions');
+    });
+  });
+});
+
+/**
+ * Put a fake ACP agent named `<name>` first on PATH: it answers the handshake (advertising `modes`),
+ * records every `session/set_mode` modeId (one per line) to `$FAKE_MODE_FILE`, and answers the prompt.
+ */
+async function withFakeAcpAgent<T>(name: string, fn: (modeFile: string) => Promise<T>): Promise<T> {
+  const { chmodSync } = await import('node:fs');
+  const binDir = mkdtempSync(join(tmpdir(), 'fake-acp-'));
+  const modeFile = join(binDir, 'modes.txt');
+  const agent = join(binDir, 'agent.js');
+  writeFileSync(
+    agent,
+    `const fs = require('node:fs');
+const rl = require('node:readline').createInterface({ input: process.stdin });
+const send = o => process.stdout.write(JSON.stringify(o) + '\\n');
+rl.on('line', line => {
+  let m; try { m = JSON.parse(line); } catch { return; }
+  if (m.method === 'initialize') return send({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (m.method === 'session/new') return send({ jsonrpc: '2.0', id: m.id, result: { sessionId: 'fake-session', modes: {} } });
+  if (m.method === 'session/set_mode') { fs.appendFileSync(process.env.FAKE_MODE_FILE, m.params.modeId + '\\n'); return send({ jsonrpc: '2.0', id: m.id, result: {} }); }
+  if (m.method === 'session/prompt') {
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ACP OK' } } } });
+    return send({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`,
+  );
+  writeFileSync(join(binDir, name), `#!/bin/sh\nexec '${process.execPath}' '${agent}' "$@"\n`);
+  chmodSync(join(binDir, name), 0o755);
+  const prevPath = process.env.PATH;
+  const prevMode = process.env.FAKE_MODE_FILE;
+  process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.FAKE_MODE_FILE = modeFile;
+  try {
+    return await fn(modeFile);
+  } finally {
+    process.env.PATH = prevPath;
+    if (prevMode === undefined) delete process.env.FAKE_MODE_FILE;
+    else process.env.FAKE_MODE_FILE = prevMode;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test('delegate over ACP: a case-variant native permission reaches session/set_mode in its canonical spelling', async () => {
+  const { readFileSync } = await import('node:fs');
+  // [harness, native value as written, expected ACP mode id, expected recorded tier, extra settings]
+  const cases: Array<[string, string, string, string, Record<string, unknown>]> = [
+    ['devin', 'ASK', 'ask', 'edit', {}],
+    ['devin', 'Plan', 'plan', 'readonly', {}],
+    ['opencode', 'PLAN', 'plan', 'readonly', { harnesses: { opencode: { transport: 'acp' } } }],
+  ];
+  for (const [i, [harness, native, modeId, tier, settings]] of cases.entries()) {
+    await withSandbox({ settings }, async ({ cwd }) => {
+      writeSharedTemplates(cwd, { [`acp${i}`]: verifyTemplate(`acp${i}`, native) });
+      const { delegate } = await import('../extensions/engine.ts');
+      const { pi, calls } = recordingPi();
+      await withFakeAcpAgent(harness, async modeFile => {
+        const run = await delegate(pi, fakeCtx(cwd), { harness, mode: `acp${i}`, task: 'x' });
+        const label = `${harness}:${native}`;
+        assert.equal(run.content, 'ACP OK', label);
+        assert.deepEqual(readFileSync(modeFile, 'utf8').trim().split('\n'), [modeId], label);
+        assert.equal(run.details.permission, tier, label);
+        if (tier === 'readonly') {
+          assert.deepEqual(calls, [], `${label}: verify must not execute on a read-only native mode`);
+          assert.equal(run.verify?.skipped, 'readonly run', label);
+        } else {
+          assert.deepEqual(calls, [['sh', '-c', 'touch pwned']], label);
+        }
+      });
+    });
+  }
 });

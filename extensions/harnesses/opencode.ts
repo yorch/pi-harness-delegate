@@ -374,6 +374,9 @@ export const opencodeHarness: Harness = {
   // `--agent <name>` (stdout) / ACP mode id: only the built-in `plan`/`build` agents are known
   // quantities — a user-defined agent can carry any permission config, so it fails closed.
   safeNativePermissions: ['plan', 'build'],
+  // the built-in `plan` agent (stdout) / ACP mode is read-only — live-captured blocking a write
+  // (docs/acp-harness-assessment.md §4).
+  readonlyNativePermissions: ['plan'],
   // ACP path — opt-in only (transport defaults to 'stdout'; see config.ts's resolveTransport).
   // `--model` isn't wired here: `opencode acp --help` has no such flag, unlike `devin acp
   // --model`; the ACP handshake's own `configOptions` "model" category is the real mechanism

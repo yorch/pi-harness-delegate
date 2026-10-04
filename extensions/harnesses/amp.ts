@@ -273,6 +273,9 @@ export const ampHarness: Harness = {
   permissionMap: { readonly: ['always-ask'], edit: ['write'], danger: ['yolo'] },
   // `omp --approval-mode` values: always-ask, write, yolo.
   safeNativePermissions: ['always-ask', 'write'],
+  // No `readonlyNativePermissions`: `omp --help` only says `always-ask` asks before tool calls — what a
+  // non-interactive `-p` run does with an unanswerable ask (deny, hang, or proceed) is undocumented and
+  // unverified, so a native `always-ask` stays `edit` (and its `verify:` still runs) until it is.
   // `omp acp` is real and live-verified (docs/acp-harness-assessment.md §2/§4) — but deliberately
   // NOT offered as a config value yet: its ACP mode surface only has 2 tiers (`default`/`plan`),
   // while the stdout `--approval-mode` above has 3 genuine ones. Adding 'acp' here would let a

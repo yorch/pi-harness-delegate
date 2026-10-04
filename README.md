@@ -76,7 +76,7 @@ The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff
 
 ### Fan out to multiple harnesses
 
-`harness` also accepts `all` or a comma-separated list — the same task runs on every harness **concurrently**, up to `maxConcurrent`, and comes back as one comparison report instead of one report per harness:
+`harness` also accepts `all` or a comma-separated list — the same task runs on every harness **concurrently**, up to `maxConcurrent`, and comes back as one comparison report instead of one report per harness (on `/delegate` and the `delegate` tool alike, the spec is case-insensitive and empty elements are dropped, so `claude,` is a plain single `claude` run, not a one-harness fan-out; a spec with no harness in it at all, like `,`, is an error rather than the default harness):
 
 ```bash
 /delegate all review the auth flow                 # every *detected* harness
@@ -162,20 +162,20 @@ All frontmatter keys (one `key: value` per line; only `name` is required):
 
 **Native escape hatch:** if you need a harness-specific permission not covered by the normalized set, put the native value in `permission:` (e.g. `permission: ask` in a `devin/` template) — it is passed to that harness as-is. Legacy `permissionMode:`/`sandbox:` keys only map onto the normalized tiers (`plan` → `readonly`, `bypassPermissions` → `danger`, anything else → `edit`).
 
-Native values are checked against a per-harness **allowlist** of readonly/edit-equivalent modes; anything else — the harness's own danger mode *or a value not on the list* — is treated as `danger` and needs `allowDangerous` / `--allow-dangerous` (fail closed). Once confirmed, an unlisted value still runs as declared rather than being swapped for the harness's danger mode.
+Native values are checked against a per-harness **allowlist** of readonly/edit-equivalent modes; anything else — the harness's own danger mode *or a value not on the list* — is treated as `danger` and needs `allowDangerous` / `--allow-dangerous` (fail closed). Once confirmed, an unlisted value still runs as declared rather than being swapped for the harness's danger mode. Matching is case-insensitive (`Plan` is claude's `plan`), and an allowlisted value always reaches the harness in its canonical spelling (e.g. `acceptEdits`); a case variant of a danger mode (`Yolo`, `BYPASSPERMISSIONS`) is still danger. A native value that is genuinely read-only on its harness (**bold** below) runs as the `readonly` tier: it is recorded as `readonly` and a `verify:` command on it is skipped, exactly like `permission: readonly`.
 
 | Harness | Native values treated as non-danger |
 | --- | --- |
-| `claude` | `plan`, `acceptEdits`, `manual`, `default` (`auto`, `dontAsk`, `bypassPermissions` → danger) |
-| `codex` | `read-only`, `workspace-write` |
-| `opencode` | `plan`, `build` (custom agents, `build --auto` → danger) |
-| `amp`/`omp` | `always-ask`, `write` |
-| `devin` | `plan`, `accept-edits`, `ask` (`smart`, `bypass` → danger) |
+| `claude` | **`plan`**, `acceptEdits`, `manual`, `default` (`auto`, `dontAsk`, `bypassPermissions` → danger) |
+| `codex` | **`read-only`**, `workspace-write` |
+| `opencode` | **`plan`**, `build` (custom agents, `build --auto` → danger) |
+| `amp`/`omp` | `always-ask`, `write` (`always-ask` stays `edit`: what `-p` does with an unanswerable ask is undocumented) |
+| `devin` | **`plan`**, `accept-edits`, `ask` (`smart`, `bypass` → danger) |
 
 **Verify:** `verify` is a shell command run **on the host** (never handed to the harness) right after it exits — e.g. `verify: bun test` on an `implement`/`docs`/`general` template turns "the harness says it's done" into an actual pass/fail. It's report-only: a failing verify is appended as its own section in the transcript and injected report, and surfaced in the tool result's `details.verify` (`{command, exitCode, ok}`), but it never changes whether the run itself is reported as an error — that stays whatever the harness reported. No template ships one by default — there's no universally-correct check command, so nothing is invented for you.
 
 - **Sources, deliberately limited:** a verify command can only come from a template's `verify:` frontmatter, or a human typing `/delegate --verify="<cmd>"` (quotes needed for multi-word commands) — the call-level value wins over the template's. **It is not a parameter on the `delegate` tool** — that's on purpose, not an oversight: a tool param is set by the model, and the model's context includes repo content and delegated-harness output, both of which an attacker could influence, so a model-settable verify command would be a prompt-injection → arbitrary-host-command path. A model that wants verification simply picks a template that declares one.
-- **Never runs on a `readonly` template.** `readonly` (`review`/`plan`/`security-audit`) guarantees no execution or modification — a verify command riding along on one would quietly break that guarantee. If a `readonly` template (or override) has a `verify` configured, it's recorded as skipped (`### Verify: \`cmd\`` / `⊘ skipped (readonly run)`) rather than run, and never silently dropped.
+- **Never runs on a `readonly` template** — including a native read-only one (`permission: plan`, codex `read-only`; see the table above). `readonly` (`review`/`plan`/`security-audit`) guarantees no execution or modification — a verify command riding along on one would quietly break that guarantee. If a `readonly` template (or override) has a `verify` configured, it's recorded as skipped (`### Verify: \`cmd\`` / `⊘ skipped (readonly run)`) rather than run, and never silently dropped.
 - A project-local template's `verify` command is gated by the same project-trust check as the rest of the template.
 
 **Template sources (later wins):**

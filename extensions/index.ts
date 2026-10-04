@@ -27,7 +27,9 @@ import { formatToolUse, ToolCallIndex } from './activity.ts';
 import {
   aliasUsage,
   delegateUsage,
+  emptyHarnessSpecError,
   isFanoutSpec,
+  normalizeHarnessSpec,
   parseDelegateCommand,
   resolveDefaults,
   resolveHarnessFilter,
@@ -144,8 +146,15 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [...DELEGATE_TOOL_GUIDELINES],
     parameters: DELEGATE_TOOL_PARAMS,
     async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
-      // the deprecated alias pins its harness; everything below sees the effective params
-      const params: DelegateToolParams = spec.forceHarness ? { ...rawParams, harness: spec.forceHarness } : rawParams;
+      // the deprecated alias pins its harness; everything below sees the effective params. The spec is
+      // normalized exactly as /delegate does (normalizeHarnessSpec), so `claude,` is a single run —
+      // fail-fast at capacity, single-run result shape — not a one-harness fan-out, and `omp` is `amp`.
+      // A non-empty spec that normalizes to nothing (`,`, `" , "`) is refused rather than silently run
+      // on the default harness (`""` stays "unset", the way a model omitting the field means it).
+      const harnessSpec = spec.forceHarness ?? rawParams.harness;
+      const harness = harnessSpec === undefined ? undefined : normalizeHarnessSpec(harnessSpec);
+      if (harnessSpec && harness === undefined) throw new Error(emptyHarnessSpecError(harnessSpec));
+      const params: DelegateToolParams = { ...rawParams, harness };
       const config = loadConfig();
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
@@ -192,7 +201,7 @@ export default function (pi: ExtensionAPI) {
       };
     },
     renderCall(params, theme) {
-      const harness = params.harness ?? 'delegate';
+      const harness = spec.forceHarness ?? params.harness ?? 'delegate';
       const mode = params.mode ?? 'general';
       const task = params.task ?? '';
       const taskStr = task ? ` — ${task.length > 60 ? `${task.slice(0, 59)}…` : task}` : '';

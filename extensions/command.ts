@@ -68,11 +68,12 @@ function looksLikeHarnessSpec(word: string, knownHarnesses: ReadonlySet<string>)
 }
 
 /**
- * Normalize a harness spec the same way whether it came from `--harness=` or the first word:
- * lowercased, empty list elements dropped (`claude,` -> `claude`, `,` -> none), and a single name
- * alias-normalized (`omp` -> `amp`). A real list / `all` is left for `resolveHarnessList`.
+ * Normalize a harness spec the same way whether it came from `--harness=`, the first word, or the
+ * `delegate` tool's `harness` param: lowercased, empty list elements dropped (`claude,` -> `claude`,
+ * `,` -> none), and a single name alias-normalized (`omp` -> `amp`). A real list / `all` is left for
+ * `resolveHarnessList`. Sharing it is what keeps both paths agreeing on single run vs fan-out.
  */
-function normalizeHarnessSpec(spec: string): string | undefined {
+export function normalizeHarnessSpec(spec: string): string | undefined {
   const parts = spec
     .toLowerCase()
     .split(',')
@@ -81,6 +82,12 @@ function normalizeHarnessSpec(spec: string): string | undefined {
   if (parts.length === 0) return undefined;
   if (parts.length === 1) return HARNESS_ALIASES[parts[0]] ?? parts[0];
   return parts.join(',');
+}
+
+/** The error for a harness spec that normalizes to nothing (`,`, `" , "`) — shared by `/delegate`'s
+ *  `--harness=` and the `delegate` tool's `harness` param, so neither silently runs the default. */
+export function emptyHarnessSpecError(raw: string): string {
+  return `harness ${JSON.stringify(raw)} names no harness: give a harness name, a comma-separated list, or "all" (omit it for the default harness)`;
 }
 
 /**
@@ -188,6 +195,9 @@ export function parseDelegateCommand(
   }
 
   let harness = flags.harness !== undefined ? normalizeHarnessSpec(flags.harness) : undefined;
+  // `--harness=,` / `--harness=" , "` / `--harness=` name no harness at all: an explicit choice we
+  // can't honor is an error, never a silent fall-back to the default harness.
+  if (flags.harness !== undefined && harness === undefined) errors.push(emptyHarnessSpecError(flags.harness));
   let mode = flags.mode;
   let task = rest.trim();
 

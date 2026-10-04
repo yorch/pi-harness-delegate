@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -111,7 +111,8 @@ function fakeHarness(mode: string, pidFile?: string): Harness {
 }
 
 function tmpPidFile(name: string): string {
-  return join(tmpdir(), `acp-runner-test-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.pid`);
+  // its own fresh mkdtemp dir — unique by construction, no clock/random collision
+  return join(mkdtempSync(join(tmpdir(), `acp-runner-test-${name}-`)), 'agent.pid');
 }
 
 test('acpView: falls back to stdout-shaped fields for an ACP-only harness (Devin needs zero changes)', () => {
@@ -199,7 +200,7 @@ test('runAcpHarness: writing to an agent that already exited fails the run clean
   // closes its stdin, then answers initialize and lingers briefly — the runner's next write
   // (session/new) lands on a pipe with no reader. Whether that surfaces as an async EPIPE 'error'
   // event is runtime/timing dependent (bun doesn't reliably emit one here), so this is a smoke test
-  // that the run fails cleanly either way — the `proc.stdin.on('error')` guard is the insurance.
+  // that the run fails cleanly either way. The guard itself is pinned by the injected-EPIPE test below.
   const script =
     "process.stdin.once('data', d => { const m = JSON.parse(String(d).split('\\n')[0]); process.stdin.destroy(); " +
     "process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } }) + '\\n'); " +
@@ -211,6 +212,48 @@ test('runAcpHarness: writing to an agent that already exited fails the run clean
       /exited|finished without|session ended/,
     );
   }
+});
+
+test('runAcpHarness: an async stdin error (EPIPE) mid-handshake never escapes as an unhandled error', async () => {
+  // bun doesn't emit EPIPE for a real closed pipe (the smoke test above), so inject it: the real
+  // fake agent is spawned, and the runner's first stdin write is answered with the exact async
+  // 'error' event node emits for EPIPE. Without the runner's stdin 'error' listener, EventEmitter
+  // throws it as an uncaught exception, which the guard below turns into a test failure.
+  const { spawn } = await import('node:child_process');
+  const uncaught: unknown[] = [];
+  const onUncaught = (err: unknown) => uncaught.push(err);
+  process.on('uncaughtException', onUncaught);
+  const prevListeners = process.listeners('uncaughtException').filter(l => l !== onUncaught);
+  for (const l of prevListeners) process.off('uncaughtException', l);
+  let injected = false;
+  const spawnWithEpipe = ((...a: Parameters<typeof spawn>) => {
+    const proc = spawn(...a);
+    const write = proc.stdin?.write.bind(proc.stdin);
+    if (proc.stdin && write) {
+      proc.stdin.write = ((chunk: unknown, ...rest: never[]) => {
+        if (!injected) {
+          injected = true;
+          const err = Object.assign(new Error('write EPIPE'), { code: 'EPIPE', errno: -32, syscall: 'write' });
+          setImmediate(() => proc.stdin?.emit('error', err));
+        }
+        return write(chunk as string, ...rest);
+      }) as typeof proc.stdin.write;
+    }
+    return proc;
+  }) as typeof spawn;
+  try {
+    const res = await runAcpHarness(
+      { harness: fakeHarness('default'), prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 20_000 },
+      { spawn: spawnWithEpipe },
+    );
+    // the run itself is unaffected: the agent still answered over a pipe that only *reported* an error
+    assert.equal(res.streamedText, 'NEW ANSWER');
+  } finally {
+    process.off('uncaughtException', onUncaught);
+    for (const l of prevListeners) process.on('uncaughtException', l);
+  }
+  assert.ok(injected, 'the EPIPE was injected');
+  assert.deepEqual(uncaught, [], 'stdin EPIPE escaped as an uncaught exception');
 });
 
 test('runAcpHarness: a successful run resolves and kills the agent itself (ACP agents never exit on their own)', async () => {

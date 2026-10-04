@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { runAcpHarness } from '../extensions/acp-runner.ts';
 import { claudeHarness } from '../extensions/harnesses/claude.ts';
@@ -15,8 +15,13 @@ function nodeHarness(base: Harness, script: string): Harness {
   return { ...base, binary: process.execPath, buildArgs: () => ['-e', script] };
 }
 
+/** A marker file inside its own fresh `mkdtemp` dir — unique by construction; remove with `rmMarker`. */
 function markerPath(): string {
-  return join(tmpdir(), `runner-test-${Date.now()}-${Math.random().toString(36).slice(2)}.marker`);
+  return join(mkdtempSync(join(tmpdir(), 'runner-test-')), 'pid.marker');
+}
+
+function rmMarker(path: string): void {
+  rmSync(dirname(path), { recursive: true, force: true });
 }
 
 const RESULT_LINE = JSON.stringify({ type: 'result', result: 'done', total_cost_usd: 0.01, num_turns: 1 });
@@ -104,7 +109,7 @@ test('runHarness: the timeout kills a hung child and rejects with the timeout me
     );
     assert.ok(await waitForProcessExit(await readPid(pidFile)), 'child must be killed on timeout');
   } finally {
-    rmSync(pidFile, { force: true });
+    rmMarker(pidFile);
   }
 });
 
@@ -125,7 +130,7 @@ test('runHarness: aborting the signal mid-run kills the child and rejects as can
     await assert.rejects(run, /cancelled/);
     assert.ok(await waitForProcessExit(pid), 'child must be killed on abort');
   } finally {
-    rmSync(pidFile, { force: true });
+    rmMarker(pidFile);
   }
 });
 

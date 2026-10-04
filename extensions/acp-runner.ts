@@ -128,6 +128,9 @@ interface PendingRequest {
 export interface AcpRunnerInternals {
   /** Overrides `HANDSHAKE_TIMEOUT_MS` so a hung-handshake test doesn't take 30s. */
   handshakeTimeoutMs?: number;
+  /** Replaces `child_process.spawn`, so a test can inject a stdin 'error' (EPIPE) deterministically —
+   *  bun never emits one for a real closed pipe, which left the stdin error guard untestable. */
+  spawn?: typeof spawn;
 }
 
 export function runAcpHarness(opts: RunHarnessOptions, internals: AcpRunnerInternals = {}): Promise<HarnessResult> {
@@ -150,7 +153,10 @@ export function runAcpHarness(opts: RunHarnessOptions, internals: AcpRunnerInter
       resumeSessionId: opts.resumeSessionId,
     });
 
-    const proc = spawn(opts.harness.binary, args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    const proc = (internals.spawn ?? spawn)(opts.harness.binary, args, {
+      cwd: opts.cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     // A write to a child that already exited surfaces as an async EPIPE 'error' on stdin — not as a
     // throw from write() (writeLine's try/catch can't see it). Unhandled, that event would crash the
     // host process; the run itself already ends through the 'close'/timeout/abort paths.
