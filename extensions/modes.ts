@@ -25,9 +25,17 @@ export const MODE_TEXT_LIMITS = { name: 64, description: 240, model: 64, warning
 // ANSI CSI / OSC / two-byte escape sequences.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping terminal escapes is the point
 const ANSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-Z\\-_]/g;
-// C0/C1 controls, DEL, zero-width and bidi-override/isolate characters, line/paragraph separators.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point
-const UNSAFE_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g;
+// C0/C1 controls, DEL, soft hyphen, zero-width and bidi-override/isolate characters (incl. the
+// Arabic letter mark and Mongolian vowel separator), line/paragraph separators, BOM, interlinear
+// annotation anchors, variation selectors, and Unicode tag characters (U+E0000–E007F — invisible
+// "ASCII smuggling" text a model still reads).
+const UNSAFE_CHARS_RE = new RegExp(
+  [
+    '[\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u206f',
+    '\\ufe00-\\ufe0f\\ufeff\\ufff9-\\ufffb]|[\\u{e0000}-\\u{e007f}\\u{e0100}-\\u{e01ef}]',
+  ].join(''),
+  'gu',
+);
 
 /**
  * Make template-authored text safe to show to a model or a terminal: ANSI escapes removed, control /
@@ -36,7 +44,9 @@ const UNSAFE_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u
  */
 export function sanitizeTemplateText(text: string, max: number): string {
   const clean = text.replace(ANSI_RE, '').replace(UNSAFE_CHARS_RE, ' ').replace(/\s+/g, ' ').trim();
-  return clean.length > max ? `${clean.slice(0, Math.max(0, max - 1))}…` : clean;
+  // cap by code point, so the cut never leaves half a surrogate pair behind
+  const chars = Array.from(clean);
+  return chars.length > max ? `${chars.slice(0, Math.max(0, max - 1)).join('')}…` : clean;
 }
 
 /**
@@ -237,7 +247,7 @@ export function formatModesForModel(
   );
   for (const m of report.modes) {
     lines.push('');
-    lines.push(`- mode: ${m.name}`);
+    lines.push(`- mode: ${JSON.stringify(m.name)}`);
     lines.push(`  permission: ${formatTiers(m.availability, true)}`);
     const extras = [
       `default task: ${m.hasDefaultTask ? 'yes (task may be omitted)' : 'no'}`,
