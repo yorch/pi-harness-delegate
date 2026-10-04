@@ -33,8 +33,9 @@ import {
   parseDelegateCommand,
   resolveDefaults,
   resolveHarnessFilter,
+  templateHarnessDefault,
 } from './command.ts';
-import { loadConfig } from './config.ts';
+import { type DelegateConfig, loadConfig } from './config.ts';
 import {
   type DelegateToolParams,
   delegate,
@@ -127,6 +128,21 @@ function textOf(content: readonly (TextContent | ImageContent)[] | undefined): s
 export default function (pi: ExtensionAPI) {
   const ui: RunUiState = { activeRunId: 0, activeOverlay: null };
 
+  /**
+   * The template a run with no explicit harness would use for `mode` — looked up in the config
+   * default harness's view, the same one the run would otherwise get — so its `harnesses:` default
+   * can be honored. Project-local templates only when pi's trust store trusts the project, exactly
+   * as for the run itself.
+   */
+  const templateForDefaults = (
+    ctx: ExtensionContext,
+    config: DelegateConfig,
+    mode: string | undefined,
+  ): DelegateTemplate | undefined =>
+    loadTemplates(ctx.cwd, resolveHarnessName(config.defaultHarness), isProjectTrusted(ctx)).get(
+      mode || config.defaultMode,
+    );
+
   // ── Tools ────────────────────────────────────────────────────────────────
 
   /**
@@ -152,10 +168,20 @@ export default function (pi: ExtensionAPI) {
       // A non-empty spec that normalizes to nothing (`,`, `" , "`) is refused rather than silently run
       // on the default harness (`""` stays "unset", the way a model omitting the field means it).
       const harnessSpec = spec.forceHarness ?? rawParams.harness;
-      const harness = harnessSpec === undefined ? undefined : normalizeHarnessSpec(harnessSpec);
+      let harness = harnessSpec === undefined ? undefined : normalizeHarnessSpec(harnessSpec);
       if (harnessSpec && harness === undefined) throw new Error(emptyHarnessSpecError(harnessSpec));
-      const params: DelegateToolParams = { ...rawParams, harness };
       const config = loadConfig();
+      // No harness given: the mode's template may name a default (`harnesses:`). The tool takes only
+      // its first known harness — a template never turns the model's single call into a fan-out (see
+      // templateHarnessDefault). Resolved before the confirm gates so they name what will run.
+      let templateHarnessNote = '';
+      if (harness === undefined) {
+        const declared = templateForDefaults(ctx, config, rawParams.mode)?.harnesses;
+        harness = templateHarnessDefault(declared, { single: true, isKnown: isKnownHarness });
+        if (declared && declared.length > 1 && harness)
+          templateHarnessNote = `template "${rawParams.mode || config.defaultMode}" defaults to harnesses ${declared.join(', ')}; the delegate tool runs only ${harness} — pass harness: "${declared.join(',')}" to fan out.\n`;
+      }
+      const params: DelegateToolParams = { ...rawParams, harness };
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
       if (params.allowDangerous === true) await confirmDangerousToolCall(ctx, params);
@@ -195,7 +221,7 @@ export default function (pi: ExtensionAPI) {
       const footer = summary.truncated ? `\nFull output: ${details.file}` : `\nTranscript: ${details.file}`;
       details.markdown = summary.text;
       return {
-        content: [{ type: 'text', text: `${head}${body}${footer}` }],
+        content: [{ type: 'text', text: `${templateHarnessNote}${head}${body}${footer}` }],
         details,
         usage: result.usage ? mapClaudeUsage({ ...result.usage, totalCostUsd: result.totalCostUsd }) : undefined,
       };
@@ -522,6 +548,17 @@ export default function (pi: ExtensionAPI) {
       const msg = parsed.notices.join('\n');
       if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
       else process.stderr.write(`${msg}\n`);
+    }
+
+    // No harness given (and no alias command): the mode's template may name default harness(es).
+    // Several make this a fan-out through the normal path below — same detection filtering,
+    // reporting, slot queueing and single --allow-dangerous confirm as a typed list.
+    if (!parsed.harness) {
+      const config = loadConfig();
+      parsed.harness = templateHarnessDefault(templateForDefaults(ctx, config, parsed.mode)?.harnesses, {
+        single: false,
+        isKnown: isKnownHarness,
+      });
     }
 
     // fan-out: harness field is `all` or a comma list — resolve to detected harnesses and run

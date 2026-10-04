@@ -1,0 +1,262 @@
+import assert from 'node:assert/strict';
+import { dirname } from 'node:path';
+import { test } from 'node:test';
+import { templateHarnessDefault } from '../extensions/command.ts';
+import { isKnownHarness } from '../extensions/harnesses/registry.ts';
+import { parseTemplate, parseTemplateHarnesses } from '../extensions/templates.ts';
+import {
+  CLAUDE_RESULT,
+  CODEX_RESULT_LINES,
+  loadExtension,
+  readArgs,
+  tpl,
+  uiCtx,
+  withFakeBinaries,
+  withSandbox,
+} from './helpers/sandbox.ts';
+
+const OUTPUT = [CLAUDE_RESULT, ...CODEX_RESULT_LINES];
+
+/** A delegated run (not a `--version` detection probe) reached this fake binary. */
+function ran(argsFile: string, name: string): boolean {
+  const argv = readArgs(`${argsFile}.${name}`);
+  return argv !== null && !(argv.length === 1 && argv[0] === '--version');
+}
+
+/** Restrict PATH to the fake binaries plus the system dirs, so no real harness is detected. */
+async function withOnlyFakes<T>(argsFile: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.PATH;
+  process.env.PATH = `${dirname(argsFile)}:/usr/bin:/bin`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = prev;
+  }
+}
+
+test('parseTemplateHarnesses: lowercased, deduped; `all` and non-name entries are dropped with a warning', () => {
+  assert.deepEqual(parseTemplateHarnesses(undefined), { harnesses: undefined, warnings: [] });
+  assert.deepEqual(parseTemplateHarnesses('Codex, claude,codex , '), { harnesses: ['codex', 'claude'], warnings: [] });
+  // unknown-but-well-formed names are kept — the run-time fan-out reporting names them
+  assert.deepEqual(parseTemplateHarnesses('nope').harnesses, ['nope']);
+  const r = parseTemplateHarnesses('all, claude, --yolo, a b, \u001b[31mx');
+  assert.deepEqual(r.harnesses, ['claude']);
+  assert.equal(r.warnings.length, 4);
+  assert.match(r.warnings[0], /"all" ignored — name the harnesses explicitly/);
+  assert.match(r.warnings[1], /entry "--yolo" ignored/);
+  assert.ok(r.warnings.every(w => !w.includes('\u001b')));
+  const t = parseTemplate(tpl('fan', 'readonly', 'harnesses: all'));
+  assert.equal(t?.harnesses, undefined);
+  assert.equal(t?.permission, 'readonly', 'a harnesses: problem never touches the tier');
+  assert.match(t?.fieldWarnings?.[0] ?? '', /"all" ignored/);
+});
+
+test('templateHarnessDefault: the command gets the whole list, the tool only the first known harness', () => {
+  const opts = { isKnown: isKnownHarness };
+  assert.equal(templateHarnessDefault(undefined, { ...opts, single: false }), undefined);
+  assert.equal(templateHarnessDefault([], { ...opts, single: true }), undefined);
+  assert.equal(templateHarnessDefault(['codex', 'claude'], { ...opts, single: false }), 'codex,claude');
+  assert.equal(templateHarnessDefault(['omp'], { ...opts, single: false }), 'amp');
+  assert.equal(templateHarnessDefault(['nope', 'omp', 'claude'], { ...opts, single: true }), 'amp');
+  // all unknown: the first entry, so the run fails with the usual unknown-harness error
+  assert.equal(templateHarnessDefault(['nope', 'zilch'], { ...opts, single: true }), 'nope');
+});
+
+test('/delegate: a template harnesses list fans out when no harness is given, reporting unknown/uninstalled', async () => {
+  await withSandbox(
+    { templates: { fan: tpl('fan', 'readonly', 'harnesses: claude, codex, amp, nope') } },
+    async ({ cwd }) => {
+      const { takePendingReport } = await import('../extensions/engine.ts');
+      await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const { ctx } = uiCtx(cwd, true);
+          await commands.get('delegate')?.handler('fan check things', ctx);
+          assert.ok(ran(argsFile, 'claude'));
+          assert.ok(ran(argsFile, 'codex'));
+          const report = takePendingReport();
+          assert.ok(report);
+          assert.match(report.content, /2\/2 ok/);
+          assert.match(report.content, /nope/, 'unknown name reported');
+          assert.match(report.content, /amp/, 'uninstalled harness reported as skipped');
+        });
+      });
+    },
+  );
+});
+
+test('/delegate: an explicit harness (flag, first word, alias command) ignores the template default', async () => {
+  await withSandbox({ templates: { fan: tpl('fan', 'readonly', 'harnesses: codex, claude') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      const { rmSync } = await import('node:fs');
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      for (const [cmd, args] of [
+        ['delegate', 'claude fan check'],
+        ['delegate', '--harness=claude fan check'],
+        ['claude', 'fan check'],
+      ] as const) {
+        rmSync(`${argsFile}.claude`, { force: true });
+        rmSync(`${argsFile}.codex`, { force: true });
+        const { ctx, notes } = uiCtx(cwd, true);
+        await commands.get(cmd)?.handler(args, ctx);
+        assert.ok(ran(argsFile, 'claude'), `${cmd} ${args}: ${notes.join(' | ')}`);
+        assert.equal(readArgs(`${argsFile}.codex`), null, `${cmd} ${args}: codex never probed or run`);
+      }
+    });
+  });
+});
+
+test('/delegate: a template fan-out keeps the --allow-dangerous gate — one confirm naming every harness, headless refused', async () => {
+  await withSandbox({ templates: { fan: tpl('fan', 'edit', 'harnesses: claude, codex') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      await withOnlyFakes(argsFile, async () => {
+        const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const declined = uiCtx(cwd, false);
+        await commands.get('delegate')?.handler('fan --allow-dangerous do it', declined.ctx);
+        assert.equal(declined.asked.length, 1);
+        assert.match(declined.asked[0], /all 2 harnesses \(claude, codex\)/);
+        assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'), 'a decline runs nothing');
+
+        const errs: string[] = [];
+        const orig = process.stderr.write.bind(process.stderr);
+        process.stderr.write = ((c: string | Uint8Array) => {
+          errs.push(String(c));
+          return true;
+        }) as typeof process.stderr.write;
+        try {
+          await commands
+            .get('delegate')
+            ?.handler('fan --allow-dangerous do it', { cwd, hasUI: false, isProjectTrusted: () => true });
+        } finally {
+          process.stderr.write = orig;
+        }
+        assert.match(errs.join(''), /needs interactive confirmation, but there is no UI/);
+        assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'), 'headless runs nothing');
+
+        const approved = uiCtx(cwd, true);
+        await commands.get('delegate')?.handler('fan --allow-dangerous do it', approved.ctx);
+        assert.equal(approved.asked.length, 1, 'one confirm covers the whole template fan-out');
+        assert.ok(readArgs(`${argsFile}.claude`)?.includes('bypassPermissions'));
+        assert.ok(readArgs(`${argsFile}.codex`)?.includes('danger-full-access'));
+      });
+    });
+  });
+});
+
+test('/delegate: --resume with a template fan-out default is rejected, never resumed across harnesses', async () => {
+  await withSandbox({ templates: { fan: tpl('fan', 'readonly', 'harnesses: claude, codex') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const { ctx, notes } = uiCtx(cwd, true);
+      await commands.get('delegate')?.handler('fan --resume=abc continue', ctx);
+      assert.ok(
+        notes.some(n => /across a fan-out/.test(n)),
+        notes.join(' | '),
+      );
+      assert.equal(readArgs(`${argsFile}.claude`), null);
+      assert.equal(readArgs(`${argsFile}.codex`), null);
+    });
+  });
+});
+
+test('delegate tool: a template harnesses list picks only its first known harness — a single run, with a note', async () => {
+  await withSandbox(
+    { templates: { fan: tpl('fan', 'readonly', 'harnesses: nope, codex, claude') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+        const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const res = (await tools.get('delegate')?.execute('t', { mode: 'fan', task: 'x' }, undefined, undefined, {
+          cwd,
+          hasUI: false,
+          isProjectTrusted: () => true,
+        })) as { content: { text: string }[]; details: Record<string, unknown> };
+        assert.ok(ran(argsFile, 'codex'));
+        assert.equal(readArgs(`${argsFile}.claude`), null, 'no fan-out: claude neither probed nor run');
+        assert.equal(res.details.harness, 'codex');
+        assert.equal(res.details.fanout, undefined);
+        assert.match(
+          res.content[0].text,
+          /defaults to harnesses nope, codex, claude; the delegate tool runs only codex/,
+        );
+      });
+    },
+  );
+});
+
+test('delegate tool: the allowDangerous confirm names the template-chosen harness', async () => {
+  await withSandbox({ templates: { fan: tpl('fan', 'edit', 'harnesses: codex') } }, async ({ cwd }) => {
+    const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const { ctx, asked } = uiCtx(cwd, false);
+    await assert.rejects(
+      () =>
+        tools
+          .get('delegate')
+          ?.execute('t', { mode: 'fan', task: 'x', allowDangerous: true }, undefined, undefined, ctx) ??
+        Promise.resolve(),
+      /declined/,
+    );
+    assert.equal(asked.length, 1);
+    assert.match(asked[0], /run codex fan with DANGER/);
+  });
+});
+
+test('delegate tool: single-run fail-fast at capacity is unchanged, explicit or template-chosen harness', async () => {
+  await withSandbox(
+    { settings: { maxConcurrent: 1 }, templates: { fan: tpl('fan', 'readonly', 'harnesses: claude, codex') } },
+    async ({ cwd }) => {
+      const { acquireSlot } = await import('../extensions/concurrency.ts');
+      const { loadConfig } = await import('../extensions/config.ts');
+      const { tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const release = await acquireSlot({ harness: 'claude', mode: 'held', config: loadConfig(), wait: false });
+      try {
+        for (const params of [
+          { harness: 'claude', mode: 'fan', task: 'x' },
+          { mode: 'fan', task: 'x' },
+        ]) {
+          const signal = AbortSignal.timeout(2000);
+          await assert.rejects(
+            () =>
+              tools.get('delegate')?.execute('t', params, signal, undefined, {
+                cwd,
+                hasUI: false,
+                isProjectTrusted: () => true,
+              }) ?? Promise.resolve(),
+            /already in progress|claimed the last available slot/,
+          );
+          assert.equal(signal.aborted, false, `${JSON.stringify(params)}: rejected immediately, not queued`);
+        }
+      } finally {
+        release();
+      }
+    },
+  );
+});
+
+test('an untrusted project template cannot pick the harness — its harnesses: is never read', async () => {
+  // the project overrides the builtin `review` to default to codex; untrusted, the builtin runs on claude
+  await withSandbox({ templates: { review: tpl('review', 'readonly', 'harnesses: codex') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], OUTPUT, async argsFile => {
+      const { rmSync } = await import('node:fs');
+      const { tools, commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      await tools.get('delegate')?.execute('t', { mode: 'review', task: 'x' }, undefined, undefined, {
+        cwd,
+        hasUI: false,
+        isProjectTrusted: () => false,
+      });
+      assert.ok(ran(argsFile, 'claude'));
+      assert.equal(readArgs(`${argsFile}.codex`), null);
+      rmSync(`${argsFile}.claude`, { force: true });
+      const { ctx } = uiCtx(cwd, true, false);
+      await commands.get('delegate')?.handler('review look', ctx);
+      assert.ok(ran(argsFile, 'claude'));
+      assert.equal(readArgs(`${argsFile}.codex`), null);
+      // trusted, the same template does pick codex
+      await tools.get('delegate')?.execute('t', { mode: 'review', task: 'x' }, undefined, undefined, {
+        cwd,
+        hasUI: false,
+        isProjectTrusted: () => true,
+      });
+      assert.ok(ran(argsFile, 'codex'));
+    });
+  });
+});

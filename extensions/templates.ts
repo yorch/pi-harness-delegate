@@ -53,6 +53,14 @@ export interface DelegateTemplate {
    */
   timeoutSec?: number;
   /**
+   * Default harness(es) for this mode (`harnesses: codex` or `harnesses: claude, codex`), used ONLY
+   * when the caller names no harness. Lowercased; well-formed but unknown names are kept so the
+   * existing fan-out reporting (`resolveHarnessList`) names them. Never widens permission. The
+   * `/delegate` command runs the whole list (a fan-out when it has several); the `delegate` tool runs
+   * only the first known one — see `templateHarnessDefault` (command.ts).
+   */
+  harnesses?: string[];
+  /**
    * Non-permission frontmatter problems (an invalid `timeout:`, a rejected `harnesses:` entry):
    * the value was ignored and the default applies. Shown in `/delegate list`, `delegate_modes` and
    * at run time — never silently dropped.
@@ -63,6 +71,32 @@ export interface DelegateTemplate {
 /** Bounds for a template's `timeout:` (seconds). A template can never raise a run past the max. */
 export const TEMPLATE_TIMEOUT_MIN_SEC = 10;
 export const TEMPLATE_TIMEOUT_MAX_SEC = 7200;
+
+const HARNESS_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/**
+ * `harnesses:` frontmatter → a deduped, lowercased list. `all` is refused (a template must name
+ * its harnesses — `all` would silently fan out, and multiply spend, to whatever happens to be
+ * installed) and so is anything that isn't a plain harness-shaped word; both are reported as
+ * warnings and dropped. Unknown-but-well-formed names are kept for the run-time reporting.
+ */
+export function parseTemplateHarnesses(raw: string | undefined): { harnesses?: string[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const out: string[] = [];
+  for (const item of parseList(raw) ?? []) {
+    const name = item.toLowerCase();
+    if (name === 'all') {
+      warnings.push('harnesses: "all" ignored — name the harnesses explicitly');
+      continue;
+    }
+    if (!HARNESS_NAME_RE.test(name)) {
+      warnings.push(`harnesses: entry ${quoteValue(item)} ignored — not a harness name`);
+      continue;
+    }
+    if (!out.includes(name)) out.push(name);
+  }
+  return { harnesses: out.length > 0 ? out : undefined, warnings };
+}
 
 /** `timeout:` frontmatter → seconds, or a warning (value ignored) when it isn't a bounded integer. */
 export function parseTemplateTimeout(raw: string | undefined): { timeoutSec?: number; warning?: string } {
@@ -399,6 +433,8 @@ export function parseTemplate(text: string): DelegateTemplate | null {
   const fieldWarnings: string[] = [];
   const timeout = parseTemplateTimeout(meta.timeout);
   if (timeout.warning) fieldWarnings.push(timeout.warning);
+  const harnesses = parseTemplateHarnesses(meta.harnesses);
+  fieldWarnings.push(...harnesses.warnings);
 
   return {
     name,
@@ -421,6 +457,7 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     prompt: m[2].trim(),
     harness: meta.harness || undefined,
     timeoutSec: timeout.timeoutSec,
+    harnesses: harnesses.harnesses,
     fieldWarnings: fieldWarnings.length > 0 ? fieldWarnings : undefined,
   };
 }
