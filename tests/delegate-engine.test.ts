@@ -1397,3 +1397,60 @@ test('delegate: an unrecognized legacy `sandbox:` value fails closed to readonly
     });
   });
 });
+
+test('delegate: a template permission warning is surfaced at run time — content, transcript, notify', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeCodexTemplate(cwd, 'typo', 'sandbox: workspace-wrte\nverify: touch pwned');
+    const { delegate } = await import('../extensions/engine.ts');
+    const pi = fakePi(async () => {
+      throw new Error('pi.exec must not be reached');
+    });
+    const notes: [string, string][] = [];
+    const ctx = {
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: { notify: (msg: string, level: string) => notes.push([msg, level]) },
+    } as never;
+    const want = '⚠ template "typo": unrecognized sandbox: "workspace-wrte" — loaded as readonly (fail closed)';
+    await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async () => {
+      const run = await delegate(pi, ctx, { harness: 'codex', mode: 'typo', task: 'x' });
+      assert.equal(run.details.permission, 'readonly');
+      assert.ok(run.content.startsWith(`${want}\n\n`), run.content);
+      assert.ok(run.content.endsWith('all good'), run.content);
+      assert.deepEqual(notes, [[want, 'warning']]);
+      assert.match(String(run.details.permissionWarning), /unrecognized sandbox/);
+      const transcript = readFileSync(String(run.details.file), 'utf8');
+      assert.ok(transcript.includes(`\n- warning: ${want}\n`), transcript);
+    });
+  });
+});
+
+test('delegate: headless, the permission warning goes to stderr; a clean template adds nothing', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    writeCodexTemplate(cwd, 'typo', 'permissionMode: nope');
+    writeCodexTemplate(cwd, 'clean', 'sandbox: read-only');
+    const { delegate } = await import('../extensions/engine.ts');
+    const pi = fakePi(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const written: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await withFakeBinaries(['codex'], CODEX_RESULT_LINES, async () => {
+        const bad = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'typo', task: 'x' });
+        assert.match(bad.content, /^⚠ template "typo": unrecognized permissionMode: "nope"/);
+        const clean = await delegate(pi, fakeCtx(cwd), { harness: 'codex', mode: 'clean', task: 'x' });
+        assert.equal(clean.content, 'all good');
+        assert.equal(clean.details.permissionWarning, null);
+        assert.doesNotMatch(readFileSync(String(clean.details.file), 'utf8'), /- warning:/);
+      });
+    } finally {
+      process.stderr.write = orig;
+    }
+    assert.equal(written.filter(w => w.includes('⚠ template')).length, 1);
+    assert.match(written.join(''), /⚠ template "typo": unrecognized permissionMode: "nope"/);
+  });
+});
