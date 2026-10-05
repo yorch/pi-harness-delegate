@@ -65,6 +65,7 @@ export interface CleanupProcess {
   on(event: string, listener: (signal: NodeJS.Signals) => void): unknown;
   off(event: string, listener: (signal: NodeJS.Signals) => void): unknown;
   kill(pid: number, signal: NodeJS.Signals): unknown;
+  listenerCount(event: string): number;
 }
 
 /**
@@ -73,6 +74,13 @@ export interface CleanupProcess {
  * below hits the default disposition instead of looping back here), then re-raises the same signal so
  * the process still dies by it — Ctrl-C is never swallowed and the exit status stays the conventional
  * 128+n. Cleanup runs at most once however many of these fire.
+ *
+ * Only when ours is the *sole* listener for that signal, though. Any other listener (another module's
+ * `process.on('SIGINT', …)`) means the signal no longer kills the process by default — the re-raise
+ * would only reach that listener, the run would carry on, and the pinned dir would already be gone
+ * while `PI_CODING_AGENT_DIR` still points at it. So then the signal handler does nothing, and the
+ * `'exit'` handler cleans up whenever the process does end (or a leftover dir stays under
+ * `os.tmpdir()` if that listener kills it by a signal — harmless).
  */
 export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = process): void {
   let done = false;
@@ -86,6 +94,7 @@ export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = pro
     for (const sig of CLEANUP_SIGNALS) proc.off(sig, onSignal);
   };
   function onSignal(sig: NodeJS.Signals): void {
+    if (proc.listenerCount(sig) > 1) return; // someone else handles this signal — leave it to 'exit'
     cleanup();
     detach();
     proc.kill(proc.pid, sig);

@@ -222,6 +222,36 @@ test('live swap: the same shape with an async withEnv does leave the process unp
   }
 });
 
+/** Child test body: installs its own SIGINT listener, prints its pinned dir, waits for a SIGINT, then
+ *  reports whether the pinned dir still exists — the run must carry on with a usable agent dir. */
+const OWN_SIGINT_LISTENER =
+  "test('child', { timeout: 120_000 }, async () => { const { existsSync } = await import('node:fs'); " +
+  "let got = false; process.on('SIGINT', () => { got = true; }); " +
+  "console.log('PINNED=' + process.env.PI_CODING_AGENT_DIR); " +
+  'while (!got) await new Promise(r => setTimeout(r, 20)); ' +
+  "console.log('AFTER_SIGINT_EXISTS=' + existsSync(process.env.PI_CODING_AGENT_DIR)); });";
+
+test('preload: with a second SIGINT listener, SIGINT leaves the pinned dir for the ongoing run; exit removes it', {
+  timeout: 60_000,
+}, async () => {
+  const run = startChildBunTest(OWN_SIGINT_LISTENER, childEnv({}, ['PI_DELEGATE_LIVE']));
+  try {
+    const pinned = await waitFor(() => /PINNED=(.*)\n/.exec(run.output())?.[1]?.trim(), {
+      timeoutMs: 30_000,
+      label: 'the child to print its pinned dir',
+    });
+    run.child.kill('SIGINT');
+    const { code, signal } = await run.exited;
+    assert.equal(signal, null, run.output());
+    assert.equal(code, 0, run.output());
+    assert.match(run.output(), /AFTER_SIGINT_EXISTS=true/, 'the dir must survive a SIGINT the run handles itself');
+    assert.equal(existsSync(pinned), false, 'removed by the exit handler once the run ends');
+  } finally {
+    run.child.kill('SIGKILL');
+    run.cleanup();
+  }
+});
+
 /** A fake `process` recording listeners and re-raised signals. */
 function fakeProcess() {
   const listeners = new Map<string, Array<(signal: NodeJS.Signals) => void>>();
@@ -235,6 +265,7 @@ function fakeProcess() {
         (listeners.get(event) ?? []).filter(x => x !== l),
       ),
     kill: (pid, signal) => killed.push([pid, signal]),
+    listenerCount: event => (listeners.get(event) ?? []).length,
   };
   const emit = (event: string, ...args: unknown[]) => {
     for (const l of [...(listeners.get(event) ?? [])]) (l as (...a: unknown[]) => void)(...args);
@@ -263,6 +294,40 @@ test('preload cleanup: a signal removes the captured dir once, detaches every ha
     rmSync(dir, { recursive: true, force: true });
     rmSync(other, { recursive: true, force: true });
   }
+});
+
+test('preload cleanup: with another listener for the signal, it leaves cleanup to exit (no remove, no re-raise)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-shared-'));
+  const { proc, listeners, killed, emit } = fakeProcess();
+  try {
+    registerPinnedDirCleanup(dir, proc);
+    const other = () => {};
+    proc.on('SIGINT', other); // e.g. another module's own Ctrl-C handling
+    emit('SIGINT', 'SIGINT');
+    assert.equal(existsSync(dir), true, 'the run carries on, so the pinned dir must still exist');
+    assert.deepEqual(killed, [], 'no re-raise — it would only reach the other listener');
+    for (const ev of ['exit', ...CLEANUP_SIGNALS])
+      assert.ok((listeners.get(ev)?.length ?? 0) >= 1, `${ev} still attached`);
+    // once that listener is gone, a signal is ours alone again and does the full cleanup + re-raise
+    proc.off('SIGINT', other);
+    emit('SIGINT', 'SIGINT');
+    assert.equal(existsSync(dir), false);
+    assert.deepEqual(killed, [[4242, 'SIGINT']]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('preload cleanup: an exit after a shared signal still removes the dir', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-shared-exit-'));
+  const { proc, killed, emit } = fakeProcess();
+  registerPinnedDirCleanup(dir, proc);
+  proc.on('SIGTERM', () => {});
+  emit('SIGTERM', 'SIGTERM');
+  assert.equal(existsSync(dir), true);
+  emit('exit', 0);
+  assert.equal(existsSync(dir), false);
+  assert.deepEqual(killed, []);
 });
 
 test("preload cleanup: 'exit' removes the dir without re-raising anything", () => {

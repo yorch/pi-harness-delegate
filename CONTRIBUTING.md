@@ -53,7 +53,8 @@ throwaway manual session.
 As a safety net, `bun test` preloads `tests/helpers/preload.ts` (wired in `bunfig.toml`), which pins
 `PI_CODING_AGENT_DIR` to a fresh `mkdtemp` dir under `os.tmpdir()` for the whole test process — overriding any
 outer value — and removes it on exit and on SIGINT/SIGTERM/SIGHUP (re-raised afterwards, so Ctrl-C still stops
-the run with the usual status). A test that sets its own via `withEnv`/`withSandbox` is restored to that pinned
+the run with the usual status; if some other code also listens for that signal, the run isn't killed by it, so the
+dir is left for the exit handler instead). A test that sets its own via `withEnv`/`withSandbox` is restored to that pinned
 dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. `bunfig.toml` and
 `tests/` are not in `package.json` `files`, so none of this ships.
 
