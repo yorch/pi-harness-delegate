@@ -19,7 +19,7 @@ import {
 import { waitFor } from './helpers/wait.ts';
 
 // The preload (tests/helpers/preload.ts, wired in bunfig.toml) pins PI_CODING_AGENT_DIR to a temp dir for
-// the whole `bun test` process — live mode included (tests/live.test.ts un-pins only around its own runs).
+// the whole `bun test` process — live mode included (tests/live.test.ts hands only its spawned harness CLIs the outer value).
 
 /** The preload's state, failing loudly (not skipping) when bun never ran it. */
 function requirePreload() {
