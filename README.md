@@ -273,6 +273,32 @@ A per-run cap, resolved call → template → global config → per-harness conf
 - **Host-enforced (best-effort)** — harnesses with no budget flag that *do* stream a running cost (`opencode`, `amp`/`omp`, and `opencode` over ACP): the host checks the reported total each time the harness reports one and kills the run once it's over the cap, recording `budget exceeded` (`stopReason: budget_exceeded`, a `⛔ budget exceeded … run stopped` line at the top of the result, `(host-enforced, best-effort)` in the transcript). This is **not a hard cap**: cost is only visible at the step/turn boundaries the harness reports, so spend already incurred within the step that crossed the line can't be prevented — a run can overshoot by up to one step/turn (more if a single step is expensive). Use a native-budget harness (`claude`) when the cap must be strict. For `opencode` over ACP the reported cost is a session running total, so on a resumed session only the spend since this run started counts against the cap, and the reported cost is just this run's share — or `—` (unmeasured) when the session didn't report its prior total before the new prompt, rather than an under-count.
 - **Not enforceable** — `codex` (no `$` cost on ChatGPT-plan auth) and `devin` report no cost and have no flag, so a budget can't be applied; the run proceeds and the result starts with `⚠ maxBudgetUsd … was not enforced`, never silently.
 
+## Run records
+
+Every run (each member of a fan-out too, and a run that died after streaming output) writes a small JSON **sidecar** next to its transcript: `<transcript basename>.json`, mode `0600` in a `0700` directory. It is what `/delegate history` filters, `/delegate rerun` and fan-out resume read. Pruning (`maxTranscripts`) removes a transcript's sidecar with it, and orphaned sidecars are cleaned up too.
+
+```jsonc
+{
+  "version": 1,
+  "runId": "run_<16 hex>",          // random, unique
+  "fanoutId": "fan_<16 hex>" | null, // shared by every member of one fan-out
+  "harness": "claude", "mode": "review",
+  "permission": "readonly|edit|danger", "nativePermission": null, "nativeClass": "none|safe|danger|unlisted",
+  "model": null,                    // the model the harness actually ran, when known
+  "sessionId": null, "resumed": false,
+  "startedAt": "ISO", "endedAt": "ISO", "durationMs": 1234,
+  "isError": false, "partial": false, "stopReason": null,
+  "budget": { "limitUsd": 1, "enforcement": "native|host|unenforced", "exceeded": false } | null,
+  "timeoutMs": 600000,
+  "numTurns": null, "totalCostUsd": null, "usage": null,   // null = unmeasured, never 0
+  "transcript": "<file name only>", "cwd": "/abs/project",
+  "input": { "task": "…", "taskTruncated": false, "scope": null, "pr": null, "addDirs": [],
+             "model": null, "budgetUsd": null, "timeoutSec": null, "hadVerify": false }
+}
+```
+
+What is **never** stored: the `verify` command text (only `hadVerify`), `allowDangerous`, environment variables, secrets. `task` is capped at 20,000 characters and `scope` at 4,000 (a truncated task is flagged and is not rerunnable). Records are treated as untrusted data on read: a garbled file or an unknown `version` is skipped with a reason, never a crash; everything echoed to the terminal is sanitized; anything that reaches a command line is re-validated before use. Transcripts written before run records existed have no sidecar and still work everywhere (their metadata is parsed from the transcript header).
+
 ## Metrics recorded
 
 Every run records in details + transcript: harness, mode, permission (normalized + native), cost, tokens (input/output/cache), context% (prompt ÷ window), model, turns, duration, TTFT, stop reason, session id. Token + cost feed pi's `Usage`.

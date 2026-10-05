@@ -42,6 +42,7 @@ import {
   nativePermissionTier,
 } from './harnesses/registry.ts';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
+import { buildRunRecord, newRunId, type RunRecord, writeRunRecord } from './run-record.ts';
 import { runHarness } from './runner.ts';
 import {
   callTimeoutError,
@@ -98,6 +99,8 @@ export interface DelegateOptions {
   /** Called once this run has acquired its concurrency slot and is about to actually start —
    *  fan-out uses it to flip a row from "queued" to "running". */
   onAcquired?: () => void;
+  /** Shared by every member of one fan-out, recorded in each member's run record (null/absent for a single run). */
+  fanoutId?: string;
 }
 
 /** Verify commands run on the host after the harness exits — bounded independent of harness timeoutMs. */
@@ -482,11 +485,48 @@ export async function delegate(
   const activityEvents: ActivityEvent[] = [];
   let streamedFull = '';
   let result: import('./runner.ts').HarnessResult;
+  const runId = newRunId();
+  let startedAtMs = Date.now();
+  // Run record sidecar (run-record.ts): everything needed to list/re-run this run — never the verify
+  // command text, allowDangerous, env or secrets. Best-effort: a record that can't be written never fails a run.
+  const recordSource = (
+    file: string,
+    extra: Pick<
+      Parameters<typeof buildRunRecord>[0],
+      'model' | 'sessionId' | 'durationMs' | 'isError' | 'stopReason' | 'numTurns' | 'totalCostUsd' | 'usage'
+    > &
+      Partial<Pick<Parameters<typeof buildRunRecord>[0], 'partial' | 'budget'>>,
+  ): RunRecord =>
+    buildRunRecord({
+      runId,
+      fanoutId: opts.fanoutId ?? null,
+      harness: harnessName,
+      mode,
+      permission,
+      nativePermission: nativePerm ?? null,
+      nativeClass: nativeClass,
+      resumed: Boolean(opts.sessionId),
+      startedAtMs,
+      endedAtMs: Date.now(),
+      timeoutMs,
+      transcriptFile: file,
+      cwd: ctx.cwd,
+      task,
+      scope: opts.scope ?? null,
+      pr: opts.pr ?? null,
+      addDirs: opts.addDirs,
+      requestedModel: opts.model ?? null,
+      budgetUsd: opts.maxBudgetUsd ?? null,
+      timeoutSec: opts.timeoutSec ?? null,
+      hadVerify: Boolean(opts.verify ?? template.verify),
+      ...extra,
+    });
   try {
     // A cancel that landed while we were waiting on (or just after winning) the slot — don't
     // spawn anything for a run the caller has already given up on.
     if (opts.signal?.aborted) throw new Error('cancelled');
     opts.onAcquired?.();
+    startedAtMs = Date.now();
 
     let scope: ScopeSection | null = opts.scope
       ? { heading: 'Restrict your work to this scope:', data: opts.scope, kind: 'restriction' }
@@ -536,7 +576,7 @@ export async function delegate(
   } catch (err) {
     if (streamedFull.length > 0) {
       try {
-        saveOutput(
+        const partialFile = saveOutput(
           harnessName,
           `${mode}-partial`,
           buildTranscript({
@@ -562,6 +602,24 @@ export async function delegate(
             timeoutMs,
           }),
         );
+        try {
+          writeRunRecord(
+            partialFile,
+            recordSource(partialFile, {
+              model: model ?? null,
+              sessionId: null,
+              durationMs: null,
+              isError: true,
+              stopReason: null,
+              numTurns: null,
+              totalCostUsd: null,
+              usage: null,
+              partial: true,
+            }),
+          );
+        } catch (_e) {
+          void _e;
+        }
       } catch (_e) {
         void _e;
       }
@@ -632,6 +690,26 @@ export async function delegate(
       timeoutMs,
     }),
   );
+  try {
+    writeRunRecord(
+      file,
+      recordSource(file, {
+        model: actualModel,
+        sessionId: result.sessionId,
+        durationMs: result.durationMs,
+        isError: result.isError,
+        stopReason: result.stopReason,
+        numTurns: result.numTurns,
+        totalCostUsd: result.totalCostUsd,
+        usage: result.usage,
+        budget: budget
+          ? { limitUsd: budget.limitUsd, enforcement: budget.enforcement, exceeded: budget.exceeded }
+          : null,
+      }),
+    );
+  } catch (_e) {
+    void _e;
+  }
   pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts);
   // also prune legacy if claude
   if (harnessName === 'claude') pruneOutputs(legacyOutputsDir(), config.maxTranscripts);
@@ -640,6 +718,8 @@ export async function delegate(
   return {
     content: [warning, budget?.message, output].filter(Boolean).join('\n\n'),
     details: {
+      runId,
+      fanoutId: opts.fanoutId ?? null,
       harness: harnessName,
       mode,
       permission,

@@ -30,6 +30,7 @@ import {
 import type { ActivityEvent } from './harnesses/types.ts';
 import { NotifyBatcher } from './notify.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
+import { newFanoutId } from './run-record.ts';
 import { loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
 import { confirmDangerousCommand, validateDelegateInputs } from './validate.ts';
@@ -91,6 +92,7 @@ export async function runFanoutTool(
   }
 
   const mode = params.mode ?? config.defaultMode;
+  const fanoutId = newFanoutId();
 
   type TaskResult = FanoutRunSummary & {
     usage?: import('./harnesses/types.ts').StreamedUsage | null;
@@ -116,6 +118,7 @@ export async function runFanoutTool(
           addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
           waitForSlot: true,
+          fanoutId,
           onAcquired: () =>
             onUpdate?.({ content: [{ type: 'text', text: `[${h}] running…` }], details: { progress: 0.5 } }),
         },
@@ -174,7 +177,7 @@ export async function runFanoutTool(
   });
   return {
     content: [{ type: 'text', text: `${head}\n\n${report}` }],
-    details: { fanout: true, harness: 'all', mode, harnesses: resolved, skipped, unknown, runs },
+    details: { fanout: true, fanoutId, harness: 'all', mode, harnesses: resolved, skipped, unknown, runs },
     usage,
   };
 }
@@ -218,6 +221,7 @@ export async function runFanoutConcurrent(
   ctx: ExtensionContext,
   mode: string | undefined,
   specs: FanoutSpec[],
+  fanoutId?: string,
 ): Promise<FanoutOutcome[]> {
   const ac = new AbortController();
   let cancelledAll = false;
@@ -282,6 +286,7 @@ export async function runFanoutConcurrent(
       allowDangerous: spec.allowDangerous === true, // never from config — only a confirmed --allow-dangerous
       signal: ac.signal,
       waitForSlot: true,
+      fanoutId,
       onAcquired: () => setRow({ status: 'running', startedAt: Date.now() }),
       onStream: t => {
         liveTail = (liveTail + t).slice(-200);
@@ -482,7 +487,8 @@ export async function runFanoutCommand(
     }
   }
 
-  const outcomes = specs.length > 0 ? await runFanoutConcurrent(pi, ui, ctx, parsed.mode, specs) : [];
+  const fanoutId = newFanoutId();
+  const outcomes = specs.length > 0 ? await runFanoutConcurrent(pi, ui, ctx, parsed.mode, specs, fanoutId) : [];
   const completed: FanoutRunSummary[] = outcomes.map(outcome => {
     if (outcome.cancelled || !outcome.result) {
       const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
@@ -512,7 +518,10 @@ export async function runFanoutCommand(
     harness: 'all',
     mode: modeForReport,
     metrics: `${okCount}/${runs.length} ok`,
-    body: report,
+    body:
+      specs.length > 0
+        ? `${report}\n\n_fan-out id: ${fanoutId} — resume every member: /delegate --resume=${fanoutId} <prompt>_`
+        : report,
   });
   batcher.flush();
 }

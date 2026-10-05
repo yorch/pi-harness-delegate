@@ -361,6 +361,18 @@ export function pruneOutputs(dir: string, maxCount: number): void {
       // best-effort
     }
   }
+  // Run-record sidecars (`<transcript>.json`, see run-record.ts) go with their transcript. A sidecar
+  // whose transcript is gone (pruned just now, or deleted by hand) is an orphan and is removed too —
+  // the transcript is always written before its sidecar, so a live run never looks orphaned.
+  const kept = new Set(byMtime.slice(0, maxCount).map(({ f }) => f.replace(/\.md$/, '')));
+  for (const f of files) {
+    if (!f.endsWith('.json') || kept.has(f.replace(/\.json$/, ''))) continue;
+    try {
+      rmSync(join(dir, f));
+    } catch {
+      // best-effort
+    }
+  }
 }
 
 /** Human-readable one-liner for a tool call (uses Claude's `description` when present). */
