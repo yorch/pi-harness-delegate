@@ -619,7 +619,7 @@ test('/delegate --allow-dangerous: a confirmed run reaches the engine with dange
         await commands.get(name)?.handler(args, ctx);
         assert.equal(asked.length, 1, `${name}: exactly one confirm`);
         assert.match(unwrap(asked[0]), /claude/);
-        assert.match(unwrap(asked[0]), /full, unrestricted permissions/);
+        assert.match(unwrap(asked[0]), /unrestricted: no sandbox or approvals/);
         const argv = readArgs(argsFile);
         assert.ok(argv?.includes('bypassPermissions'), `${name}: harness ran with danger permission`);
         assert.ok(
@@ -701,7 +701,7 @@ test('/delegate fan-out --allow-dangerous: one confirm for every harness; declin
       const declined = uiCtx(cwd, false);
       await commands.get('delegate')?.handler('claude,codex yolo --allow-dangerous do it', declined.ctx);
       assert.equal(declined.asked.length, 1);
-      assert.match(unwrap(declined.asked[0]), /all 2 harnesses \(claude, codex\)/);
+      assert.match(unwrap(declined.asked[0]), /\[claude, codex\]\/\w+/);
       // detection probed the binaries (`--version`), but no delegated run started
       assert.deepEqual(readArgs(`${argsFile}.claude`), ['--version']);
       assert.deepEqual(readArgs(`${argsFile}.codex`), ['--version']);
@@ -743,7 +743,7 @@ test('delegate tool path is unchanged: its own confirm wording, and no danger wi
         ctx,
       );
       assert.equal(asked.length, 1);
-      assert.match(unwrap(asked[0]), /DANGER: the agent wants to run claude yolo with DANGER permission/);
+      assert.match(unwrap(asked[0]), /DANGER: agent-requested claude\/yolo/);
       assert.ok(readArgs(argsFile)?.includes('bypassPermissions'));
     });
   });

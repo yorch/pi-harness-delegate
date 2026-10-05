@@ -127,13 +127,25 @@ export function effectiveRunLines(
   if (members.length > 1) {
     const keys = [...new Set(members.flatMap(m => m.facts.map(f => f[0])))];
     const at = (m: (typeof members)[number], k: string): string | undefined => m.facts.find(f => f[0] === k)?.[1];
-    const same = (k: string): boolean => members.every(m => at(m, k) !== undefined && at(m, k) === at(members[0], k));
-    const shared = keys.filter(same);
+    // the shared row carries each fact's most common value (when at least two members have it); a member whose own
+    // value differs, or that has a fact the shared value is not, lists it itself
+    const shared = new Map<string, string>();
+    for (const k of keys) {
+      const counts = new Map<string, number>();
+      for (const m of members) {
+        const v = at(m, k);
+        if (v !== undefined) counts.set(v, (counts.get(v) ?? 0) + 1);
+      }
+      const [best, n] = [...counts.entries()].sort((x, y) => y[1] - x[1])[0] ?? ['', 0];
+      if (n >= 2) shared.set(k, best);
+    }
     const out: string[] = [];
-    if (shared.length > 0)
-      out.push(`will apply (all ${members.length}): ${shared.map(k => at(members[0], k)).join(', ')}`);
+    if (shared.size > 0) out.push(`will apply (all ${members.length}): ${[...shared.values()].join(', ')}`);
     for (const m of members) {
-      const own = m.facts.filter(f => !shared.includes(f[0])).map(f => f[1]);
+      const own = m.facts.filter(f => shared.get(f[0]) !== f[1]).map(f => f[1]);
+      // a member that LACKS a shared fact says so (the shared row would otherwise claim it for everyone)
+      const lacks = [...shared.keys()].filter(k => at(m, k) === undefined);
+      if (lacks.length > 0) own.push(`no ${lacks.join(' / ')}`);
       if (own.length > 0) out.push(`will apply (${safeName(m.name)}): ${own.join(', ')}`);
     }
     rows.unshift(...out);

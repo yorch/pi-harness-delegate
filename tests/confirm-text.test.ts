@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
 import {
   describeTextSummary,
   measureText,
@@ -17,6 +16,7 @@ import {
 } from '../extensions/validate.ts';
 import { renderDialog, unwrap, withViewport } from './helpers/dialog.ts';
 import { UNSAFE } from './helpers/unsafe.ts';
+import { testAt80x40 as test } from './helpers/viewport.ts';
 
 const FAMILY = '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}';
 const RAINBOW = '\u{1F3F3}\ufe0f\u200d\u{1F308}';

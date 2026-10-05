@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 import { outputsDir } from '../extensions/config.ts';
 import type { RunRecord } from '../extensions/run-record.ts';
 import {
@@ -24,6 +23,7 @@ import {
   withSandbox,
 } from './helpers/sandbox.ts';
 import { UNSAFE } from './helpers/unsafe.ts';
+import { testAt80x40 as test } from './helpers/viewport.ts';
 
 const confirmCtx = (answer = true) => {
   const asked: string[] = [];
@@ -68,8 +68,8 @@ test('tool danger confirm: scope, session, pr, model, budget, timeout and ALL ad
   assert.match(text, /addDirs \(2\): "\.\/inside" · "\/outside"/);
   assert.ok(!UNSAFE.test(text));
   const last = text.trimEnd().split('\n');
-  assert.match(last[last.length - 2], /^scope: 32 chars, 2 lines — first line: src\/$/);
-  assert.match(last[last.length - 1], /^task: 13 chars, 1 lines — first line: fix the tests$/);
+  // both blocks are shown whole above: one short size row (the descriptive first-line form is for a cut block)
+  assert.equal(last[last.length - 1], 'scope: 32 chars, 2 lines · task: 13 chars, 1 lines');
 });
 
 test('tool danger confirm (e2e): the repro call shows the scope payload and the resumed session; nothing hides', async () => {

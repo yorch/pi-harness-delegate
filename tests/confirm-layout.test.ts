@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { visibleWidth } from '@earendil-works/pi-tui';
 import {
   CONTINUATION_PREFIX,
   currentViewport,
   describeTextSummary,
+  dialogFrameRows,
   layoutConfirmation,
+  textTooLongReason,
   type Viewport,
 } from '../extensions/confirm-layout.ts';
 import { escapeForDisplay } from '../extensions/sanitize.ts';
@@ -73,7 +76,7 @@ function assertCriticalOnScreen(message: string, vp: Viewport, label: string): v
   assert.ok(d.all.length <= vp.rows, `${label} ${vp.columns}x${vp.rows}: ${d.all.length} rows > ${vp.rows}`);
   // the summary is the LAST content: only its own continuation rows follow it, then the spacer and Yes / No
   const yes = d.all.findIndex(r => r.includes('\u2192 Yes'));
-  const sum = d.all.findIndex(r => /^ task: \d+ chars, \d+ lines — first line:/.test(r));
+  const sum = d.all.findIndex(r => /^ task: \d+ chars, \d+ lines/.test(r));
   assert.ok(sum > 0 && sum < yes, `${label}: the summary row exists\n${d.all.join('\n')}`);
   for (const r of d.all.slice(sum + 1, yes - 1)) assert.ok(r.startsWith(` ${CONTINUATION_PREFIX}`), `${label}: ${r}`);
   // nothing critical before a free-text block: no `  > ` row of the text comes after the first critical line
@@ -83,7 +86,7 @@ function assertCriticalOnScreen(message: string, vp: Viewport, label: string): v
     `${label}: free text comes first`,
   );
   // a row of the text can never pass for the summary: exactly one unprefixed `task: N chars` row exists
-  assert.equal(d.all.filter(r => /^ task: \d+ chars, \d+ lines — first line:/.test(r)).length, 1, label);
+  assert.equal(d.all.filter(r => /^ task: \d+ chars, \d+ lines/.test(r)).length, 1, label);
 }
 
 for (const vp of VIEWPORTS)
@@ -175,9 +178,12 @@ test('a wrapped row is prefixed: a long word + a fake summary cannot become an u
     assert.ok(r.startsWith('  > ') || r.startsWith(CONTINUATION_PREFIX), JSON.stringify(r));
 });
 
-test('the real terminal is read from process.stdout (columns floor at 80; rows default to 40)', async () => {
-  await withViewport(undefined, undefined, () => assert.deepEqual(currentViewport(), { columns: 80, rows: 40 }));
-  await withViewport(60, 24, () => assert.deepEqual(currentViewport(), { columns: 80, rows: 24 }));
+test('the real terminal is read from process.stdout as it is; an unknown size is 80x24 (the small side)', async () => {
+  await withViewport(undefined, undefined, () => assert.deepEqual(currentViewport(), { columns: 80, rows: 24 }));
+  await withViewport(0, 0, () => assert.deepEqual(currentViewport(), { columns: 80, rows: 24 }));
+  await withViewport(Number.NaN, Number.NaN, () => assert.deepEqual(currentViewport(), { columns: 80, rows: 24 }));
+  await withViewport(60, 24, () => assert.deepEqual(currentViewport(), { columns: 60, rows: 24 }));
+  await withViewport(35, 20, () => assert.deepEqual(currentViewport(), { columns: 35, rows: 20 }));
   await withViewport(132, 50, () => assert.deepEqual(currentViewport(), { columns: 132, rows: 50 }));
 });
 
@@ -267,4 +273,93 @@ test('the summary line collapses whitespace runs and says exactly how many chara
   const long = describeTextSummary('task', `${'a'.repeat(100)}${' '.repeat(30)}tail`);
   assert.match(long, /first line: a{80} \(\+54 more characters on that line\)$/);
   assert.match(describeTextSummary('task', '\n\n   leading'), /first line: leading \[runs/);
+});
+
+test('at the real width of a narrow terminal (40 / 50 / 60 columns) every row fits it, every continuation row is prefixed, and no row passes for a summary', () => {
+  for (const columns of [40, 50, 60]) {
+    const vp = { columns, rows: 40 };
+    const laid = buildConfirmation({
+      headline: ['DANGER: agent-requested claude/fix, unrestricted: no sandbox or approvals'],
+      steering: { task: PAYLOADS.fake, sessionId: 'sess-attacker', model: 'opus-x' },
+      onOverflow: 'refuse',
+      viewport: vp,
+    });
+    assert.ok(laid.ok, `${columns}: ${laid.ok ? '' : laid.reason}`);
+    if (!laid.ok) continue;
+    for (const r of laid.lines)
+      assert.ok(visibleWidth(r) <= columns - 2, `${columns}: ${JSON.stringify(r)} is wider than pi's text area`);
+    const bare = laid.lines.filter(r => r !== '' && !r.startsWith('  > ') && !r.startsWith(CONTINUATION_PREFIX));
+    // exactly: the block header, the DANGER row, the model row, the session row, the one size summary
+    assert.deepEqual(
+      bare.map(r => r.split(' ')[0]),
+      ['Task', 'DANGER:', 'model:', 'session:', 'task:'],
+      `${columns}: ${bare.join(' | ')}`,
+    );
+    const d = renderDialog('t', laid.lines.join('\n'), vp);
+    assert.equal(d.all.length, laid.rows + dialogFrameRows(columns), `${columns}: pi re-wrapped a row`);
+  }
+});
+
+test('a cut block needs MIN_BLOCK_ROWS rows: with fewer left the confirmation is refused as too tall, not squeezed to a stub', () => {
+  const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n');
+  const at = (rows: number) =>
+    layoutConfirmation({
+      blocks: [{ label: 'Task', text, limits: { full: 5000, maxRows: 100 }, summaryLabel: 'task' }],
+      critical: ['DANGER: x'],
+      summaries: [],
+      onOverflow: 'headtail',
+      viewport: { columns: 80, rows },
+    });
+  let first = -1;
+  for (let rows = 12; rows < 40 && first < 0; rows++) if (at(rows).ok) first = rows;
+  assert.ok(first > 12, `found the smallest terminal that shows the cut block (${first})`);
+  const below = at(first - 1);
+  assert.equal(below.ok, false, `${first - 1} rows is one too few`);
+  if (!below.ok) assert.equal(below.kind, 'critical');
+  const ok = at(first);
+  assert.ok(ok.ok);
+  if (ok.ok) {
+    const blockRows = ok.lines.indexOf('');
+    assert.ok(blockRows >= 4, `the block has at least its header, a row, the marker and a row (${blockRows})`);
+  }
+});
+
+test('a huge text is refused before it is measured against the width (model-set: over its character limit; any: over the measuring cap)', () => {
+  const cjk = '请'.repeat(1_000_000);
+  const base = { critical: ['DANGER: x'], summaries: [], viewport: { columns: 80, rows: 40 } };
+  const t0 = performance.now();
+  const refused = layoutConfirmation({
+    ...base,
+    blocks: [{ label: 'Task', text: cjk.slice(0, 90_000), limits: { full: 2000, maxRows: 20 }, summaryLabel: 'task' }],
+    onOverflow: 'refuse',
+  });
+  const human = layoutConfirmation({
+    ...base,
+    blocks: [{ label: 'Task', text: cjk, limits: { full: 2000, maxRows: 20 }, summaryLabel: 'task', mayCut: true }],
+    onOverflow: 'headtail',
+  });
+  assert.ok(performance.now() - t0 < 100, `refused without measuring 1M characters (${performance.now() - t0}ms)`);
+  assert.ok(!refused.ok && refused.kind === 'blocks');
+  assert.match(refused.ok ? '' : refused.reason, /90000 characters \(a confirmation shows at most 2000 whole\)/);
+  assert.ok(!human.ok && human.kind === 'blocks');
+  assert.match(human.ok ? '' : human.reason, /over 100000 characters/);
+  // a typed text under the cap is still cut head + tail
+  const typed = layoutConfirmation({
+    ...base,
+    blocks: [
+      {
+        label: 'Task',
+        text: 'x'.repeat(50_000),
+        limits: { full: 2000, maxRows: 20 },
+        summaryLabel: 'task',
+        mayCut: true,
+      },
+    ],
+    onOverflow: 'headtail',
+  });
+  assert.ok(typed.ok);
+  assert.match(
+    textTooLongReason('y'.repeat(2001), { full: 2000, maxRows: 20 }, { columns: 80, rows: 40 }) ?? '',
+    /2001 characters/,
+  );
 });

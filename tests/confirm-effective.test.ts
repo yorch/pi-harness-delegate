@@ -226,3 +226,161 @@ test('tool resumeFanout plan: the verify line follows the tier the resumed run w
       });
     });
 });
+
+// ── what the template adds to the run, shown (and equal to what is passed on) ───────────────────────────────
+
+const argvOf = (file: string): string[] => readFileSync(file, 'utf8').trim().split('\n');
+
+test('a template addDirs: is in the will-apply row, resolved the way the engine passes it to the harness', async () => {
+  await withSandbox(
+    { templates: { 'claude/dirs': tpl('dirs', 'edit', 'addDirs: ./shared, /abs/other') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const row = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude'], 'dirs', {}).join('\n');
+          assert.ok(row.includes(`template addDirs (2): ${JSON.stringify(join(cwd, 'shared'))} · "/abs/other"`), row);
+          await delegate(fakePi(recorder().exec), fakeCtx(cwd), { harness: 'claude', mode: 'dirs', task: 'x' });
+          const argv = argvOf(argsFile);
+          assert.deepEqual(
+            argv.flatMap((a, i) => (a === '--add-dir' ? [argv[i + 1]] : [])),
+            [join(cwd, 'shared'), '/abs/other'],
+            'the harness got exactly the directories the dialog listed',
+          );
+        });
+      });
+    },
+  );
+});
+
+test('the native permission the run passes on is shown: a safe one as declared, an unlisted one (confirmed) as declared, none once escalated', async () => {
+  await withSandbox(
+    {
+      templates: {
+        'claude/nat': tpl('nat', 'plan'),
+        'claude/odd': tpl('odd', 'weirdmode'),
+      },
+    },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const ctx = fakeCtx(cwd);
+          const row = (mode: string, allow: boolean): string =>
+            effectiveRunLines(ctx, loadConfig(), ['claude'], mode, { allowDangerous: allow }).join('\n');
+          assert.match(row('nat', false), /native permission "plan" \(as the template declares\)/);
+          await delegate(fakePi(recorder().exec), ctx, { harness: 'claude', mode: 'nat', task: 'x' });
+          assert.ok(argvOf(argsFile).includes('plan'), 'plan is what the harness got');
+          // escalated: the template's native value is dropped, and so it is not claimed
+          assert.doesNotMatch(row('nat', true), /native permission/);
+          await delegate(fakePi(recorder().exec), ctx, {
+            harness: 'claude',
+            mode: 'nat',
+            task: 'x',
+            allowDangerous: true,
+          });
+          assert.ok(!argvOf(argsFile).includes('plan'));
+          // an unlisted native mode runs as declared once confirmed
+          assert.match(row('odd', true), /native permission "weirdmode"/);
+          await delegate(fakePi(recorder().exec), ctx, {
+            harness: 'claude',
+            mode: 'odd',
+            task: 'x',
+            allowDangerous: true,
+          });
+          assert.ok(argvOf(argsFile).includes('weirdmode'), 'weirdmode is what the harness got');
+        });
+      });
+    },
+  );
+});
+
+test('an empty tool task runs the template defaultTask: the will-apply row says so; a given task shows nothing extra; defaultScope is not applied on the tool path', async () => {
+  await withSandbox(
+    { templates: { 'claude/dflt': tpl('dflt', 'edit', 'defaultTask: do the template job\ndefaultScope: src/only') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const ctx = fakeCtx(cwd);
+          const row = (task: string): string =>
+            effectiveRunLines(ctx, loadConfig(), ['claude'], 'dflt', { task }).join('\n');
+          assert.match(row(''), /no task given: the template's default task runs: "do the template job"/);
+          assert.doesNotMatch(row('real task'), /default task/);
+          await delegate(fakePi(recorder().exec), ctx, { harness: 'claude', mode: 'dflt', task: '' });
+          const prompt = argvOf(argsFile).join('\n');
+          assert.ok(prompt.includes('do the template job'), 'the engine ran the default task the dialog named');
+          assert.ok(
+            !prompt.includes('src/only'),
+            'defaultScope is only applied by the command path (which shows it), never on the tool path',
+          );
+        });
+      });
+    },
+  );
+});
+
+test('a long template default task is shown by its head with the exact count left out — never silently cut', async () => {
+  await withSandbox(
+    { templates: { 'claude/long': tpl('long', 'edit', `defaultTask: ${'x'.repeat(150)}`) } },
+    async ({ cwd }) => {
+      const row = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude'], 'long', { task: '' }).join('\n');
+      assert.ok(row.includes(`${'x'.repeat(100)}" (+50 more characters)`), row);
+    },
+  );
+});
+
+// ── the budget / timeout / transport resolution, pinned (a reverted rule shows a different value than the engine's) ──
+
+test('will-apply budget: a stored budget can only lower the configured one; a typed one replaces it', async () => {
+  await withSandbox({ settings: { maxBudgetUsd: 2 }, templates: TEMPLATES }, async ({ cwd }) => {
+    const budget = (call: Parameters<typeof effectiveRunLines>[4]): string =>
+      effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude'], 'edit', call)
+        .join('\n')
+        .match(/budget (\$[\d.]+)/)?.[1] ?? '';
+    assert.equal(budget({ budgetUsd: 10, budgetNarrowOnly: true }), '$2', 'stored 10 cannot raise the configured 2');
+    assert.equal(budget({ budgetUsd: 1, budgetNarrowOnly: true }), '$1', 'stored 1 lowers it');
+    assert.equal(budget({ budgetUsd: 10 }), '$10', 'a typed 10 replaces it');
+    assert.equal(budget({}), '$2', 'nothing given: the configured one');
+  });
+});
+
+test('will-apply timeout: a model-set / stored timeout only lowers the configured one; a typed one may raise it', async () => {
+  await withSandbox({ settings: { timeoutMs: 60_000 }, templates: TEMPLATES }, async ({ cwd }) => {
+    const timeout = (call: Parameters<typeof effectiveRunLines>[4]): string =>
+      effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude'], 'edit', call)
+        .join('\n')
+        .match(/timeout (\d+)s/)?.[1] ?? '';
+    assert.equal(timeout({ timeoutSec: 120 }), '60', 'model-set 120s cannot raise the configured 60s');
+    assert.equal(timeout({ timeoutSec: 30 }), '30');
+    assert.equal(timeout({ timeoutSec: 120, timeoutMayRaise: true }), '120', 'a typed one may raise it');
+    assert.equal(timeout({}), '60');
+  });
+});
+
+test('will-apply transport: the configured one, or INVALID for one the harness does not support — never a hard-coded stdout', async () => {
+  await withSandbox(
+    { settings: { harnesses: { opencode: { transport: 'acp' }, claude: { transport: 'acp' } } }, templates: TEMPLATES },
+    async ({ cwd }) => {
+      const rows = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['opencode', 'claude'], 'implement', {}).join('\n');
+      assert.match(rows, /\(opencode\).*transport acp/);
+      assert.match(rows, /\(claude\).*transport INVALID/);
+      assert.doesNotMatch(rows, /\(claude\).*transport stdout/);
+    },
+  );
+});
+
+test('a fan-out will-apply: one shared row, and a member lists only what differs from it (or lacks)', async () => {
+  await withSandbox(
+    { templates: { 'claude/m': tpl('m', 'edit', 'addDirs: ./only-claude'), 'codex/m': tpl('m', 'edit') } },
+    async ({ cwd }) => {
+      const rows = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude', 'codex'], 'm', { model: 'same' });
+      assert.equal(rows[0], 'will apply (all 2): model "same", budget none, timeout 600s, transport stdout');
+      assert.equal(rows.length, 2, rows.join('\n'));
+      assert.match(rows[1], /^will apply \(claude\): template addDirs \(1\)/);
+      // three members, two sharing a value: the minority lists its own
+      const three = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude', 'codex', 'devin'], 'implement', {
+        model: 'same',
+      });
+      assert.match(three[0], /^will apply \(all 3\): model "same", budget none, timeout 600s, transport stdout$/);
+      assert.deepEqual(three.slice(1), ['will apply (devin): transport acp']);
+    },
+  );
+});

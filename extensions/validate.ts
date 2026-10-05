@@ -16,7 +16,6 @@ import type { DelegateCommandArgs } from './command.ts';
 import {
   type ConfirmBlock,
   type ConfirmLayout,
-  describeTextSummary,
   layoutConfirmation,
   SCOPE_LIMITS,
   TASK_LIMITS,
@@ -335,11 +334,15 @@ export function buildConfirmation(input: ConfirmationInput): ConfirmLayout {
   const label = input.taskLabel ?? 'Task';
   const groups = s.taskGroups && s.taskGroups.length > 1 ? s.taskGroups : undefined;
   const blocks: ConfirmBlock[] = [];
-  const summaries: string[] = [];
   const add = (name: string, text: string | undefined, limits: TextBlockLimits, who: string, typed?: boolean): void => {
     if (text === undefined) return;
-    blocks.push({ label: `${name}${who}`, text, limits, mayCut: typed === true });
-    summaries.push(describeTextSummary(`${name.toLowerCase()}${who}`, text));
+    blocks.push({
+      label: `${name}${who}`,
+      text,
+      limits,
+      mayCut: typed === true,
+      summaryLabel: `${name.toLowerCase()}${who}`,
+    });
   };
   if (groups)
     for (const g of groups) {
@@ -360,7 +363,7 @@ export function buildConfirmation(input: ConfirmationInput): ConfirmLayout {
   return layoutConfirmation({
     blocks,
     critical: [...headline, ...steeringFieldLines(s)],
-    summaries,
+    summaries: [],
     onOverflow: input.onOverflow,
     viewport: input.viewport,
   });
@@ -475,18 +478,32 @@ export async function confirmDangerousToolCall(
   resolved: { harnesses?: string[]; mode?: string; effective?: string[]; viewport?: Viewport } = {},
 ): Promise<void> {
   // harness/mode are model-set strings: quoted (escapes, bidi, zero-width all rendered as \uXXXX)
-  const harnesses = resolved.harnesses?.length ? resolved.harnesses.map(safeName).join(',') : undefined;
-  const harness = harnesses ?? (summary.harness === undefined ? undefined : safeName(summary.harness));
+  const names = resolved.harnesses?.length
+    ? resolved.harnesses.map(safeName)
+    : summary.harness === undefined
+      ? undefined
+      : [safeName(summary.harness)];
   const mode = resolved.mode ?? summary.mode;
-  const target = `${harness ?? 'default harness'} ${mode === undefined ? 'default mode' : safeName(mode)}`;
+  const target = dangerTarget(names, mode === undefined ? undefined : safeName(mode));
   await askDangerConfirmation(ctx, {
     steering: { ...steeringFromTool(summary), effective: resolved.effective },
     refuseLong: true,
     viewport: resolved.viewport,
-    body: `DANGER: the agent wants to run ${target} with DANGER permission (unrestricted: no sandbox, no approval prompts).`,
+    body: `DANGER: agent-requested ${target}, unrestricted: no sandbox or approvals`,
     noUiError: `allowDangerous requested for ${target}, but there is no interactive UI to confirm it with — refusing (danger permission needs a human's explicit approval; run it from an interactive session)`,
     declinedError: `allowDangerous for ${target} was declined by the user`,
   });
+}
+
+/** `claude/fix`, or `[claude, codex]/fix` for several harnesses — what a danger confirmation says will run (names already escaped). */
+function dangerTarget(harnesses: readonly string[] | undefined, mode: string | undefined): string {
+  const h =
+    !harnesses || harnesses.length === 0
+      ? 'default harness'
+      : harnesses.length === 1
+        ? harnesses[0]
+        : `[${harnesses.join(', ')}]`;
+  return `${h}/${mode ?? 'default mode'}`;
 }
 
 /** What `confirmDangerousCommand` is shown: the parsed options whole (task / scope already resolved), and where they run. */
@@ -512,10 +529,7 @@ export type CommandDangerSummary = CommandOptions & {
  * confirm with, so it fails closed exactly like the tool path.
  */
 export async function confirmDangerousCommand(ctx: ConfirmCtx, summary: CommandDangerSummary): Promise<void> {
-  const n = summary.harnesses.length;
-  const names = summary.harnesses.map(safeName).join(', ');
-  const mode = quoteCapped(summary.mode, 200);
-  const target = `${names} ${safeName(summary.mode)}`;
+  const target = dangerTarget(summary.harnesses.map(safeName), safeName(summary.mode));
   await askDangerConfirmation(ctx, {
     steering: {
       ...steeringFromCommand(summary),
@@ -527,7 +541,7 @@ export async function confirmDangerousCommand(ctx: ConfirmCtx, summary: CommandD
     },
     refuseLong: false,
     viewport: summary.viewport,
-    body: `DANGER: --allow-dangerous: run ${mode} on ${n > 1 ? `all ${n} harnesses (${names})` : names} with DANGER permission — full, unrestricted permissions (no sandbox, no approval prompts). Applies to this invocation only.`,
+    body: `DANGER: --allow-dangerous: ${target}, unrestricted: no sandbox or approvals`,
     noUiError: `--allow-dangerous for ${target} needs interactive confirmation, but there is no UI — refusing (a headless /delegate never runs with danger permission)`,
     declinedError: `--allow-dangerous for ${target} was declined — nothing was run`,
   });

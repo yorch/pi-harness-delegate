@@ -14,13 +14,21 @@
  *    verify, …), then the one-line size summaries. Nothing critical ever sits before a free-text block.
  *
  * Everything is measured with pi-tui's own `visibleWidth` against the REAL terminal (`process.stdout.columns`
- * / `.rows`) and wrapped HERE, by hard column breaks, with every continuation row prefixed (`  ┆ `) — so a
- * wrapped row can never pass for an unprefixed summary / marker line, and pi never re-wraps (every row
- * already fits). The free-text blocks get a row budget — the terminal's rows minus the critical section and
- * the frame — and when they do not fit, a model-set value is REFUSED, a human-typed one is shown as head +
- * tail with a "not shown" marker. A critical section that does not fit is refused outright.
+ * / `.rows`) and wrapped HERE, at the real width, by hard column breaks, with every continuation row prefixed
+ * (`  ┆ `) — so a wrapped row can never pass for an unprefixed summary / marker line, and pi never re-wraps
+ * (every row already fits). A terminal narrower than `MIN_COLUMNS` (40: the width of pi's own hint row) is
+ * REFUSED, saying its real size; an unknown size is taken to be `DEFAULT_COLUMNS` x `DEFAULT_ROWS` (80x24 — the
+ * small side, so nothing is hidden on a real 24-row screen). The free-text blocks get a row budget — the
+ * terminal's rows minus the critical section and the chrome (`DIALOG_FRAME_ROWS` + `DIALOG_SPARE_ROWS`: the
+ * frame plus the footer / status rows pi keeps below and above a dialog, in regular AND fullscreen mode) — and
+ * when they do not fit, a model-set value is REFUSED, a human-typed one is shown as head + tail with a "not
+ * shown" marker. A critical section that does not fit is refused outright.
+ *
+ * The critical section is kept short on purpose (one headline row, one `will apply` row, one row per optional
+ * field, one size-summary row when the text is shown whole) so ordinary requests fit a 24-row terminal.
  */
 
+import { ExtensionSelectorComponent } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { charCount, escapeForDisplay, MAX_COMBINING_RUN, unitEscape } from './sanitize.ts';
 
@@ -29,39 +37,79 @@ export interface Viewport {
   rows: number;
 }
 
-/** Narrower terminals are assumed to be this wide (and not narrower), so a dialog is never laid out for less. */
-export const MIN_COLUMNS = 80;
-/** Rows assumed when the terminal's height is unknown (no TTY). */
-export const DEFAULT_ROWS = 40;
+/**
+ * The narrowest terminal a confirmation is shown on: pi's hint row (`↑↓ navigate  enter select  esc cancel`, 37
+ * columns + its 2 padding) fits from 40 columns, so pi itself never re-wraps below the message. Narrower is refused.
+ */
+export const MIN_COLUMNS = 40;
+/** Columns assumed when the terminal's width is unknown (no TTY). */
+export const DEFAULT_COLUMNS = 80;
+/** Rows assumed when the terminal's height is unknown (no TTY): a real 24-row screen must not lose its Yes / No. */
+export const DEFAULT_ROWS = 24;
 /** What pi's selector adds around the message: border, spacer, title row, spacer, Yes, No, spacer, hint, spacer, border. */
 export const DIALOG_FRAME_ROWS = 10;
-/** A little slack on top of the frame, so a terminal that reserves a line or two still shows everything. */
+/**
+ * Slack for what pi keeps around the dialog: its footer (2 rows, 3 with an extension status line) and, in
+ * fullscreen, the working status above it (up to 3) next to the transcript's own minimum row. Checked against
+ * pi's real regular and fullscreen layouts with the 3 + 3 worst case (`tests/helpers/screen.ts`): with 12 rows of
+ * chrome the whole dialog from its title to the hint is on screen in both modes.
+ */
 export const DIALOG_SPARE_ROWS = 2;
-/** The least a free-text block may be given (header, one row, the "not shown" marker, one row). */
+/** The least a free-text block may be given when it is cut (header, one row, the "not shown" marker, one row). */
 export const MIN_BLOCK_ROWS = 4;
+/** The fewest rows left for the free-text blocks (header + a row + one more) before a confirmation is refused. */
+export const MIN_TEXT_ROWS = 3;
+/** Text longer than this (in UTF-16 units) is refused before it is even measured — a person cannot review it anyway. */
+export const MAX_MEASURED_CHARS = 100_000;
 
 const BLOCK_PREFIX = '  > ';
 /** Starts every continuation row of a wrapped line — a row of the text can never begin like one. */
 export const CONTINUATION_PREFIX = '  ┆ ';
 
-/** The real terminal: `process.stdout.columns` (at least `MIN_COLUMNS`) x `process.stdout.rows` (`DEFAULT_ROWS` when unknown). */
+/**
+ * The real terminal: `process.stdout.columns` x `process.stdout.rows` — as they are, no floor (a terminal below
+ * `MIN_COLUMNS` is refused by `layoutConfirmation`, with its real size in the message); `DEFAULT_COLUMNS` /
+ * `DEFAULT_ROWS` when unknown (undefined, 0, NaN, non-numeric).
+ */
 export function currentViewport(): Viewport {
   const c = process.stdout.columns;
   const r = process.stdout.rows;
   return {
-    columns: Math.max(MIN_COLUMNS, typeof c === 'number' && Number.isFinite(c) && c > 0 ? Math.floor(c) : MIN_COLUMNS),
+    columns: typeof c === 'number' && Number.isFinite(c) && c > 0 ? Math.floor(c) : DEFAULT_COLUMNS,
     rows: typeof r === 'number' && Number.isFinite(r) && r > 0 ? Math.floor(r) : DEFAULT_ROWS,
   };
 }
 
-/** Columns a message row may fill: pi's `Text` pads one column on each side. */
+/** Columns a message row may fill: pi's `Text` pads one column on each side (never measured below `MIN_COLUMNS`). */
 export function contentWidth(vp: Viewport): number {
   return Math.max(MIN_COLUMNS, vp.columns) - 2;
 }
 
-/** Message rows that are on screen once the frame (and a little slack) is accounted for. */
+/** Columns pi's own hint row (`↑↓ navigate  enter select  escape/ctrl+c cancel`, default keys) needs, padding included. */
+const DEFAULT_HINT_COLUMNS = 49;
+
+/**
+ * The rows pi's selector adds around the message at `columns` — measured on pi's own component (a one-row title:
+ * border, spacer, title, spacer, Yes, No, spacer, hint, spacer, border), so a hint row that pi wraps on a narrow
+ * terminal (49 columns with the default keys, more with longer custom ones) is counted. Falls back to the
+ * default-key arithmetic when the component cannot be built (pi's theme not initialised).
+ */
+export function dialogFrameRows(columns: number): number {
+  try {
+    return new ExtensionSelectorComponent(
+      'x',
+      ['Yes', 'No'],
+      () => {},
+      () => {},
+    ).render(Math.max(1, columns)).length;
+  } catch {
+    return DIALOG_FRAME_ROWS - 1 + Math.max(1, Math.ceil((DEFAULT_HINT_COLUMNS - 2) / Math.max(1, columns - 2)));
+  }
+}
+
+/** Message rows that are on screen once the frame (and the slack for pi's footer / status rows) is accounted for. */
 export function messageRowBudget(vp: Viewport): number {
-  return Math.max(0, vp.rows - DIALOG_FRAME_ROWS - DIALOG_SPARE_ROWS);
+  return Math.max(0, vp.rows - dialogFrameRows(vp.columns) - DIALOG_SPARE_ROWS);
 }
 
 // ── Display rows ────────────────────────────────────────────────────────────────────────────────
@@ -105,31 +153,47 @@ function toUnits(line: string): { s: string; w: number }[] {
   return out;
 }
 
-/** `line` (no newline) cut into rows of at most `width` columns — hard breaks at the column, never a word wrap. */
-function wrapLine(line: string, width: number): Row[] {
+/**
+ * `line` (no newline) cut into rows — the first of at most `firstWidth` columns, the others of at most `width`.
+ * Hard breaks at the column; with `soft`, a row that has a space in its last third ends after that space instead
+ * (the space stays at the end of the row, so joining the rows gives the line back exactly).
+ */
+function wrapLine(line: string, width: number, soft = false, firstWidth = width): Row[] {
   const rows: Row[] = [];
-  let cur = '';
+  let cur: { s: string; w: number }[] = [];
   let curW = 0;
-  let chars = 0;
+  const limit = (): number => (rows.length === 0 ? firstWidth : width);
+  const push = (units: { s: string; w: number }[]): void => {
+    rows.push({ text: units.map(u => u.s).join(''), chars: units.length });
+  };
   for (const u of toUnits(line)) {
-    if (curW + u.w > width && cur !== '') {
-      rows.push({ text: cur, chars });
-      cur = '';
-      curW = 0;
-      chars = 0;
+    if (curW + u.w > limit() && cur.length > 0) {
+      let cut = cur.length;
+      if (soft) {
+        const at = cur.map(x => x.s).lastIndexOf(' ');
+        const restW = cur.slice(at + 1).reduce((n, x) => n + x.w, 0);
+        // (only when what carries over still fits a continuation row together with the unit that overflowed)
+        if (at >= Math.floor((cur.length * 2) / 3) && restW + u.w <= width) cut = at + 1;
+      }
+      push(cur.slice(0, cut));
+      cur = cur.slice(cut);
+      curW = cur.reduce((n, x) => n + x.w, 0);
     }
-    cur += u.s;
+    cur.push(u);
     curW += u.w;
-    chars++;
   }
-  rows.push({ text: cur, chars });
+  push(cur);
   return rows;
 }
 
 /** A wrapped line with its first row prefixed `first` and every continuation row `CONTINUATION_PREFIX`. */
-function prefixedRows(line: string, width: number, first: string): Row[] {
-  const inner = Math.max(1, width - Math.max(visibleWidth(first), visibleWidth(CONTINUATION_PREFIX)));
-  return wrapLine(line, inner).map((r, i) => ({ ...r, text: (i === 0 ? first : CONTINUATION_PREFIX) + r.text }));
+function prefixedRows(line: string, width: number, first: string, soft = false): Row[] {
+  const firstW = Math.max(1, width - visibleWidth(first));
+  const contW = Math.max(1, width - visibleWidth(CONTINUATION_PREFIX));
+  return wrapLine(line, contW, soft, firstW).map((r, i) => ({
+    ...r,
+    text: (i === 0 ? first : CONTINUATION_PREFIX) + r.text,
+  }));
 }
 
 // ── Free-text blocks ────────────────────────────────────────────────────────────────────────────
@@ -196,14 +260,18 @@ export function measureText(text: string, vp: Viewport = currentViewport()): Tex
   return { chars: charCount(text), lines: text.split('\n').length, rows: bodyRows(text, vp).length };
 }
 
-/** Why `text` cannot be shown whole under `limits` (words for an error message), or `null` when it can. */
+/**
+ * Why `text` cannot be shown whole under `limits` (words for an error message), or `null` when it can. Characters
+ * are checked first, so a huge text is refused before any of it is measured against the terminal's width.
+ */
 export function textTooLongReason(
   text: string,
   limits: TextBlockLimits,
   vp: Viewport = currentViewport(),
 ): string | null {
+  const chars = charCount(text);
+  if (chars > limits.full) return `${chars} characters (a confirmation shows at most ${limits.full} whole)`;
   const m = measureText(text, vp);
-  if (m.chars > limits.full) return `${m.chars} characters (a confirmation shows at most ${limits.full} whole)`;
   if (m.rows > limits.maxRows)
     return `${m.lines} lines / ${m.rows} display rows (a confirmation shows at most ${limits.maxRows} whole)`;
   return null;
@@ -310,6 +378,8 @@ export interface ConfirmBlock {
   label: string;
   text: string;
   limits: TextBlockLimits;
+  /** What the size summary calls it (`task`, `scope [claude]`); `layoutConfirmation` writes the summary row itself. */
+  summaryLabel?: string;
   /** A person typed this text (not a model, not a stored record): when it does not fit it is cut, never refused. */
   mayCut?: boolean;
 }
@@ -319,7 +389,7 @@ export interface ConfirmLayoutInput {
   blocks: ConfirmBlock[];
   /** The critical section, one logical line each (wrapped here): what will run, then every steering field. */
   critical: string[];
-  /** The last lines: one `describeTextSummary` line per block. */
+  /** Extra last lines (a block's own size summary is written by the layout from its `summaryLabel`). */
   summaries: string[];
   /** A block that does not fit: `refuse` (a model-set value) or show its head + tail (`headtail`, a human-typed one). */
   onOverflow: 'refuse' | 'headtail';
@@ -334,48 +404,107 @@ export type ConfirmLayout =
 /** The critical lines as display rows (each wrapped, continuation rows prefixed). */
 export function criticalRows(lines: readonly string[], vp: Viewport): string[] {
   const width = contentWidth(vp);
-  return lines.flatMap(l => prefixedRows(l, width, '').map(r => r.text));
+  return lines.flatMap(l => prefixedRows(l, width, '', true).map(r => r.text));
+}
+
+/** The one-line size summary of a block shown whole: its first line is right above, so only the size is repeated. */
+function shortSummary(label: string, text: string): string {
+  return `${label}: ${charCount(text)} chars, ${text.split('\n').length} lines`;
 }
 
 export function layoutConfirmation(input: ConfirmLayoutInput): ConfirmLayout {
   const vp = input.viewport ?? currentViewport();
+  const size = `${vp.columns}x${vp.rows}`;
+  if (vp.columns < MIN_COLUMNS)
+    return {
+      ok: false,
+      kind: 'critical',
+      reason: `this terminal is ${size}: a confirmation needs at least ${MIN_COLUMNS} columns to be shown whole, every row laid out for the real width — widen the terminal`,
+    };
+  const huge = input.blocks.find(b => b.text.length > MAX_MEASURED_CHARS);
+  if (huge)
+    return {
+      ok: false,
+      kind: 'blocks',
+      reason: `the ${huge.label.toLowerCase()} is over ${MAX_MEASURED_CHARS} characters — too long to show even its head and tail, so it is refused. Shorten it`,
+    };
+  // a model-set text over its character limit is refused before any of it is measured against the width
+  if (input.onOverflow === 'refuse')
+    for (const b of input.blocks)
+      if (!b.mayCut) {
+        const chars = charCount(b.text);
+        if (chars > b.limits.full)
+          return {
+            ok: false,
+            kind: 'blocks',
+            reason: `the ${b.label.toLowerCase()} is ${chars} characters (a confirmation shows at most ${b.limits.full} whole) — too long for a person to review in the confirmation, so it is refused. Shorten it`,
+          };
+      }
   const crit = criticalRows(input.critical, vp);
-  const sums = criticalRows(input.summaries, vp);
   const avail = messageRowBudget(vp);
   const separator = input.blocks.length > 0 ? 1 : 0;
-  const fixed = crit.length + sums.length + separator;
-  const size = `${vp.columns}x${vp.rows}`;
   const tooTall = (need: number): ConfirmLayout => ({
     ok: false,
     kind: 'critical',
     reason: `the confirmation's key lines (what will run and every setting) need ${need} rows, but this terminal (${size}) leaves room for ${avail} — enlarge the terminal, or give fewer / shorter values`,
   });
-  if (fixed > avail) return tooTall(fixed);
-  const budget = avail - fixed;
   const prepared = input.blocks.map(b => ({ b, rows: bodyRows(b.text, vp) }));
   const within = (p: (typeof prepared)[number]): boolean =>
     charCount(p.b.text) <= p.b.limits.full && p.rows.length <= p.b.limits.maxRows;
+  const labelOf = (p: (typeof prepared)[number], i: number): string => p.b.summaryLabel ?? `text ${i + 1}`;
+  // Size summaries LAST: a block shown whole gets one short entry (the whole text is right above), packed into a
+  // single row; a cut one gets the descriptive line (size + first line + what was left out)
+  const summariesFor = (cutSummaries: boolean): string[] => {
+    const out: string[] = [];
+    let packed: string[] = [];
+    const flush = (): void => {
+      if (packed.length > 0) out.push(packed.join(' · '));
+      packed = [];
+    };
+    prepared.forEach((p, i) => {
+      if (cutSummaries) {
+        flush();
+        out.push(describeTextSummary(labelOf(p, i), p.b.text));
+      } else packed.push(shortSummary(labelOf(p, i), p.b.text));
+    });
+    flush();
+    return [...out, ...input.summaries];
+  };
   const whole = prepared.reduce((n, p) => n + 1 + p.rows.length, 0);
+  const shortRows = criticalRows(summariesFor(false), vp);
+  let sums = shortRows;
+  let fixed = crit.length + sums.length + separator;
+  if (fixed > avail) return tooTall(fixed);
+  let budget = avail - fixed;
   let bodyBudgets: (number | null)[];
-  if (prepared.every(within) && whole <= budget) bodyBudgets = prepared.map(() => null);
-  else if (
-    input.onOverflow === 'refuse' &&
-    // blocks a person typed are only ever cut; a refusal needs at least one that is not
-    (prepared.some(p => !p.b.mayCut && (!within(p) || whole > budget)) || prepared.every(p => !p.b.mayCut))
-  ) {
-    const bad = prepared.find(p => !within(p) && !p.b.mayCut);
-    if (bad)
+  if (prepared.length === 0 || (prepared.every(within) && whole <= budget)) bodyBudgets = prepared.map(() => null);
+  else {
+    // something does not fit whole: every block gets the descriptive summary from here on
+    sums = criticalRows(summariesFor(true), vp);
+    fixed = crit.length + sums.length + separator;
+    if (fixed > avail) return tooTall(fixed);
+    budget = avail - fixed;
+    const refuseMissing =
+      input.onOverflow === 'refuse' &&
+      // blocks a person typed are only ever cut; a refusal needs at least one that is not
+      (prepared.some(p => !p.b.mayCut && (!within(p) || whole > budget)) || prepared.every(p => !p.b.mayCut));
+    if (refuseMissing) {
+      const bad = prepared.find(p => !within(p) && !p.b.mayCut);
+      if (bad)
+        return {
+          ok: false,
+          kind: 'blocks',
+          reason: `the ${bad.b.label.toLowerCase()} is ${textTooLongReason(bad.b.text, bad.b.limits, vp)} — too long for a person to review in the confirmation, so it is refused. Shorten it`,
+        };
+      // it is within its limits but the terminal has too few rows left next to what must be shown: with fewer than
+      // MIN_TEXT_ROWS left there is nothing a person could review, so the terminal is the problem, not the text
+      if (budget < MIN_TEXT_ROWS) return tooTall(fixed + MIN_TEXT_ROWS);
       return {
         ok: false,
         kind: 'blocks',
-        reason: `the ${bad.b.label.toLowerCase()} is ${textTooLongReason(bad.b.text, bad.b.limits, vp)} — too long for a person to review in the confirmation, so it is refused. Shorten it`,
+        reason: `the ${prepared.map(p => p.b.label.toLowerCase()).join(' and ')} need${prepared.length === 1 ? 's' : ''} ${whole} display rows, but only ${budget} fit on this terminal (${size}) next to what the confirmation must show — too long for a person to review, so it is refused. Shorten it, or enlarge the terminal`,
       };
-    return {
-      ok: false,
-      kind: 'blocks',
-      reason: `the ${prepared.map(p => p.b.label.toLowerCase()).join(' and ')} take ${whole} display rows, but only ${budget} fit on this terminal (${size}) next to what the confirmation must show — too long for a person to review, so it is refused. Shorten it`,
-    };
-  } else {
+    }
     // something is cut: every block needs at least a few rows to show anything of itself
     if (budget < MIN_BLOCK_ROWS * prepared.length) return tooTall(fixed + MIN_BLOCK_ROWS * prepared.length);
     // water-filling: a block that fits its fair share keeps what it wants, the rest split what is left
