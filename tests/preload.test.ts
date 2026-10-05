@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { test } from 'node:test';
 import { agentDir } from '../extensions/config.ts';
@@ -18,6 +18,7 @@ import {
   registerPinnedDirCleanup,
   showEnvValue,
 } from './helpers/preload-state.ts';
+import { makeTempDir, removeTempDir, tempRoot } from './helpers/tmp.ts';
 import { waitFor } from './helpers/wait.ts';
 
 // The preload (tests/helpers/preload.ts, wired in bunfig.toml) pins PI_CODING_AGENT_DIR to a temp dir for
@@ -54,7 +55,7 @@ test('preload: with no per-test override, agentDir() is a temp dir, never the re
   assert.equal(dir, process.env.PI_CODING_AGENT_DIR);
   assert.ok(existsSync(dir), `pinned agent dir should exist: ${dir}`);
   assert.ok(basename(dir).startsWith(PRELOAD_AGENT_DIR_PREFIX), dir);
-  assert.ok(realpathSync(dir).startsWith(realpathSync(tmpdir()) + sep), `${dir} is not under os.tmpdir()`);
+  assert.ok(realpathSync(dir).startsWith(realpathSync(tempRoot()) + sep), `${dir} is not under the temp root`);
   assert.notEqual(dir, join(homedir(), '.pi', 'agent'));
 });
 
@@ -97,7 +98,7 @@ interface ChildRun {
  * the child's whole environment.
  */
 function startChildBunTest(body: string, env: NodeJS.ProcessEnv, cwd = REPO_ROOT): ChildRun {
-  const dir = mkdtempSync(join(tmpdir(), 'preload-child-'));
+  const dir = makeTempDir('preload-child-');
   const file = join(dir, 'child.test.ts');
   writeFileSync(file, `import { test } from 'node:test';\n${body}\n`);
   const child = spawn(process.execPath, ['test', file], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -107,7 +108,7 @@ function startChildBunTest(body: string, env: NodeJS.ProcessEnv, cwd = REPO_ROOT
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve =>
     child.on('close', (code, signal) => resolve({ code, signal })),
   );
-  return { child, output: () => out, exited, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { child, output: () => out, exited, cleanup: () => removeTempDir(dir) };
 }
 
 /** The current env minus `drop`, plus `add` — never mutates process.env. */
@@ -123,7 +124,7 @@ const PRINT_AGENT_DIR = "test('child', () => { console.log('PINNED=' + process.e
 test('preload: live mode (PI_DELEGATE_LIVE=1) still pins the agent dir for every file', {
   timeout: 60_000,
 }, async () => {
-  const outer = mkdtempSync(join(tmpdir(), 'preload-outer-agent-'));
+  const outer = makeTempDir('preload-outer-agent-');
   const run = startChildBunTest(PRINT_AGENT_DIR, childEnv({ PI_DELEGATE_LIVE: '1', PI_CODING_AGENT_DIR: outer }));
   try {
     const { code } = await run.exited;
@@ -135,7 +136,7 @@ test('preload: live mode (PI_DELEGATE_LIVE=1) still pins the agent dir for every
     assert.equal(existsSync(pinned), false, 'the pinned dir is removed when the child exits');
   } finally {
     run.cleanup();
-    rmSync(outer, { recursive: true, force: true });
+    removeTempDir(outer);
   }
 });
 
@@ -176,6 +177,52 @@ for (const [sig, status] of [
       // Re-raised, not swallowed: the child dies *by the signal* (128+n in a shell), never exits 0/1.
       assert.equal(signal, sig, `expected death by ${sig}, got code=${code} signal=${signal} (status ${status})`);
       assert.equal(existsSync(pinned), false, `pinned dir must be removed on ${sig}: ${pinned}`);
+    } finally {
+      run.child.kill('SIGKILL');
+      run.cleanup();
+    }
+  });
+}
+
+/** Child test body: registers a temp dir through the shared helper and prints it; `hang` waits for a signal. */
+function tempDirBody(hang: boolean): string {
+  const helper = JSON.stringify(join(import.meta.dirname, 'helpers', 'tmp.ts'));
+  return [
+    `import { makeTempDir } from ${helper};`,
+    "import { writeFileSync } from 'node:fs';",
+    "import { join } from 'node:path';",
+    `test('child', { timeout: 120_000 }, async () => { const d = makeTempDir('preload-tracked-'); writeFileSync(join(d, 'f'), 'x'); console.log('TRACKED=' + d); ${
+      hang ? 'await new Promise(r => setTimeout(r, 120_000));' : ''
+    } });`,
+  ].join('\n');
+}
+
+test('preload: a makeTempDir dir a test forgot is swept at the end of the run', { timeout: 60_000 }, async () => {
+  const run = startChildBunTest(tempDirBody(false), childEnv({}, ['PI_DELEGATE_LIVE']));
+  try {
+    const { code } = await run.exited;
+    assert.equal(code, 0, run.output());
+    const tracked = /TRACKED=(.*)/.exec(run.output())?.[1]?.trim();
+    assert.ok(tracked && basename(tracked).startsWith('preload-tracked-'), run.output());
+    assert.equal(existsSync(tracked), false, 'the forgotten dir is removed when the child exits');
+  } finally {
+    run.cleanup();
+  }
+});
+
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  test(`preload: ${sig} mid-run also sweeps makeTempDir dirs`, { timeout: 60_000 }, async () => {
+    const run = startChildBunTest(tempDirBody(true), childEnv({}, ['PI_DELEGATE_LIVE']));
+    try {
+      const tracked = await waitFor(() => /TRACKED=(.*)\n/.exec(run.output())?.[1]?.trim(), {
+        timeoutMs: 30_000,
+        label: 'the child to print its tracked dir',
+      });
+      assert.ok(existsSync(tracked), 'exists while the child runs');
+      run.child.kill(sig);
+      const { signal } = await run.exited;
+      assert.equal(signal, sig, 'still dies by the signal');
+      assert.equal(existsSync(tracked), false, `tracked dir must be removed on ${sig}: ${tracked}`);
     } finally {
       run.child.kill('SIGKILL');
       run.cleanup();
@@ -315,8 +362,8 @@ function fakeProcess() {
 }
 
 test('preload cleanup: a signal removes the captured dir once, detaches every handler, and re-raises', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-unit-'));
-  const other = mkdtempSync(join(tmpdir(), 'preload-cleanup-other-'));
+  const dir = makeTempDir('preload-cleanup-unit-');
+  const other = makeTempDir('preload-cleanup-other-');
   const { proc, listeners, killed, emit } = fakeProcess();
   try {
     registerPinnedDirCleanup(dir, proc);
@@ -338,7 +385,7 @@ test('preload cleanup: a signal removes the captured dir once, detaches every ha
 });
 
 test('preload cleanup: with another listener for the signal, it leaves cleanup to exit (no remove, no re-raise)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-shared-'));
+  const dir = makeTempDir('preload-cleanup-shared-');
   const { proc, listeners, killed, emit } = fakeProcess();
   try {
     registerPinnedDirCleanup(dir, proc);
@@ -360,7 +407,7 @@ test('preload cleanup: with another listener for the signal, it leaves cleanup t
 });
 
 test('preload cleanup: an exit after a shared signal still removes the dir', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-shared-exit-'));
+  const dir = makeTempDir('preload-cleanup-shared-exit-');
   const { proc, killed, emit } = fakeProcess();
   registerPinnedDirCleanup(dir, proc);
   proc.on('SIGTERM', () => {});
@@ -372,7 +419,7 @@ test('preload cleanup: an exit after a shared signal still removes the dir', () 
 });
 
 test("preload cleanup: 'exit' removes the dir without re-raising anything", () => {
-  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-exit-'));
+  const dir = makeTempDir('preload-cleanup-exit-');
   const { proc, killed, emit } = fakeProcess();
   registerPinnedDirCleanup(dir, proc);
   emit('exit', 0);
@@ -381,7 +428,7 @@ test("preload cleanup: 'exit' removes the dir without re-raising anything", () =
 });
 
 test('preload cleanup: returns the idempotent cleanup for the end-of-run hook (bun 1.3.14 never emits exit)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-returned-'));
+  const dir = makeTempDir('preload-cleanup-returned-');
   const { proc, killed, emit } = fakeProcess();
   const cleanup = registerPinnedDirCleanup(dir, proc);
   assert.equal(existsSync(dir), true, 'registering removes nothing');

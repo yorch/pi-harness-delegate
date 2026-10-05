@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -13,6 +12,7 @@ import {
 } from '../extensions/modes.ts';
 import { sanitizeIdentifier } from '../extensions/sanitize.ts';
 import { loadExtension, readArgs, tpl, withFakeBinaries, withSandbox } from './helpers/sandbox.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 const ESC = String.fromCharCode(0x1b);
 const RLO = String.fromCharCode(0x202e); // right-to-left override
@@ -150,7 +150,7 @@ test('delegate_modes: a template name is JSON-quoted like every other template-a
 });
 
 test('onPath: an executable file on PATH only — never a spawn', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onpath-'));
+  const dir = makeTempDir('onpath-');
   try {
     writeFileSync(join(dir, 'tool-x'), '#!/bin/sh\n');
     chmodSync(join(dir, 'tool-x'), 0o755);

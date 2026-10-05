@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -12,6 +11,7 @@ import {
   pruneOutputs,
   safeSegmentName,
 } from '../extensions/activity.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 test('formatToolUse prefers description', () => {
   assert.equal(formatToolUse('Bash', { command: 'ls', description: 'List files' }), 'Bash: List files');
@@ -73,7 +73,7 @@ test('safeSegmentName neutralizes path separators', () => {
 });
 
 test('pruneOutputs keeps the newest N transcripts', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pcd-prune-'));
+  const dir = makeTempDir('pcd-prune-');
   try {
     const old = Date.now() / 1000 - 3600; // an hour old: outside the protect window for just-written files
     for (let i = 0; i < 5; i++) {
@@ -88,7 +88,7 @@ test('pruneOutputs keeps the newest N transcripts', () => {
 });
 
 test('pruneOutputs maxCount 0 keeps everything', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pcd-noprune-'));
+  const dir = makeTempDir('pcd-noprune-');
   try {
     for (let i = 0; i < 3; i++) writeFileSync(join(dir, `${i}.md`), 'x');
     pruneOutputs(dir, 0);
@@ -172,11 +172,10 @@ test('formatSpend reports unknown-cost runs honestly instead of folding them int
 });
 
 test('writeTranscript: owner-only permissions on the directory and each file', async () => {
-  const { mkdtempSync, statSync, readFileSync, rmSync, mkdirSync, chmodSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
+  const { statSync, readFileSync, rmSync, mkdirSync, chmodSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { writeTranscript } = await import('../extensions/activity.ts');
-  const root = mkdtempSync(join(tmpdir(), 'transcript-perms-'));
+  const root = makeTempDir('transcript-perms-');
   try {
     const dir = join(root, 'outputs', 'claude');
     const file = writeTranscript(dir, 'review', '# hi');

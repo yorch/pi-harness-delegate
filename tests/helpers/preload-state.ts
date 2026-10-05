@@ -117,16 +117,27 @@ function realProcess(): CleanupProcess {
  * `'exit'` handler cleans up whenever the process does end (or a leftover dir stays under
  * `os.tmpdir()` if that listener kills it by a signal — harmless).
  *
+ * `extra`, when given, runs right after the dir removal in that same once-only cleanup.
+ *
  * Returns the (idempotent) cleanup itself, for an end-of-run hook: bun 1.3.14 (the version `package.json`
  * pins, so the one CI runs) never emits `'exit'` (nor `'beforeExit'`) at the end of `bun test`, so the
  * preload also runs this from a `bun:test` `afterAll`. bun 1.4.x emits `'exit'` as node does.
  */
-export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = realProcess()): () => void {
+export function registerPinnedDirCleanup(
+  dir: string,
+  proc: CleanupProcess = realProcess(),
+  extra?: () => void,
+): () => void {
   let done = false;
   const cleanup = () => {
     if (done) return;
     done = true;
     removePinnedDir(dir);
+    try {
+      extra?.(); // the preload passes the temp-dir sweep (tests/helpers/tmp.ts) so signals and 'exit' run it too
+    } catch {
+      // best-effort, like the removal above
+    }
   };
   const detach = () => {
     proc.off('exit', cleanup);

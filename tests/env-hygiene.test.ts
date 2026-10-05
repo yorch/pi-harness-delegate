@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
+import { makeTempDir } from './helpers/tmp.ts';
 
 // Guard for the `process.env.X = prev` restore bug: when `X` was unset, `prev` is `undefined`, and
 // assigning `undefined` to `process.env` stores the *string* "undefined" — a restored
@@ -493,7 +493,7 @@ test('env hygiene: test sources of every JS/TS flavour are scanned', () => {
 });
 
 test('env hygiene: .ts sources under fixtures/ are scanned, data files are not', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'env-hygiene-files-'));
+  const dir = makeTempDir('env-hygiene-files-');
   try {
     mkdirSync(join(dir, 'fixtures', 'nested'), { recursive: true });
     for (const f of [
