@@ -8,7 +8,7 @@ import { claudeHarness } from '../extensions/harnesses/claude.ts';
 import { devinHarness } from '../extensions/harnesses/devin.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
 import { runHarness } from '../extensions/runner.ts';
-import { readPid, waitForProcessExit } from './helpers/wait.ts';
+import { readPid, waitForNoProcessWithArg, waitForProcessExit } from './helpers/wait.ts';
 
 /** A stdout harness that runs `node -e <script>` instead of a real CLI, parsed as Claude stream-json. */
 function nodeHarness(base: Harness, script: string): Harness {
@@ -23,6 +23,13 @@ function markerPath(): string {
 function rmMarker(path: string): void {
   rmSync(dirname(path), { recursive: true, force: true });
 }
+
+/**
+ * Every test here spawns a real child process. bun's default per-test timeout (5s) is shorter than
+ * the waitFor hang guards (15s) and than a cold spawn can take on a loaded machine, so give these room:
+ * a passing test still finishes the moment its condition holds — this only moves the hang guard.
+ */
+const SPAWN = { timeout: 60_000 };
 
 const RESULT_LINE = JSON.stringify({ type: 'result', result: 'done', total_cost_usd: 0.01, num_turns: 1 });
 
@@ -41,7 +48,7 @@ for (const [label, run, base] of [
   ['runHarness', runHarness, claudeHarness],
   ['runAcpHarness', runAcpHarness, devinHarness],
 ] as const) {
-  test(`${label}: an already-aborted signal rejects without ever spawning the harness`, async () => {
+  test(`${label}: an already-aborted signal rejects without ever spawning the harness`, SPAWN, async () => {
     // spawn needs the argv `buildArgs` returns, so zero calls proves no process was ever started —
     // no need to sleep and then check the child didn't leave a trace.
     let built = 0;
@@ -62,28 +69,41 @@ for (const [label, run, base] of [
   });
 }
 
-test('runHarness: the abort listener is removed once the run finishes', async () => {
+test('runHarness: the abort listener is removed once the run finishes', SPAWN, async () => {
   const harness = nodeHarness(claudeHarness, `console.log(${JSON.stringify(RESULT_LINE)})`);
   const { signal, counts } = countingSignal();
-  const res = await runHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', signal });
+  // an explicit runner timeout under the test's own: a hang surfaces as a clear runner error
+  const res = await runHarness({
+    harness,
+    prompt: 'hi',
+    cwd: process.cwd(),
+    permission: 'readonly',
+    signal,
+    timeoutMs: 30_000,
+  });
   assert.equal(res.result, 'done');
   assert.equal(counts.added, 1);
   assert.equal(counts.removed, 1);
 });
 
-test('runHarness: the abort listener is removed when the run fails too', async () => {
+test('runHarness: the abort listener is removed when the run fails too', SPAWN, async () => {
   const harness = nodeHarness(claudeHarness, 'process.exit(3)');
   const { signal, counts } = countingSignal();
-  await assert.rejects(runHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', signal }));
+  await assert.rejects(
+    runHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', signal, timeoutMs: 30_000 }),
+    /exited with code 3/,
+  );
   assert.equal(counts.added, 1);
   assert.equal(counts.removed, 1);
 });
 
-test('runAcpHarness: the abort listener is removed when the run ends', async () => {
+test('runAcpHarness: the abort listener is removed when the run ends', SPAWN, async () => {
   // exits immediately without speaking ACP — a failure path, which must clean up just the same
   const harness = nodeHarness(devinHarness, 'process.exit(2)');
   const { signal, counts } = countingSignal();
-  await assert.rejects(runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', signal }));
+  await assert.rejects(
+    runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', signal, timeoutMs: 30_000 }),
+  );
   assert.equal(counts.added, 1);
   assert.equal(counts.removed, 1);
 });
@@ -94,7 +114,7 @@ test('runAcpHarness: the abort listener is removed when the run ends', async () 
 const hangScript = (pidFile: string) =>
   `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
 
-test('runHarness: the timeout kills a hung child and rejects with the timeout message', async () => {
+test('runHarness: the timeout kills a hung child and rejects with the timeout message', SPAWN, async () => {
   const pidFile = markerPath();
   try {
     await assert.rejects(
@@ -107,13 +127,15 @@ test('runHarness: the timeout kills a hung child and rejects with the timeout me
       }),
       /timed out after 400ms/,
     );
-    assert.ok(await waitForProcessExit(await readPid(pidFile)), 'child must be killed on timeout');
+    // Not readPid: on a loaded machine the 400ms timeout can kill the child before it writes its pid.
+    // The pid file's (unique) path is in the child's argv, so "no such process left" is the check.
+    assert.ok(await waitForNoProcessWithArg(pidFile), 'child must be killed on timeout');
   } finally {
     rmMarker(pidFile);
   }
 });
 
-test('runHarness: aborting the signal mid-run kills the child and rejects as cancelled', async () => {
+test('runHarness: aborting the signal mid-run kills the child and rejects as cancelled', SPAWN, async () => {
   const pidFile = markerPath();
   try {
     const ac = new AbortController();
@@ -134,33 +156,37 @@ test('runHarness: aborting the signal mid-run kills the child and rejects as can
   }
 });
 
-test('runHarness: streamed text is capped at 5MB with a truncation marker, and only kept text is forwarded', async () => {
-  const { MAX_STREAMED_CHARS } = await import('../extensions/stream-caps.ts');
-  // 7 x ~1MB text_delta lines, then a result with an empty `result` (so the runner falls back to the stream)
-  const script = `
+test(
+  'runHarness: streamed text is capped at 5MB with a truncation marker, and only kept text is forwarded',
+  SPAWN,
+  async () => {
+    const { MAX_STREAMED_CHARS } = await import('../extensions/stream-caps.ts');
+    // 7 x ~1MB text_delta lines, then a result with an empty `result` (so the runner falls back to the stream)
+    const script = `
 const delta = (t) => JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: t } } });
 const chunk = 'x'.repeat(1024 * 1024 + 7); // not a divisor of 5MB, so one chunk straddles the cap
 for (let i = 0; i < 7; i++) process.stdout.write(delta(chunk) + '\\n');
 process.stdout.write(JSON.stringify({ type: 'result', result: '', num_turns: 1, total_cost_usd: 0 }) + '\\n');`;
-  let forwarded = 0;
-  const res = await runHarness({
-    harness: nodeHarness(claudeHarness, script),
-    prompt: 'hi',
-    cwd: process.cwd(),
-    permission: 'readonly',
-    timeoutMs: 30_000,
-    onStream: t => {
-      forwarded += t.length;
-    },
-  });
-  assert.ok(res.streamedText.startsWith('x'.repeat(1000)));
-  assert.match(res.streamedText, /\[truncated \d+ chars\]$/);
-  assert.ok(res.streamedText.length < MAX_STREAMED_CHARS + 100, `length ${res.streamedText.length}`);
-  assert.equal(res.streamedText.replace(/ \[truncated \d+ chars\]$/, '').length, MAX_STREAMED_CHARS);
-  assert.equal(forwarded, res.streamedText.length, 'onStream sees exactly what was kept');
-});
+    let forwarded = 0;
+    const res = await runHarness({
+      harness: nodeHarness(claudeHarness, script),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'readonly',
+      timeoutMs: 30_000,
+      onStream: t => {
+        forwarded += t.length;
+      },
+    });
+    assert.ok(res.streamedText.startsWith('x'.repeat(1000)));
+    assert.match(res.streamedText, /\[truncated \d+ chars\]$/);
+    assert.ok(res.streamedText.length < MAX_STREAMED_CHARS + 100, `length ${res.streamedText.length}`);
+    assert.equal(res.streamedText.replace(/ \[truncated \d+ chars\]$/, '').length, MAX_STREAMED_CHARS);
+    assert.equal(forwarded, res.streamedText.length, 'onStream sees exactly what was kept');
+  },
+);
 
-test('runHarness: activities are capped at 5000 (stored and forwarded)', async () => {
+test('runHarness: activities are capped at 5000 (stored and forwarded)', SPAWN, async () => {
   const { MAX_ACTIVITIES } = await import('../extensions/stream-caps.ts');
   const script = `
 const start = (i) => JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 't' + i, name: 'Bash', input: {} } } });
@@ -183,7 +209,7 @@ process.stdout.write(JSON.stringify({ type: 'result', result: 'done', num_turns:
   assert.equal(forwarded, MAX_ACTIVITIES);
 });
 
-test('runHarness: a binary that does not exist rejects with a clear spawn error', async () => {
+test('runHarness: a binary that does not exist rejects with a clear spawn error', SPAWN, async () => {
   const harness: Harness = { ...claudeHarness, binary: '/nonexistent/definitely-not-a-harness-binary' };
   await assert.rejects(
     runHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 5000 }),
@@ -191,7 +217,7 @@ test('runHarness: a binary that does not exist rejects with a clear spawn error'
   );
 });
 
-test('runAcpHarness: a binary that does not exist rejects with a clear spawn error', async () => {
+test('runAcpHarness: a binary that does not exist rejects with a clear spawn error', SPAWN, async () => {
   const harness: Harness = { ...devinHarness, binary: '/nonexistent/definitely-not-an-acp-binary' };
   await assert.rejects(
     runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 5000 }),

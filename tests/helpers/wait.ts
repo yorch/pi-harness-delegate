@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -50,5 +51,23 @@ export async function readPid(pidFile: string, timeoutMs?: number): Promise<numb
       }
     },
     { timeoutMs, label: `a pid in ${pidFile}` },
+  );
+}
+
+/**
+ * True once no running process has `marker` anywhere in its command line (`ps -A -ww`). For a child
+ * that may be killed before it ever gets to write its pid file (e.g. a short runner timeout on a
+ * loaded machine) — `readPid` would then wait for a file that never appears. `marker` must be unique
+ * to that child's argv (a fresh `mkdtemp` path is). A zombie no longer shows its args, so it counts
+ * as gone.
+ */
+export async function waitForNoProcessWithArg(marker: string, timeoutMs?: number): Promise<boolean> {
+  return waitFor(
+    () => {
+      const ps = execFileSync('ps', ['-A', '-ww', '-o', 'pid=,command='], { encoding: 'utf8' });
+      const alive = ps.split('\n').filter(line => line.includes(marker) && !line.includes('<defunct>'));
+      return alive.length === 0 ? true : undefined;
+    },
+    { timeoutMs, label: `no process with ${marker} in its argv` },
   );
 }

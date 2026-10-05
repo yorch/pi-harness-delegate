@@ -21,6 +21,8 @@ import { promisify } from 'node:util';
 import { acpView, runAcpHarness } from '../extensions/acp-runner.ts';
 import { getAllHarnesses } from '../extensions/harnesses/registry.ts';
 import { runHarness } from '../extensions/runner.ts';
+import { withEnvSync } from './helpers/env.ts';
+import { preloadState } from './helpers/preload-state.ts';
 
 const LIVE = process.env.PI_DELEGATE_LIVE === '1';
 
@@ -46,6 +48,17 @@ if (!LIVE) {
     { cwd: scratchDir },
   );
 
+  // The preload pins PI_CODING_AGENT_DIR to a temp dir for the whole process, live mode included. Real
+  // harness CLIs inherit our env, and `omp` (the `amp` harness) reads PI_CODING_AGENT_DIR as its *own*
+  // agent dir (auth, models), so each live run's child process gets the developer's outer value (absent
+  // when it was unset). The swap is synchronous (`withEnvSync`): `spawn` snapshots `process.env` when it
+  // is called, and both runners spawn synchronously inside their Promise executor, so the child keeps the
+  // outer value while this process is re-pinned before the run is even awaited. An async `withEnv` held
+  // across the run would restore only once the run settled — after bun's per-test timeout had already
+  // moved on, so overlapping restores could leave the rest of the process unpinned.
+  const preload = preloadState();
+  const outerAgentDir = preload ? preload.outerAgentDir : process.env.PI_CODING_AGENT_DIR;
+
   const PROMPT = 'Read README.md in this directory and reply with exactly the marker value it contains, nothing else.';
 
   // Which metrics each harness is *known* to genuinely report, per its default transport — from
@@ -58,8 +71,13 @@ if (!LIVE) {
   const REPORTS_NUM_TURNS = new Set(['claude', 'codex', 'opencode', 'amp']); // devin: never observed populated.
 
   for (const harness of getAllHarnesses()) {
-    test(`live: ${harness.name} runs a tiny read-only delegation`, async () => {
-      const detected = await harness.detect();
+    // Explicit timeout above the run's own 60s `timeoutMs`, so bun never abandons a run still in flight.
+    test(`live: ${harness.name} runs a tiny read-only delegation`, { timeout: 90_000 }, async () => {
+      // detect()'s `--version` probe is a child process too: hand it the outer value the same way. Each
+      // detect() starts its first probe synchronously (an async function runs up to its first await);
+      // amp's `omp --version` fallback starts after an await and so sees the pinned dir — harmless, it
+      // only reads a version string.
+      const detected = await withEnvSync({ PI_CODING_AGENT_DIR: outerAgentDir }, () => harness.detect());
       if (!detected.ok) {
         console.log(`skip ${harness.name}: not detected (${detected.hint ?? 'binary not found'})`);
         return;
@@ -69,13 +87,18 @@ if (!LIVE) {
       const run = transport === 'acp' ? runAcpHarness : runHarness;
       const runHarnessArg = transport === 'acp' ? acpView(harness) : harness;
 
-      const result = await run({
-        harness: runHarnessArg,
-        prompt: PROMPT,
-        cwd: scratchDir,
-        permission: 'readonly',
-        timeoutMs: 60_000,
-      });
+      // Swap only around the synchronous call that spawns the child (see the comment above), and await
+      // the run outside it.
+      const pending = withEnvSync({ PI_CODING_AGENT_DIR: outerAgentDir }, () =>
+        run({
+          harness: runHarnessArg,
+          prompt: PROMPT,
+          cwd: scratchDir,
+          permission: 'readonly',
+          timeoutMs: 60_000,
+        }),
+      );
+      const result = await pending;
 
       assert.equal(result.isError, false, `expected a successful run, got: ${result.result}`);
       assert.ok(result.result.trim().length > 0, 'expected non-empty result text');

@@ -40,6 +40,9 @@ PI_DELEGATE_LIVE=1 bun test tests/live.test.ts --timeout 90000
 Harnesses whose binary isn't on `PATH` are skipped. An account-side failure (exhausted quota, missing auth)
 is reported as a real failure, on purpose.
 
+Name `tests/live.test.ts` explicitly, as above. An unfiltered `PI_DELEGATE_LIVE=1 bun test` is still safe — every
+other file stays on the pinned agent dir (see below) — but it runs the whole suite and pays for the live runs too.
+
 ### Isolating state: `PI_CODING_AGENT_DIR`
 
 Everything this extension reads or writes under `~/.pi/agent` — `settings.json`, user templates
@@ -49,11 +52,27 @@ throwaway manual session.
 
 As a safety net, `bun test` preloads `tests/helpers/preload.ts` (wired in `bunfig.toml`), which pins
 `PI_CODING_AGENT_DIR` to a fresh `mkdtemp` dir under `os.tmpdir()` for the whole test process — overriding any
-outer value — and removes it on exit. A test that sets its own via `withEnv`/`withSandbox` is restored to that
-pinned dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. The opt-in
-live suite (`PI_DELEGATE_LIVE=1`) skips the pin: spawned harnesses inherit the env, and `omp` (the `amp`
-harness) reads `PI_CODING_AGENT_DIR` as its own agent dir for auth/models. `bunfig.toml` and `tests/` are not
-in `package.json` `files`, so none of this ships.
+outer value — and removes it at the end of the run (a `bun:test` `afterAll`, plus `'exit'`) and on
+SIGINT/SIGTERM/SIGHUP (re-raised afterwards, so Ctrl-C still stops the run with the usual status; if some other
+code also listens for that signal, the run isn't killed by it, so the dir is left for the end-of-run cleanup instead). A test that sets its own via `withEnv`/`withSandbox` is restored to that pinned
+dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. `bunfig.toml` and
+`tests/` are not in `package.json` `files`, so none of this ships.
+
+- **Run `bun test` from the repo root (or from `tests/`).** bun reads `bunfig.toml` only from its current
+  directory; the repo root's and `tests/bunfig.toml` both wire the preload. `bun run test` works from anywhere —
+  package scripts run from the package root. From any *other* directory no preload runs, so nothing is pinned, and
+  there is no way to notice from inside the run except `tests/preload.test.ts` (it checks a marker the preload sets
+  and never imports the preload itself): a run that includes it fails loudly, but a run of only other files passes
+  silently, unpinned. Don't do that.
+- **Live mode is pinned too.** `PI_DELEGATE_LIVE=1` doesn't turn the pin off. The live suite hands the outer
+  `PI_CODING_AGENT_DIR` (recorded by the preload, `preloadState().outerAgentDir`; absent when it was unset) to
+  the real harness CLIs' child processes only — `omp` (the `amp` harness) reads that var as its own agent dir for
+  auth/models. It swaps env with the synchronous `withEnvSync` around just the call that spawns the child
+  (`spawn` snapshots `process.env` when called), so the test process itself is re-pinned before the run is even
+  awaited. Don't hold an async `withEnv` across a long run: it restores only when the run settles, which can be
+  after bun's per-test timeout has moved on, and overlapping restores can then leave the process unpinned.
+- **Never import `tests/helpers/preload.ts` from a test.** Shared constants and helpers live in the side-effect-free
+  `tests/helpers/preload-state.ts`.
 
 ### Setting env vars in tests
 
@@ -61,8 +80,61 @@ Use `withEnv({ NAME: value }, fn)` (or `restoreEnv(name, prev)`) from `tests/hel
 `process.env.X = prev`. When `X` was unset, `prev` is `undefined`, and Node and Bun both store that as the
 *string* `"undefined"`. A restored `PI_CODING_AGENT_DIR="undefined"` once sent a straggling run's transcript
 into a relative `undefined/delegate/outputs/...` directory inside the repo. The helper deletes a var that was
-unset and restores it in `finally`, even when `fn` is async or throws. `tests/env-hygiene.test.ts` fails if any
-other test file writes to `process.env` directly.
+unset and restores it in `finally`, even when `fn` is async or throws (`tests/env.test.ts` covers it).
+
+`tests/env-hygiene.test.ts` fails if any other source file under `tests/` (`.ts`/`.js`/`.mjs`/`.tsx`/…,
+`fixtures/` included) touches `process.env`/`Bun.env`/`import.meta.env` in anything but a plain read. It is an
+allowlist, not a list of banned write shapes: `env.X`/`env[k]` used as a value, and the env object itself only in
+`'X' in process.env`, `{ ...process.env }`, `{ env: process.env }` (a spawn option), `Object.keys/values/entries/hasOwn(process.env)`,
+`const { A } = process.env` or `typeof`. Everything else fails — assignments of every kind, `delete`, `++`, passing
+`process.env` to a function, destructuring/parenthesised targets (`[process.env.X] = …`, `(process.env).X = …`).
+Using `process`/`Bun` as a bare value (`const p = process`, `const { env } = process`), `= globalThis`, and importing
+from `process`/`node:process` (or `env`/`*` from `bun`) are banned outright. It scans whole files with comments and
+string/regex text stripped, so mentioning the pattern in a comment or message is fine. To hand a child process a
+modified env, build a copy (`{ ...process.env, X: '1' }`) instead. If it flags a harmless shape (e.g.
+`obj[process.env.K] = v`, or a default value inside a destructuring pattern), read the var into a local first.
+
+As a runtime backstop, the preload's `afterEach` fails any test that leaves an env var whose value is exactly
+`"undefined"` or `"null"` — or not a string at all, which is what bun 1.3.14 stores (see below) — and removes it so
+later tests aren't affected. It catches what a static scan can't, but
+it's not a proof: a test that coerces and cleans up within its own body slips past it.
+
+### Tests that spawn processes
+
+Wait on conditions, not clocks: `tests/helpers/wait.ts` (`waitFor`, `readPid`, `waitForProcessExit`,
+`waitForNoProcessWithArg`). Give a spawning test an explicit generous timeout (`test(name, { timeout: 60_000 }, …)`)
+— bun's 5s default is shorter than those helpers' hang guards and than a cold spawn on a loaded machine. After a
+short runner timeout, don't `readPid`: the child may be killed before it writes its pid file; check that no process
+with the (unique) pid-file path in its argv is left instead.
+
+### Bun 1.3.14 (the pinned version) vs newer bun
+
+`package.json` pins `packageManager: bun@1.3.14` and CI runs exactly that, while a local install is often newer.
+The preload and the child-process tests in `tests/preload.test.ts` (which spawn a nested `bun test` with
+`process.execPath`, i.e. whatever bun runs the suite) depend on runtime details that differ between versions, and
+a newer local bun has passed while CI failed. **Before pushing a change to the preload, `tests/helpers/`, or any test
+that spawns `bun test`, run the suite under 1.3.14 too**, from the repo root:
+
+```bash
+bunx bun@1.3.14 test          # downloads that bun once, runs the suite with it (nested `bun test` children too)
+bunx bun@1.3.14 test tests/preload.test.ts
+```
+
+Known differences (found on bun 1.3.14 vs 1.4.1, macOS):
+
+| Behaviour | bun 1.3.14 | bun 1.4.x / node |
+| --- | --- | --- |
+| `process.on('exit')` / `'beforeExit'` at the normal end of `bun test` | never emitted (only on an explicit `process.exit()`) | emitted |
+| A throw from a `node:test` `afterEach` registered in a preload | reported as "Unhandled error between tests"; the test still passes | fails that test |
+| A `bun:test` `afterEach`/`afterAll` registered in a preload | applies to every file (`node:test` tests included); `afterAll` runs once, after the last file | same |
+| `process.env.X = undefined` (or `null`) | stores the raw value: the key stays present (`'X' in process.env`), reads as `undefined`, and is dropped from a spawned child's env | coerces to the string `"undefined"`/`"null"` |
+| Two failing async `node:test` tests (e.g. awaiting a child process) in one file | the *next* file's top-level `test()` calls throw `NotImplementedError: test() inside another test()`, so one real failure can show up as dozens across later files | only the real failures |
+
+So the preload uses `bun:test` hooks (`afterEach` for the backstop, `afterAll` for the pinned-dir cleanup alongside
+`'exit'`; `tests/helpers/bun-test.d.ts` declares just those two, since the repo has no `bun-types` dependency),
+the backstop treats any non-string env value as coerced, and tests assert on `'X' in process.env` rather than the
+value. When a 1.3.14 run reports a wall of `NotImplementedError`s, fix the first real failure above them — the
+rest is the cascade.
 
 ## Project layout
 
