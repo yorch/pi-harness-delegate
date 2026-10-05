@@ -787,3 +787,21 @@ test('delegate: the transcript it just wrote survives its own prune even when a 
     });
   });
 });
+
+test('pruneOutputs: a file a minute in the future (clock skew) is protected like a recent one, even when far-future files outrank it by name', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    const skewed = '2026-01-01T00-00-01-000Z-real.md';
+    writeFileSync(join(dir, skewed), '#');
+    utimesSync(join(dir, skewed), now / 1000 + 60, now / 1000 + 60);
+    for (let i = 0; i < 3; i++) {
+      const f = `2026-01-01T00-00-5${i}-000Z-zzz.md`;
+      writeFileSync(join(dir, f), 'junk');
+      utimesSync(join(dir, f), now / 1000 + 3600, now / 1000 + 3600);
+    }
+    pruneOutputs(dir, 1, [], now);
+    assert.ok(readdirSync(dir).includes(skewed), readdirSync(dir).join(', '));
+  });
+});
