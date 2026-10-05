@@ -1,6 +1,7 @@
 import {
   callTimeoutError,
   type DelegateTemplate,
+  quoteValue,
   TEMPLATE_TIMEOUT_MAX_SEC,
   TEMPLATE_TIMEOUT_MIN_SEC,
 } from './templates.ts';
@@ -118,7 +119,7 @@ export function templateHarnessDefault(harnesses: readonly string[] | undefined)
 /** The error for a harness spec that normalizes to nothing (`,`, `" , "`) — shared by `/delegate`'s
  *  `--harness=` and the `delegate` tool's `harness` param, so neither silently runs the default. */
 export function emptyHarnessSpecError(raw: string): string {
-  return `harness ${JSON.stringify(raw)} names no harness: give a harness name, a comma-separated list, or "all" (omit it for the default harness)`;
+  return `harness ${quoteValue(raw, 120)} names no harness: give a harness name, a comma-separated list, or "all" (omit it for the default harness)`;
 }
 
 /**
@@ -330,7 +331,7 @@ export function isFanoutSpec(harness: string | undefined): boolean {
  */
 export function fanoutResumeError(harnessSpec: string | undefined, sessionId: string | undefined): string | null {
   if (!sessionId || !isFanoutSpec(harnessSpec)) return null;
-  return `cannot resume session "${sessionId}" across a fan-out (harness "${harnessSpec}") — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=${sessionId} …); to resume every member of a past fan-out, pass its fan-out id instead (--resume=fan_…, shown in the fan-out report)`;
+  return `cannot resume session ${quoteValue(sessionId, 200)} across a fan-out (harness ${quoteValue(harnessSpec ?? '', 200)}) — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=<session id> …); to resume every member of a past fan-out, pass its fan-out id instead (--resume=fan_…, shown in the fan-out report)`;
 }
 
 export type HarnessFilterResolution =

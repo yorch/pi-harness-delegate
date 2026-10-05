@@ -124,3 +124,9 @@ test('the fan-out report lists skipped/unknown/unreadable names sanitized', () =
   clean('fan-out report', body);
   assert.match(body, /unreadable run record, not resumed/);
 });
+
+test('command-level errors that echo a model-set session id or harness spec escape them', async () => {
+  const { emptyHarnessSpecError, fanoutResumeError } = await import('../extensions/command.ts');
+  clean('fanoutResumeError', fanoutResumeError(`all${EVIL}`, EVIL) ?? '');
+  clean('emptyHarnessSpecError', emptyHarnessSpecError(`,${EVIL}`));
+});
