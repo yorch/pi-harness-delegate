@@ -16,9 +16,10 @@
  * Unconditional — an outer `PI_CODING_AGENT_DIR` (which may well point at a real agent dir) is
  * overridden too, and live mode (`PI_DELEGATE_LIVE=1`) is no exception. The live suite needs the outer
  * value for the real harness CLIs it spawns (`omp`, the `amp` harness, reads `PI_CODING_AGENT_DIR` as
- * its *own* agent dir for auth/models), so tests/live.test.ts hands them `preloadState().outerAgentDir`
- * around each of its own runs only. An unfiltered `PI_DELEGATE_LIVE=1 bun test` therefore still runs
- * every other file pinned. (The preload can't tell which files a run will load: inside it,
+ * its *own* agent dir for auth/models), so tests/live.test.ts hands their child processes
+ * `preloadState().outerAgentDir` via a synchronous swap (`withEnvSync`) around just the spawning call —
+ * the test process is re-pinned before the run is awaited. An unfiltered `PI_DELEGATE_LIVE=1 bun test`
+ * therefore still runs every other file pinned. (The preload can't tell which files a run will load: inside it,
  * `process.argv` names only the first test file, not the command line.)
  *
  * The pinned dir is removed when the process ends: on 'exit' (end of `bun test`, pass or fail) and on

@@ -62,8 +62,12 @@ dir, never to unset, so a run that outlives its sandbox can't reach your real `~
   preload sets and never imports the preload itself). `bun run test` works from anywhere — package scripts run
   from the package root.
 - **Live mode is pinned too.** `PI_DELEGATE_LIVE=1` doesn't turn the pin off. The live suite hands the outer
-  `PI_CODING_AGENT_DIR` (recorded by the preload, `preloadState().outerAgentDir`) to the real harness CLIs around
-  each of its own runs only — `omp` (the `amp` harness) reads that var as its own agent dir for auth/models.
+  `PI_CODING_AGENT_DIR` (recorded by the preload, `preloadState().outerAgentDir`; absent when it was unset) to
+  the real harness CLIs' child processes only — `omp` (the `amp` harness) reads that var as its own agent dir for
+  auth/models. It swaps env with the synchronous `withEnvSync` around just the call that spawns the child
+  (`spawn` snapshots `process.env` when called), so the test process itself is re-pinned before the run is even
+  awaited. Don't hold an async `withEnv` across a long run: it restores only when the run settles, which can be
+  after bun's per-test timeout has moved on, and overlapping restores can then leave the process unpinned.
 - **Never import `tests/helpers/preload.ts` from a test.** Shared constants and helpers live in the side-effect-free
   `tests/helpers/preload-state.ts`.
 

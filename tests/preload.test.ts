@@ -167,6 +167,61 @@ for (const [sig, status] of [
   });
 }
 
+/**
+ * Child body: two tests time out (200ms) while their run is still in flight (a fake harness child that
+ * sleeps 2s), with PI_CODING_AGENT_DIR swapped to the outer value by `swap` — the live suite's shape —
+ * then later tests (one waiting until both runs have finished) print what this process sees.
+ */
+function overlappingRunsBody(swap: 'withEnvSync' | 'withEnv'): string {
+  const helpers = join(import.meta.dirname, 'helpers', 'env.ts');
+  const runner = join(REPO_ROOT, 'extensions', 'runner.ts');
+  const claude = join(REPO_ROOT, 'extensions', 'harnesses', 'claude.ts');
+  const script = 'setTimeout(() => console.log(JSON.stringify({ type: "result", result: "ok" })), 2000);';
+  return [
+    `import { withEnv, withEnvSync } from ${JSON.stringify(helpers)};`,
+    `import { runHarness } from ${JSON.stringify(runner)};`,
+    `import { claudeHarness } from ${JSON.stringify(claude)};`,
+    `const harness = { ...claudeHarness, binary: process.execPath, buildArgs: () => ['-e', ${JSON.stringify(script)}] };`,
+    'const start = () => runHarness({ harness, prompt: "hi", cwd: process.cwd(), permission: "readonly", timeoutMs: 30_000 });',
+    `const live = () => ${swap === 'withEnvSync' ? 'withEnvSync({ PI_CODING_AGENT_DIR: undefined }, start)' : 'withEnv({ PI_CODING_AGENT_DIR: undefined }, start)'};`,
+    "const show = (t) => console.log(t + '=' + ('PI_CODING_AGENT_DIR' in process.env ? 'PINNED' : 'UNSET'));",
+    "test('run a', { timeout: 200 }, async () => { await live(); });",
+    "test('run b', { timeout: 200 }, async () => { await live(); });",
+    "test('right after', () => show('AFTER0'));",
+    "test('after both runs', { timeout: 20_000 }, async () => { await new Promise(r => setTimeout(r, 4000)); show('AFTER1'); });",
+    "test('later', () => show('AFTER2'));",
+  ].join('\n');
+}
+
+test('live swap: timed-out, overlapping runs can never leave the process unpinned (withEnvSync)', {
+  timeout: 60_000,
+}, async () => {
+  const run = startChildBunTest(overlappingRunsBody('withEnvSync'), childEnv({}, ['PI_DELEGATE_LIVE']));
+  try {
+    await run.exited;
+    const out = run.output();
+    assert.match(out, /\(fail\) run a/, 'the runs really did outlive their tests');
+    for (const t of ['AFTER0', 'AFTER1', 'AFTER2']) assert.match(out, new RegExp(`${t}=PINNED`), out);
+  } finally {
+    run.cleanup();
+  }
+});
+
+test('live swap: the same shape with an async withEnv does leave the process unpinned (why live uses withEnvSync)', {
+  timeout: 60_000,
+}, async () => {
+  const run = startChildBunTest(overlappingRunsBody('withEnv'), childEnv({}, ['PI_DELEGATE_LIVE']));
+  try {
+    await run.exited;
+    const out = run.output();
+    assert.match(out, /\(fail\) run a/, out);
+    assert.match(out, /AFTER1=UNSET/, `expected the out-of-order restore to unpin the process:\n${out}`);
+    assert.match(out, /AFTER2=UNSET/, out);
+  } finally {
+    run.cleanup();
+  }
+});
+
 /** A fake `process` recording listeners and re-raised signals. */
 function fakeProcess() {
   const listeners = new Map<string, Array<(signal: NodeJS.Signals) => void>>();
