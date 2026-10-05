@@ -5,6 +5,7 @@
  */
 
 import { newestFirst } from './run-record.ts';
+import { quoteValue } from './templates.ts';
 
 /** One run in the history view: from its run-record sidecar when present, else parsed from the
  *  transcript header (legacy transcripts). `isError`/`runId` are `null` when unknowable. */
@@ -51,7 +52,7 @@ export const HISTORY_MAX_LIMIT = 1000;
 /** `--since=` value -> a cutoff instant (ms), or an error message. */
 export function parseSince(value: string, now: number): { ms: number } | { error: string } {
   const bad = {
-    error: `--since must be a duration like 90m, 2h, 3d, 1w, or a date like 2026-10-01 / 2026-10-01T09:30:00Z (got ${JSON.stringify(value.slice(0, 40))})`,
+    error: `--since must be a duration like 90m, 2h, 3d, 1w, or a date like 2026-10-01 / 2026-10-01T09:30:00Z (got ${quoteValue(value.slice(0, 40), 100)})`,
   };
   const dur = /^(\d{1,6})([smhdw])$/.exec(value);
   if (dur) {
@@ -65,7 +66,16 @@ export function parseSince(value: string, now: number): { ms: number } | { error
     // reject rollovers like 2026-02-31
     return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d ? { ms: date.getTime() } : bad;
   }
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?$/.test(value)) {
+  const dt = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/.exec(value);
+  if (dt) {
+    const [y, mo, d, hh, mi] = [Number(dt[1]), Number(dt[2]), Number(dt[3]), Number(dt[4]), Number(dt[5])];
+    const ss = dt[6] === undefined ? 0 : Number(dt[6]);
+    // reject rollovers exactly like the date-only form: 2026-02-30T10:00Z is NOT March 2, 24:00 is not tomorrow
+    const probe = new Date(Date.UTC(y, mo - 1, d));
+    const real = probe.getUTCFullYear() === y && probe.getUTCMonth() === mo - 1 && probe.getUTCDate() === d;
+    const zone = dt[7] && dt[7] !== 'Z' ? /^[+-](\d{2}):(\d{2})$/.exec(dt[7]) : null;
+    const zoneOk = !zone || (Number(zone[1]) <= 23 && Number(zone[2]) <= 59);
+    if (!real || hh > 23 || mi > 59 || ss > 59 || !zoneOk) return bad;
     const ms = Date.parse(value);
     return Number.isNaN(ms) ? bad : { ms };
   }
@@ -85,44 +95,61 @@ export function parseHistoryArgs(
 ): { filter: HistoryFilter; errors: string[] } {
   const filter: HistoryFilter = {};
   const errors: string[] = [];
+  const seen = new Set<string>();
+  /** Each option may be given once: the second `--since=` used to silently replace the first. */
+  const once = (key: string): boolean => {
+    if (!seen.has(key)) {
+      seen.add(key);
+      return true;
+    }
+    errors.push(`--${key} was given more than once — give it a single time`);
+    return false;
+  };
   const setHarness = (word: string) => {
     const h = resolveHarness(word);
-    if (h === null) errors.push(`unknown harness ${JSON.stringify(word.slice(0, 40))}`);
+    if (h === null) errors.push(`unknown harness ${quoteValue(word.slice(0, 40), 100)}`);
     else filter.harness = h;
   };
   for (const token of raw.split(/\s+/).filter(Boolean)) {
     const m = /^--([a-zA-Z][a-zA-Z-]*)(?:=(.*))?$/.exec(token);
     if (!m) {
-      if (filter.harness === undefined && !errors.some(e => e.startsWith('unknown harness'))) setHarness(token);
-      else errors.push(`unexpected argument ${JSON.stringify(token.slice(0, 40))}`);
+      if (!seen.has('harness') && !errors.some(e => e.startsWith('unknown harness'))) {
+        once('harness');
+        setHarness(token);
+      } else errors.push(`unexpected argument ${quoteValue(token.slice(0, 40), 100)}`);
       continue;
     }
     const [, key, value] = m;
     switch (key) {
       case 'failed':
       case 'ok':
+        if (!once(key)) break;
         if (value !== undefined) errors.push(`--${key} takes no value`);
         else filter[key] = true;
         break;
       case 'harness':
+        if (!once('harness')) break;
         if (!value) errors.push('--harness needs a value');
         else setHarness(value);
         break;
       case 'mode':
+        if (!once(key)) break;
         if (!value || !MODE_RE.test(value))
-          errors.push(`--mode must be a mode name (got ${JSON.stringify((value ?? '').slice(0, 40))})`);
+          errors.push(`--mode must be a mode name (got ${quoteValue((value ?? '').slice(0, 40), 100)})`);
         else filter.mode = value;
         break;
       case 'limit': {
+        if (!once(key)) break;
         const n = value !== undefined && /^\d{1,5}$/.test(value) ? Number(value) : Number.NaN;
         if (Number.isInteger(n) && n >= 1 && n <= HISTORY_MAX_LIMIT) filter.limit = n;
         else
           errors.push(
-            `--limit must be a whole number from 1 to ${HISTORY_MAX_LIMIT} (got ${JSON.stringify((value ?? '').slice(0, 20))})`,
+            `--limit must be a whole number from 1 to ${HISTORY_MAX_LIMIT} (got ${quoteValue((value ?? '').slice(0, 20), 60)})`,
           );
         break;
       }
       case 'since': {
+        if (!once(key)) break;
         const r = parseSince(value ?? '', now);
         if ('error' in r) errors.push(r.error);
         else {
