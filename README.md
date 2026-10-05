@@ -63,6 +63,7 @@ Flag values may be quoted (`--verify="bun test && bun run lint"`). `--resume`, `
 | --- | --- |
 | `/delegate list [harness]` | Available modes/templates (all harnesses, or one) |
 | `/delegate history [harness] [--failed\|--ok] [--since=<2h\|3d\|1w\|YYYY-MM-DD>] [--limit=<n>] [--mode=<name>]` (alias `logs`) | Past runs, newest first, with optional filters; open one to read its transcript (and see its resume hint). Runs show their run id. Reads the [run-record](#run-records) sidecars and falls back to the transcript header for older transcripts (a legacy transcript whose header doesn't say matches neither `--failed` nor `--ok`). An invalid filter value is an error and lists nothing. |
+| `/delegate rerun [n\|run_<id>] [--here] [--fanout] [--resume] [overrides…]` | Re-run a recorded run through the normal command path — see [Rerun](#rerun) |
 | `/delegate status [harness]` (aliases `health`, `doctor`, `check`) | Config provenance, project trust, per-harness detection/version/templates/active-vs-cap, spend rollup |
 | `/delegate config` | What was read from `settings.json` and the effective config (print-only) |
 | `/delegate config init` | Write the effective config into `settings.json`'s `delegate` key (the only write this extension does) |
@@ -74,6 +75,18 @@ Some modes have **default tasks** when the prompt is omitted:
 The `delegate` tool takes: `harness`, `task`, `mode`, `scope` (`diff` = git diff, `pr` = PR diff, path list, or whole repo), `model`, `maxBudgetUsd`, `timeoutSec` (whole seconds, `10`–`7200`; can only shorten the timeout the template/config gives the run, never lengthen it), `allowDangerous`, `sessionId`, `pr`, `addDirs`. (`verify` is deliberately *not* a tool parameter — see below.) Setting `allowDangerous` from the tool always asks you to confirm interactively, and is refused outright in a non-interactive session — see [Security model](#security-model).
 
 `claude_delegate` remains as a deprecated alias for `delegate{harness:claude}`. A read-only `delegate_modes` tool lets the model list the available modes, their permission tier per harness and the installed harnesses before it delegates (see [Discovering modes](#modes-templates)).
+
+### Rerun
+
+`/delegate rerun` repeats a past run from its [run record](#run-records), through exactly the same code path as typing the command — so every gate applies afresh. `rerun` alone repeats the most recent run that has a record; `rerun 2` repeats the 2nd entry of the history listing you last viewed this session (the full history if you haven't viewed one — use the run id shown in the listing for filtered views); `rerun run_<id>` names one exactly (the only way to reach a partial run).
+
+- **Same** harness, mode, task, scope, `--pr`, `--add-dir`s, budget, timeout and model; a **fresh session** unless you pass a bare `--resume` (continue the recorded session) or `--resume=<id>`.
+- **Overrides** use the normal flags: `--harness=`, `--mode=`, `--model=`, `--budget=`, `--timeout=`, `--scope=`, `--pr=`, `--add-dir=`. A rerun takes no new prompt.
+- **Not replayed, on purpose**: `--allow-dangerous` (a danger run is not repeated as danger — pass the flag again and confirm as usual; a headless session still refuses it) and `--verify=` (records only note *that* a verify command existed; pass `--verify=<cmd>` again, or rely on the template's own `verify:`). The output tells you when the original had either.
+- The record's **directory** must match the current one; otherwise it refuses unless you pass `--here` (run it in the current directory).
+- A run that was one member of a fan-out reruns just that member; `--fanout` reruns every recorded member as a fan-out (same detection filtering, queueing and confirms as `/delegate all`).
+- The mode is resolved **now**, with the same project-trust gating as any run: a mode that has since been removed (or is a project-local template in an untrusted project) is a clear error. Everything stored in a record is re-validated (a leading `-` in a model/pr/session id, control characters, out-of-range values are all rejected) because a record file is untrusted data.
+- Works headless (no UI needed unless danger is involved).
 
 ### Fan out to multiple harnesses
 

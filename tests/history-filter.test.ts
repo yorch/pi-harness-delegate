@@ -193,7 +193,10 @@ test('/delegate history: an invalid filter prints the error and lists nothing; a
     const { commands } = await loadExtension();
     const out: string[] = [];
     const orig = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((s: string) => (out.push(String(s)), true)) as typeof process.stdout.write;
+    process.stdout.write = ((s: string) => {
+      out.push(String(s));
+      return true;
+    }) as typeof process.stdout.write;
     try {
       await commands.get('delegate')?.handler('history --limit=zero', fakeCtx(cwd));
       const err = out.join('');

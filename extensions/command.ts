@@ -121,6 +121,33 @@ export function emptyHarnessSpecError(raw: string): string {
  */
 const FLAG_OR_PROSE = /`[^`]*`|"[^"]*"|(^|\s)--([a-zA-Z][a-zA-Z-]*)(?:=(?:"([^"]*)"|'([^']*)'|(\S*))|(?=\s|$))/g;
 
+/**
+ * Pull standalone bare flags (`--here`, `--fanout`, …: no `=value`) named in `names` out of `raw`,
+ * using the same quote/backtick-aware pass as `parseDelegateCommand`, so one inside a quoted or
+ * backticked span (or a `--verify="… --here …"` value) is left alone. Returns the text without them.
+ * For subcommands (like `rerun`) whose own flags the main parser doesn't know.
+ */
+export function extractBareFlags<N extends string>(raw: string, names: readonly N[]): { rest: string; found: Set<N> } {
+  const found = new Set<N>();
+  const rest = raw.replace(
+    FLAG_OR_PROSE,
+    (
+      m: string,
+      lead: string | undefined,
+      k: string | undefined,
+      dq: string | undefined,
+      sq: string | undefined,
+      bare: string | undefined,
+    ) => {
+      if (k === undefined || dq !== undefined || sq !== undefined || bare !== undefined) return m;
+      if (!(names as readonly string[]).includes(k)) return m;
+      found.add(k as N);
+      return lead ?? '';
+    },
+  );
+  return { rest, found };
+}
+
 /** Every flag `parseDelegateCommand` acts on — used to notice one stranded inside quoted prose. */
 const RECOGNIZED_FLAGS = new Set([
   'harness',

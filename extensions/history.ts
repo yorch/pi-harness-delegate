@@ -125,8 +125,17 @@ export function historyLine(e: HistoryEntry): string {
   return `${displayText(e.harness, 24)} ${displayText(e.mode, 64)} · ${status} · ${formatCost(e.cost)} · ${e.sessionId ? displayText(e.sessionId, 40) : '-'}${e.runId ? ` · ${e.runId}` : ''}`;
 }
 
+/** The listing the user last saw this session — what a numeric `/delegate rerun <n>` indexes into. */
+let lastView: HistoryEntry[] | null = null;
+
+/** The last shown history view, or the full unfiltered history when none has been shown yet. */
+export function currentHistoryView(): HistoryEntry[] {
+  return lastView ?? applyHistoryFilter(readAllHistory(), {});
+}
+
 export async function showHistory(ctx: ExtensionContext, filter: HistoryFilter = {}): Promise<void> {
   const entries = applyHistoryFilter(readAllHistory(), filter);
+  lastView = entries;
   const filterLabel = describeHistoryFilter(filter);
   if (entries.length === 0) {
     const msg = filterLabel

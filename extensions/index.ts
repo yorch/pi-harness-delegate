@@ -28,6 +28,7 @@ import {
   aliasUsage,
   delegateUsage,
   emptyHarnessSpecError,
+  extractBareFlags,
   isFanoutSpec,
   normalizeHarnessSpec,
   parseDelegateCommand,
@@ -58,7 +59,7 @@ import {
 } from './harnesses/registry.ts';
 import type { ActivityEvent } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
-import { showHistory } from './history.ts';
+import { currentHistoryView, showHistory } from './history.ts';
 import { HISTORY_FLAGS_HINT, parseHistoryArgs } from './history-filter.ts';
 import {
   collectModes,
@@ -69,6 +70,8 @@ import {
   templateViews,
 } from './modes.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
+import { planRerun, readAllRecords, selectRecord } from './rerun.ts';
+import { isRunId } from './run-record.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
 import { callTimeoutError, type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
@@ -563,112 +566,15 @@ export default function (pi: ExtensionAPI) {
     return { result: failed ? null : result, error: runState.error, cancelled };
   };
 
-  const makeHandler = (forcedHarness?: string) => async (args: string, ctx: ExtensionContext) => {
-    const sub = args.trim();
-    const subLower = sub.toLowerCase();
-    // status / health / doctor — harness health check
-    if (subLower === 'status' || subLower === 'health' || subLower === 'doctor' || subLower === 'check') {
-      await showStatus(ctx, forcedHarness);
-      return;
-    }
-    if (
-      subLower.startsWith('status ') ||
-      subLower.startsWith('health ') ||
-      subLower.startsWith('doctor ') ||
-      subLower.startsWith('check ')
-    ) {
-      const maybeH = sub.split(/\s+/)[1]?.toLowerCase();
-      const flagMatch = sub.match(/--harness=([^\s]+)/);
-      const h =
-        forcedHarness ??
-        (flagMatch ? flagMatch[1].toLowerCase() : maybeH && isKnownHarness(maybeH) ? maybeH : undefined);
-      await showStatus(ctx, h);
-      return;
-    }
-    if (subLower === 'config init') {
-      await initConfig(ctx);
-      return;
-    }
-    if (subLower === 'config') {
-      await showConfig(ctx);
-      return;
-    }
-    // extract --harness flag for list/history subcommands
-    const harnessFlag = sub.match(/--harness=([^\s]+)/)?.[1];
-    if (sub === 'watch' || sub === 'show') {
-      if (ui.activeOverlay) {
-        ui.activeOverlay.show();
-        ui.activeOverlay.focus();
-      } else {
-        ctx.ui.notify?.('No active delegate run to show — start one with /delegate <harness> <mode> <prompt>', 'info');
-      }
-      return;
-    }
-    // Shared by list/history: resolve their (optional) harness filter to a canonical name via the
-    // same alias/case rules (`omp` -> `amp`, any case), and reject a word that matches nothing —
-    // rather than each falling back to silently showing an unfiltered or empty result.
-    const filterHarness = (bareWord: string | undefined): string | undefined | 'unknown' => {
-      if (forcedHarness) return forcedHarness;
-      const resolution = resolveHarnessFilter(harnessFlag ?? bareWord, {
-        isKnown: isKnownHarness,
-        aliasOf: resolveHarnessName,
-      });
-      if (resolution.kind === 'unknown') {
-        const msg = `unknown harness "${resolution.requested}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`;
-        if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
-        else ctx.ui.notify?.(msg, 'warning');
-        return 'unknown';
-      }
-      return resolution.kind === 'known' ? resolution.harness : undefined;
-    };
-    if (sub === 'list' || subLower.startsWith('list ')) {
-      const h = filterHarness(subLower.startsWith('list ') ? sub.split(/\s+/)[1] : undefined);
-      if (h === 'unknown') return;
-      await showModes(ctx, h);
-      return;
-    }
-    if (sub === 'history' || sub === 'logs' || subLower.startsWith('history ') || subLower.startsWith('logs ')) {
-      // filters: optional harness word/--harness=, --failed|--ok, --since=, --limit=, --mode= (pure, history-filter.ts)
-      const { filter, errors } = parseHistoryArgs(sub.replace(/^\S+\s*/, ''), Date.now(), word => {
-        const lower = word.toLowerCase();
-        return isKnownHarness(lower) ? resolveHarnessName(lower) : null;
-      });
-      if (errors.length > 0) {
-        const msg = `${errors.join('; ')}\nUsage: /delegate history ${HISTORY_FLAGS_HINT}\nHarnesses: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`;
-        if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
-        else ctx.ui.notify?.(msg, 'warning');
-        return;
-      }
-      if (forcedHarness) filter.harness = forcedHarness;
-      await showHistory(ctx, filter);
-      return;
-    }
-
-    // combine forced harness + args for parsing
-    const rawForParse = forcedHarness ? `${forcedHarness} ${args}`.trim() : args;
-    // gather known modes across all harnesses for parsing
-    const trusted = isProjectTrusted(ctx);
-    const allModes = new Set<string>();
-    for (const h of HARNESS_NAMES) for (const k of loadTemplates(ctx.cwd, h, trusted).keys()) allModes.add(k);
-    for (const k of loadTemplates(ctx.cwd, undefined, trusted).keys()) allModes.add(k);
-    const knownHarnessesSet = new Set([...HARNESS_NAMES, ...Object.keys(ALIASES)]);
-    const parsed = parseDelegateCommand(rawForParse, allModes, knownHarnessesSet);
-    // if forcedHarness provided, it wins
-    if (forcedHarness) parsed.harness = forcedHarness;
-    // a flag that was given but can't be honored (e.g. --budget=0) runs nothing — never silently dropped
-    if (parsed.errors && parsed.errors.length > 0) {
-      const msg = `${parsed.errors.join('; ')}\nUsage: ${forcedHarness ? aliasUsage(forcedHarness) : delegateUsage()}`;
-      if (ctx.hasUI) ctx.ui.notify(msg, 'error');
-      else process.stderr.write(`${msg}\n`);
-      return;
-    }
-    // non-fatal: e.g. a --flag= that sat inside "quoted" prompt text and so wasn't applied
-    if (parsed.notices && parsed.notices.length > 0) {
-      const msg = parsed.notices.join('\n');
-      if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
-      else process.stderr.write(`${msg}\n`);
-    }
-
+  /** The shared tail of every run-starting command: default-harness resolution, fan-out dispatch, the
+   *  danger confirm, the single-run overlay and the report. `/delegate <prompt>` and `/delegate rerun`
+   *  both end up here, so a rerun passes through exactly the same gates as a typed command. */
+  const runParsed = async (
+    ctx: ExtensionContext,
+    parsed: ReturnType<typeof parseDelegateCommand>,
+    forcedHarness: string | undefined,
+    trusted: boolean,
+  ): Promise<void> => {
     // No harness given (and no alias command): the mode's template may name default harness(es).
     // Several make this a fan-out through the normal path below — same detection filtering,
     // reporting, slot queueing and single --allow-dangerous confirm as a typed list.
@@ -769,8 +675,174 @@ export default function (pi: ExtensionAPI) {
     } else process.stdout.write(`${summary.text}\n`);
   };
 
+  /** `/delegate rerun [n|runId] [--here] [--fanout] [--resume] [overrides…]` — plan a rerun from a run
+   *  record (rerun.ts re-validates everything stored) and hand it to the normal command tail. */
+  const handleRerun = async (ctx: ExtensionContext, rest: string, forcedHarness: string | undefined): Promise<void> => {
+    const say = (msg: string, level: 'error' | 'warning' | 'info') => {
+      if (ctx.hasUI) ctx.ui.notify?.(msg, level);
+      else process.stderr.write(`${msg}\n`);
+    };
+    const usage = `Usage: /delegate rerun [n|run_<id>] [--here] [--fanout] [--resume] [--harness=…] [--mode=…] [--model=…] [--budget=<usd>] [--timeout=<sec>] [--scope=…] [--pr=…] [--add-dir=…] [--verify=<cmd>] [--allow-dangerous]`;
+    const { rest: afterFlags, found } = extractBareFlags(rest, ['here', 'fanout', 'resume'] as const);
+    const words = afterFlags.trim().split(/\s+/).filter(Boolean);
+    const selector = words[0] && (/^\d+$/.test(words[0]) || isRunId(words[0])) ? words.shift() : undefined;
+    const trusted = isProjectTrusted(ctx);
+    const allModes = new Set<string>();
+    for (const h of HARNESS_NAMES) for (const k of loadTemplates(ctx.cwd, h, trusted).keys()) allModes.add(k);
+    const overrides = parseDelegateCommand(
+      words.join(' '),
+      allModes,
+      new Set([...HARNESS_NAMES, ...Object.keys(ALIASES)]),
+    );
+    if (forcedHarness) overrides.harness = forcedHarness;
+    if (overrides.errors?.length) {
+      say(`${overrides.errors.join('; ')}\n${usage}`, 'error');
+      return;
+    }
+    // a bare number indexes the listing the user last saw (else the full history); no selector means the most recent run
+    const picked = selectRecord(selector, selector !== undefined && !isRunId(selector) ? currentHistoryView() : []);
+    if (!picked.ok) {
+      say(`rerun: ${picked.error}\n${usage}`, 'error');
+      return;
+    }
+    const record = picked.record;
+    const plan = planRerun(
+      record,
+      overrides,
+      { here: found.has('here'), fanout: found.has('fanout'), resumeOwn: found.has('resume') },
+      {
+        cwd: ctx.cwd,
+        isKnownHarness,
+        modeAvailable: (h, m) => loadTemplates(ctx.cwd, h, trusted).has(m),
+        siblings: record.fanoutId ? readAllRecords().filter(r => r.fanoutId === record.fanoutId) : [],
+      },
+    );
+    if (plan.errors.length > 0 || !plan.args) {
+      say(`rerun: ${plan.errors.join('; ')}`, 'error');
+      return;
+    }
+    if (plan.notices.length > 0) say(plan.notices.join('\n'), 'info');
+    // exactly the typed-command path from here on — danger confirm, fan-out, overlay and report included
+    if (forcedHarness) plan.args.harness = forcedHarness;
+    await runParsed(ctx, plan.args, forcedHarness, trusted);
+  };
+
+  const makeHandler = (forcedHarness?: string) => async (args: string, ctx: ExtensionContext) => {
+    const sub = args.trim();
+    const subLower = sub.toLowerCase();
+    // status / health / doctor — harness health check
+    if (subLower === 'status' || subLower === 'health' || subLower === 'doctor' || subLower === 'check') {
+      await showStatus(ctx, forcedHarness);
+      return;
+    }
+    if (
+      subLower.startsWith('status ') ||
+      subLower.startsWith('health ') ||
+      subLower.startsWith('doctor ') ||
+      subLower.startsWith('check ')
+    ) {
+      const maybeH = sub.split(/\s+/)[1]?.toLowerCase();
+      const flagMatch = sub.match(/--harness=([^\s]+)/);
+      const h =
+        forcedHarness ??
+        (flagMatch ? flagMatch[1].toLowerCase() : maybeH && isKnownHarness(maybeH) ? maybeH : undefined);
+      await showStatus(ctx, h);
+      return;
+    }
+    if (subLower === 'config init') {
+      await initConfig(ctx);
+      return;
+    }
+    if (subLower === 'config') {
+      await showConfig(ctx);
+      return;
+    }
+    // extract --harness flag for list/history subcommands
+    const harnessFlag = sub.match(/--harness=([^\s]+)/)?.[1];
+    if (sub === 'watch' || sub === 'show') {
+      if (ui.activeOverlay) {
+        ui.activeOverlay.show();
+        ui.activeOverlay.focus();
+      } else {
+        ctx.ui.notify?.('No active delegate run to show — start one with /delegate <harness> <mode> <prompt>', 'info');
+      }
+      return;
+    }
+    // Shared by list/history: resolve their (optional) harness filter to a canonical name via the
+    // same alias/case rules (`omp` -> `amp`, any case), and reject a word that matches nothing —
+    // rather than each falling back to silently showing an unfiltered or empty result.
+    const filterHarness = (bareWord: string | undefined): string | undefined | 'unknown' => {
+      if (forcedHarness) return forcedHarness;
+      const resolution = resolveHarnessFilter(harnessFlag ?? bareWord, {
+        isKnown: isKnownHarness,
+        aliasOf: resolveHarnessName,
+      });
+      if (resolution.kind === 'unknown') {
+        const msg = `unknown harness "${resolution.requested}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`;
+        if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
+        else ctx.ui.notify?.(msg, 'warning');
+        return 'unknown';
+      }
+      return resolution.kind === 'known' ? resolution.harness : undefined;
+    };
+    if (sub === 'list' || subLower.startsWith('list ')) {
+      const h = filterHarness(subLower.startsWith('list ') ? sub.split(/\s+/)[1] : undefined);
+      if (h === 'unknown') return;
+      await showModes(ctx, h);
+      return;
+    }
+    if (sub === 'history' || sub === 'logs' || subLower.startsWith('history ') || subLower.startsWith('logs ')) {
+      // filters: optional harness word/--harness=, --failed|--ok, --since=, --limit=, --mode= (pure, history-filter.ts)
+      const { filter, errors } = parseHistoryArgs(sub.replace(/^\S+\s*/, ''), Date.now(), word => {
+        const lower = word.toLowerCase();
+        return isKnownHarness(lower) ? resolveHarnessName(lower) : null;
+      });
+      if (errors.length > 0) {
+        const msg = `${errors.join('; ')}\nUsage: /delegate history ${HISTORY_FLAGS_HINT}\nHarnesses: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`;
+        if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
+        else ctx.ui.notify?.(msg, 'warning');
+        return;
+      }
+      if (forcedHarness) filter.harness = forcedHarness;
+      await showHistory(ctx, filter);
+      return;
+    }
+
+    if (sub === 'rerun' || subLower.startsWith('rerun ')) {
+      await handleRerun(ctx, sub.replace(/^\S+\s*/, ''), forcedHarness);
+      return;
+    }
+
+    // combine forced harness + args for parsing
+    const rawForParse = forcedHarness ? `${forcedHarness} ${args}`.trim() : args;
+    // gather known modes across all harnesses for parsing
+    const trusted = isProjectTrusted(ctx);
+    const allModes = new Set<string>();
+    for (const h of HARNESS_NAMES) for (const k of loadTemplates(ctx.cwd, h, trusted).keys()) allModes.add(k);
+    for (const k of loadTemplates(ctx.cwd, undefined, trusted).keys()) allModes.add(k);
+    const knownHarnessesSet = new Set([...HARNESS_NAMES, ...Object.keys(ALIASES)]);
+    const parsed = parseDelegateCommand(rawForParse, allModes, knownHarnessesSet);
+    // if forcedHarness provided, it wins
+    if (forcedHarness) parsed.harness = forcedHarness;
+    // a flag that was given but can't be honored (e.g. --budget=0) runs nothing — never silently dropped
+    if (parsed.errors && parsed.errors.length > 0) {
+      const msg = `${parsed.errors.join('; ')}\nUsage: ${forcedHarness ? aliasUsage(forcedHarness) : delegateUsage()}`;
+      if (ctx.hasUI) ctx.ui.notify(msg, 'error');
+      else process.stderr.write(`${msg}\n`);
+      return;
+    }
+    // non-fatal: e.g. a --flag= that sat inside "quoted" prompt text and so wasn't applied
+    if (parsed.notices && parsed.notices.length > 0) {
+      const msg = parsed.notices.join('\n');
+      if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
+      else process.stderr.write(`${msg}\n`);
+    }
+
+    await runParsed(ctx, parsed, forcedHarness, trusted);
+  };
+
   pi.registerCommand('delegate', {
-    description: `Delegate a task to any harness. Usage: ${delegateUsage()} — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless. /delegate history ${HISTORY_FLAGS_HINT} lists past runs.`,
+    description: `Delegate a task to any harness. Usage: ${delegateUsage()} — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless. /delegate history ${HISTORY_FLAGS_HINT} lists past runs; /delegate rerun [n|run_<id>] repeats one.`,
     handler: makeHandler(),
   });
   // alias commands: same flag set as /delegate (one source — COMMAND_FLAGS_HINT), harness fixed
