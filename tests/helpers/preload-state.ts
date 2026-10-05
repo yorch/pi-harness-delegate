@@ -2,8 +2,9 @@
  * Side-effect-free shared state for the `bun test` preload (tests/helpers/preload.ts). Tests import
  * *this* module — never the preload itself. Importing the preload from a test would run the pin as a
  * side effect of the import, so a run where bun never applied the preload (e.g. `bun test` started
- * from a subdirectory: bun reads `bunfig.toml` only from its cwd) would be silently patched instead of
- * failing. `tests/preload.test.ts` asserts on `preloadState()` so that case fails loudly.
+ * from a directory without a `bunfig.toml` wiring it: bun reads it only from its cwd) would be silently
+ * patched instead of failing. `tests/preload.test.ts` asserts on `preloadState()` so that case fails
+ * loudly — when that file is part of the run.
  */
 import { rmSync } from 'node:fs';
 
@@ -48,10 +49,15 @@ export function removePinnedDir(dir: string): void {
 /** Env values that only ever come from coercing `undefined`/`null` into `process.env`. */
 export const COERCED_ENV_VALUES: ReadonlySet<string> = new Set(['undefined', 'null']);
 
-/** Names of env vars whose value is exactly `"undefined"`/`"null"`, minus the `ignore`d ones. */
-export function coercedEnvVars(env: NodeJS.ProcessEnv, ignore: ReadonlySet<string> = new Set()): string[] {
+/**
+ * Names of env vars whose value is exactly `"undefined"`/`"null"` — except those still holding the very
+ * same value they had in `baseline` (the outer env), so a var that was already `"null"` outside is
+ * ignored only while unchanged: a test coercing it to `"undefined"` is still caught. Compared by value,
+ * never by name alone.
+ */
+export function coercedEnvVars(env: NodeJS.ProcessEnv, baseline: NodeJS.ProcessEnv = {}): string[] {
   return Object.keys(env)
-    .filter(name => !ignore.has(name) && COERCED_ENV_VALUES.has(env[name] as string))
+    .filter(name => COERCED_ENV_VALUES.has(env[name] as string) && env[name] !== baseline[name])
     .sort();
 }
 

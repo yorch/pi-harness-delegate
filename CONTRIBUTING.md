@@ -58,10 +58,12 @@ dir is left for the exit handler instead). A test that sets its own via `withEnv
 dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. `bunfig.toml` and
 `tests/` are not in `package.json` `files`, so none of this ships.
 
-- **Run `bun test` from the repo root.** bun reads `bunfig.toml` only from its current directory, so `cd tests &&
-  bun test` runs without the preload. `tests/preload.test.ts` fails loudly in that case (it checks a marker the
-  preload sets and never imports the preload itself). `bun run test` works from anywhere — package scripts run
-  from the package root.
+- **Run `bun test` from the repo root (or from `tests/`).** bun reads `bunfig.toml` only from its current
+  directory; the repo root's and `tests/bunfig.toml` both wire the preload. `bun run test` works from anywhere —
+  package scripts run from the package root. From any *other* directory no preload runs, so nothing is pinned, and
+  there is no way to notice from inside the run except `tests/preload.test.ts` (it checks a marker the preload sets
+  and never imports the preload itself): a run that includes it fails loudly, but a run of only other files passes
+  silently, unpinned. Don't do that.
 - **Live mode is pinned too.** `PI_DELEGATE_LIVE=1` doesn't turn the pin off. The live suite hands the outer
   `PI_CODING_AGENT_DIR` (recorded by the preload, `preloadState().outerAgentDir`; absent when it was unset) to
   the real harness CLIs' child processes only — `omp` (the `amp` harness) reads that var as its own agent dir for

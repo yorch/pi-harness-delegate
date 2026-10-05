@@ -27,19 +27,21 @@ function requirePreload() {
   assert.ok(
     state,
     'tests/helpers/preload.ts did not run in this `bun test` process. bun reads bunfig.toml (which wires ' +
-      'the preload) only from its current directory — run `bun test` from the repo root (or `bun run test`, ' +
-      'which runs from the package root wherever you are), not from tests/ or another subdirectory. Without the preload, PI_CODING_AGENT_DIR is not pinned and ' +
+      'the preload) only from its current directory — run `bun test` from the repo root or tests/ (or `bun run test`, ' +
+      'which runs from the package root wherever you are), not from another directory. Without the preload, PI_CODING_AGENT_DIR is not pinned and ' +
       'a straggling run can write into your real ~/.pi/agent.',
   );
   return state;
 }
 
-test('preload: bunfig.toml wires the preload into bun test', () => {
-  const bunfig = readFileSync(join(import.meta.dirname, '..', 'bunfig.toml'), 'utf8');
-  assert.match(bunfig, /preload\s*=\s*\[[^\]]*"\.\/tests\/helpers\/preload\.ts"/);
+test('preload: bunfig.toml (repo root and tests/) wires the preload into bun test', () => {
+  const root = readFileSync(join(import.meta.dirname, '..', 'bunfig.toml'), 'utf8');
+  assert.match(root, /preload\s*=\s*\[[^\]]*"\.\/tests\/helpers\/preload\.ts"/);
+  const tests = readFileSync(join(import.meta.dirname, 'bunfig.toml'), 'utf8');
+  assert.match(tests, /preload\s*=\s*\[[^\]]*"\.\/helpers\/preload\.ts"/);
 });
 
-test('preload: actually ran in this process (bun test must be started from the repo root)', () => {
+test('preload: actually ran in this process (bun test must be started from the repo root or tests/)', () => {
   requirePreload();
 });
 
@@ -88,15 +90,15 @@ interface ChildRun {
 }
 
 /**
- * Start a child `bun test` from the repo root (so bunfig.toml — and so the preload — applies) on a
+ * Start a child `bun test` from the repo root by default (so bunfig.toml — and so the preload — applies) on a
  * throwaway test file holding `body`, outside tests/ so the main suite never picks it up. `env` is
  * the child's whole environment.
  */
-function startChildBunTest(body: string, env: NodeJS.ProcessEnv): ChildRun {
+function startChildBunTest(body: string, env: NodeJS.ProcessEnv, cwd = REPO_ROOT): ChildRun {
   const dir = mkdtempSync(join(tmpdir(), 'preload-child-'));
   const file = join(dir, 'child.test.ts');
   writeFileSync(file, `import { test } from 'node:test';\n${body}\n`);
-  const child = spawn(process.execPath, ['test', file], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['test', file], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout?.on('data', d => (out += d));
   child.stderr?.on('data', d => (out += d));
@@ -132,6 +134,18 @@ test('preload: live mode (PI_DELEGATE_LIVE=1) still pins the agent dir for every
   } finally {
     run.cleanup();
     rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test('preload: a bun test started from tests/ is pinned too (tests/bunfig.toml)', { timeout: 60_000 }, async () => {
+  const run = startChildBunTest(PRINT_AGENT_DIR, childEnv({}, ['PI_DELEGATE_LIVE']), import.meta.dirname);
+  try {
+    const { code } = await run.exited;
+    assert.equal(code, 0, run.output());
+    const pinned = /PINNED=(.*)/.exec(run.output())?.[1]?.trim();
+    assert.ok(pinned && basename(pinned).startsWith(PRELOAD_AGENT_DIR_PREFIX), run.output());
+  } finally {
+    run.cleanup();
   }
 });
 
@@ -252,6 +266,30 @@ test('preload: with a second SIGINT listener, SIGINT leaves the pinned dir for t
   }
 });
 
+test('env backstop: an outer "null" var is ignored only while unchanged — coercing it to "undefined" fails', {
+  timeout: 60_000,
+}, async () => {
+  const body = [
+    "test('leaves it alone', () => { console.log('FIRST_SEES=' + JSON.stringify(process.env.ZZ_BACKSTOP_OUTER)); });",
+    "test('coerces', () => { Reflect.set(process.env, 'ZZ_BACKSTOP_OUTER', undefined); });",
+    "test('next', () => { console.log('NEXT_SEES=' + JSON.stringify(process.env.ZZ_BACKSTOP_OUTER)); });",
+  ].join('\n');
+  const run = startChildBunTest(body, childEnv({ ZZ_BACKSTOP_OUTER: 'null' }, ['PI_DELEGATE_LIVE']));
+  try {
+    const { code } = await run.exited;
+    const out = run.output();
+    assert.notEqual(code, 0, out);
+    assert.match(out, /FIRST_SEES="null"/, 'an unchanged outer value is not flagged');
+    assert.match(out, /this test left ZZ_BACKSTOP_OUTER="undefined"/);
+    assert.match(out, /\(fail\) coerces/);
+    assert.match(out, /^\s*2 pass$/m, out);
+    assert.match(out, /^\s*1 fail$/m, out);
+    assert.match(out, /NEXT_SEES="null"/, 'put back to the outer value, not deleted');
+  } finally {
+    run.cleanup();
+  }
+});
+
 /** A fake `process` recording listeners and re-raised signals. */
 function fakeProcess() {
   const listeners = new Map<string, Array<(signal: NodeJS.Signals) => void>>();
@@ -339,10 +377,11 @@ test("preload cleanup: 'exit' removes the dir without re-raising anything", () =
   assert.deepEqual(killed, []);
 });
 
-test('env backstop: coercedEnvVars finds exactly the "undefined"/"null" values, minus ignored ones', () => {
-  const env = { A: 'undefined', B: 'null', C: 'x', D: '', E: 'Undefined', F: 'null ', G: 'undefined' };
-  assert.deepEqual(coercedEnvVars(env), ['A', 'B', 'G']);
-  assert.deepEqual(coercedEnvVars(env, new Set(['G'])), ['A', 'B']);
+test('env backstop: coercedEnvVars finds exactly the "undefined"/"null" values, minus unchanged outer ones', () => {
+  const env = { A: 'undefined', B: 'null', C: 'x', D: '', E: 'Undefined', F: 'null ', G: 'undefined', H: 'undefined' };
+  assert.deepEqual(coercedEnvVars(env), ['A', 'B', 'G', 'H']);
+  // G held the same value outside (ignored); H was "null" outside and is now "undefined" (still caught)
+  assert.deepEqual(coercedEnvVars(env, { G: 'undefined', H: 'null' }), ['A', 'B', 'H']);
 });
 
 test('env backstop: a test that coerces undefined into process.env fails, and the next test starts clean', {

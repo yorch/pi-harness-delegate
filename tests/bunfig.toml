@@ -1,0 +1,4 @@
+[test]
+# Same preload as the repo-root bunfig.toml, for `cd tests && bun test …` — bun reads bunfig.toml only from
+# its current directory. From any other directory no preload runs at all. See tests/helpers/preload.ts.
+preload = ["./helpers/preload.ts"]

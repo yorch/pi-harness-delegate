@@ -1,9 +1,10 @@
 /**
- * `bun test` preload (wired in `bunfig.toml`): runs once, before any test file, for the whole test process.
- * bun reads `bunfig.toml` only from its cwd, so run `bun test` from the repo root (`bun run test` works from
- * anywhere: package scripts run from the package root) —
- * `tests/preload.test.ts` fails loudly when this file did not run. Never import this file from a test:
- * shared constants/helpers live in the side-effect-free `./preload-state.ts`.
+ * `bun test` preload (wired in `bunfig.toml` and `tests/bunfig.toml`): runs once, before any test file, for
+ * the whole test process. bun reads `bunfig.toml` only from its cwd, so run `bun test` from the repo root or
+ * `tests/` (`bun run test` works from anywhere: package scripts run from the package root). From anywhere
+ * else this file does not run at all — nothing is pinned — and only `tests/preload.test.ts` notices (it
+ * fails loudly), so a run that doesn't include it passes silently, unpinned. Never import this file from
+ * a test: shared constants/helpers live in the side-effect-free `./preload-state.ts`.
  *
  * Safety net for `PI_CODING_AGENT_DIR`. Tests that need an isolated agent dir set their own via
  * `withEnv` / `withSandbox`, but a delegate run that outlives its sandbox (a straggling child, a late
@@ -31,8 +32,9 @@
  * Runtime backstop for the `process.env.X = prev` restore bug (`tests/env-hygiene.test.ts` is the
  * primary, static guard): after every test, any env var whose value is exactly `"undefined"` or `"null"`
  * — what assigning `undefined`/`null` to `process.env` stores — fails that test and is removed, so the
- * failure lands on the first offending test instead of cascading. Vars that already held such a value
- * in the outer env are ignored. It is a backstop, not a proof: a test that coerces and cleans up within
+ * failure lands on the first offending test instead of cascading. A var that already held such a value
+ * in the outer env is ignored only while it still holds that same value (compared by value, not name),
+ * and is put back to it. It is a backstop, not a proof: a test that coerces and cleans up within
  * its own body, or a write that lands after its test's `afterEach`, slips past it.
  *
  * Every env write here goes through `restoreEnv` (tests/helpers/env.ts), so this file needs no
@@ -51,12 +53,13 @@ registerPinnedDirCleanup(pinnedAgentDir);
 restoreEnv('PI_CODING_AGENT_DIR', pinnedAgentDir);
 markPreloaded({ pinnedAgentDir, outerAgentDir });
 
-const preexistingCoerced = new Set(coercedEnvVars({ ...process.env }));
+// The outer env, by value — a var already "undefined"/"null" outside is ignored only while unchanged.
+const outerEnv: NodeJS.ProcessEnv = { ...process.env };
 afterEach(() => {
-  const bad = coercedEnvVars({ ...process.env }, preexistingCoerced);
+  const bad = coercedEnvVars({ ...process.env }, outerEnv);
   if (bad.length === 0) return;
   const shown = bad.map(name => `${name}=${JSON.stringify(process.env[name])}`).join(', ');
-  for (const name of bad) restoreEnv(name, undefined);
+  for (const name of bad) restoreEnv(name, outerEnv[name]); // back to the outer value, or unset
   throw new Error(
     `env backstop (tests/helpers/preload.ts): this test left ${shown} in process.env — almost certainly ` +
       '`process.env.X = prev` with prev undefined/null. Use withEnv()/restoreEnv() from tests/helpers/env.ts.',
