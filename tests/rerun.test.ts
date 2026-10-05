@@ -1319,3 +1319,68 @@ test('/delegate rerun (e2e): a member whose mode did not resolve when the plan w
     });
   });
 });
+
+// ── round 4: stored field caps, the critical section is on the real screen, typed lists keep the tier check ──
+
+test('planRerun: stored addDirs obey the same caps a model-set run is held to — 12 huge in-cwd directories are refused, not rendered as a 431-row plan', () => {
+  const dir = `./${'a/../'.repeat(790)}src`; // resolves INSIDE the project, 3955 characters
+  const r = record({ origin: 'tool' }, { addDirs: Array.from({ length: 12 }, () => dir) });
+  const plan = planRerun(r, none(), flags(), env({ viewport: { columns: 80, rows: 40 } }));
+  assert.equal(plan.args, undefined);
+  assert.match(plan.errors[0] ?? '', /stored record is too big to confirm: 12 addDirs entries — more than the 10/);
+  const longOne = planRerun(
+    record({}, { addDirs: [dir] }),
+    none(),
+    flags(),
+    env({ viewport: { columns: 80, rows: 40 } }),
+  );
+  assert.match(longOne.errors[0] ?? '', /an addDirs entry is longer than the 500 characters/);
+  // within the caps (and the screen) it is accepted, and everything critical is on the real screen
+  const tooBigForScreen = planRerun(
+    record({}, { addDirs: Array.from({ length: 10 }, (_, i) => `../d${i}/${'x'.repeat(480)}`) }),
+    none(),
+    flags(),
+    env({ viewport: { columns: 80, rows: 40 } }),
+  );
+  assert.match(tooBigForScreen.errors[0] ?? '', /key lines.*need \d+ rows.*leaves room for 28/);
+  const ok = planRerun(
+    record({ origin: 'tool' }, { addDirs: Array.from({ length: 10 }, (_, i) => `../d${i}/${'x'.repeat(40)}`) }),
+    none(),
+    flags(),
+    env({ viewport: { columns: 100, rows: 60 } }),
+  );
+  assert.deepEqual(ok.errors, []);
+  const screen = renderDialog('Re-run this recorded delegation?', ok.summary.join('\n'), {
+    columns: 100,
+    rows: 60,
+  }).visible.join('\n');
+  for (const need of [
+    'WARNING: this was NOT typed by you',
+    'permission tier now',
+    'originally started by',
+    'addDirs (10)',
+  ])
+    assert.ok(screen.includes(need), `${need} is on screen`);
+});
+
+test('planRerun: a typed list that names a RECORDED fan-out member keeps the tier check (claude,codex on a fan-out whose template widened is refused, like bare --fanout)', () => {
+  const fid = newFanoutId();
+  const claude = record({ fanoutId: fid, harness: 'claude', origin: 'command' });
+  const codex = record({ fanoutId: fid, harness: 'codex', origin: 'command' });
+  const widened = env({ modeTier: () => 'edit', siblings: [claude, codex] }); // both were recorded readonly
+  const bare = planRerun(claude, none(), flags({ fanout: true }), widened);
+  assert.match(bare.errors[0] ?? '', /now runs at edit permission.*widened/);
+  for (const harness of ['claude,codex', 'codex,claude']) {
+    const typed = planRerun(claude, { task: '', harness }, flags({ fanout: true }), widened);
+    assert.match(typed.errors[0] ?? '', /now runs at edit permission.*widened/, harness);
+    assert.equal(typed.args, undefined, harness);
+  }
+  // a member that was NOT recorded is the human's choice; a typed DIFFERENT mode skips the check for everyone
+  const withNew = planRerun(claude, { task: '', harness: 'claude,amp' }, flags({ fanout: true }), widened);
+  assert.match(withNew.errors[0] ?? '', /on claude now runs at edit/, 'claude is still a recorded member');
+  assert.deepEqual(planRerun(claude, { task: '', harness: 'amp' }, flags(), widened).errors, []);
+  assert.deepEqual(
+    planRerun(claude, { task: '', harness: 'claude,codex', mode: 'other' }, flags({ fanout: true }), widened).errors,
+    [],
+  );
+});
