@@ -65,6 +65,8 @@ export function isFanoutId(s: string): boolean {
   return FANOUT_ID_RE.test(s);
 }
 
+export type RunOrigin = 'tool' | 'command';
+
 export interface RunRecordInput {
   task: string;
   /** The task text was cut at `RECORD_LIMITS.task` — such a record is not rerunnable. */
@@ -88,6 +90,13 @@ export interface RunRecord {
   version: 1;
   runId: string;
   fanoutId: string | null;
+  /**
+   * Who started the run: the `delegate` tool (the model), or a `/delegate` command (a person). `null` =
+   * unknown (a record written before this field existed, or one that does not say). Optional on disk.
+   * A hint for the human who is asked to repeat the run — the sidecar is untrusted, so it is never a
+   * proof, only something to SHOW (and, headless, to require `--trust-origin` for when it isn't `command`).
+   */
+  origin: RunOrigin | null;
   harness: string;
   mode: string;
   /** Resolved permission tier the run actually used (`danger` also when escalated). */
@@ -131,6 +140,7 @@ export function recordPathFor(transcriptFile: string): string {
 export interface RunRecordSource {
   runId: string;
   fanoutId?: string | null;
+  origin?: RunOrigin | null;
   harness: string;
   mode: string;
   permission: RunRecord['permission'];
@@ -168,6 +178,7 @@ export function buildRunRecord(s: RunRecordSource): RunRecord {
     version: 1,
     runId: s.runId,
     fanoutId: s.fanoutId ?? null,
+    origin: s.origin ?? null,
     harness: s.harness,
     mode: s.mode,
     permission: s.permission,
@@ -310,6 +321,9 @@ export function parseRunRecord(text: string): ParsedRecord {
   if (typeof raw.runId !== 'string' || !RUN_ID_RE.test(raw.runId)) return bad('runId');
   if (raw.fanoutId !== null && !(typeof raw.fanoutId === 'string' && FANOUT_ID_RE.test(raw.fanoutId)))
     return bad('fanoutId');
+  // optional (older records lack it): absent/null = unknown
+  if (raw.origin !== undefined && raw.origin !== null && raw.origin !== 'tool' && raw.origin !== 'command')
+    return bad('origin');
   // exactly one canonical harness name — never a comma list, `all`, an alias or a case variant: what a
   // record names is what a rerun launches, so it must be the thing the listing shows.
   if (typeof raw.harness !== 'string' || !(HARNESS_NAMES as readonly string[]).includes(raw.harness))
@@ -377,6 +391,7 @@ export function parseRunRecord(text: string): ParsedRecord {
     version: 1,
     runId: raw.runId,
     fanoutId: raw.fanoutId as string | null,
+    origin: (raw.origin ?? null) as RunOrigin | null,
     harness: raw.harness,
     mode: raw.mode,
     permission: raw.permission,

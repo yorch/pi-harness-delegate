@@ -27,7 +27,7 @@ import {
   isTemplateDanger,
   resolveHarnessName,
 } from './harnesses/registry.ts';
-import type { ActivityEvent } from './harnesses/types.ts';
+import type { ActivityEvent, TierCeiling } from './harnesses/types.ts';
 import { NotifyBatcher } from './notify.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
 import { newFanoutId } from './run-record.ts';
@@ -137,6 +137,7 @@ export async function runFanoutTool(
           // no verify: intentionally not model-settable — see DelegateToolParams
           waitForSlot: true,
           fanoutId,
+          origin: 'tool',
           onAcquired: () =>
             onUpdate?.({ content: [{ type: 'text', text: `[${h}] running…` }], details: { progress: 0.5 } }),
         },
@@ -229,6 +230,8 @@ export interface FanoutSpec {
   isDanger: boolean;
   /** Only ever true after `confirmDangerousCommand` approved this invocation's --allow-dangerous. */
   allowDangerous?: boolean;
+  /** The widest template tier a human was shown for this harness (rerun / resume) — see `DelegateOptions.tierCeiling`. */
+  tierCeiling?: TierCeiling;
 }
 export interface FanoutOutcome {
   harnessName: string;
@@ -315,6 +318,8 @@ export async function runFanoutConcurrent(
       signal: ac.signal,
       waitForSlot: true,
       fanoutId,
+      origin: 'command',
+      tierCeiling: spec.tierCeiling,
       onAcquired: () => setRow({ status: 'running', startedAt: Date.now() }),
       onStream: t => {
         liveTail = (liveTail + t).slice(-200);
@@ -500,6 +505,7 @@ export async function runFanoutCommand(
       addDirs: parsed.addDirs,
       verify: parsed.verify,
       isDanger,
+      tierCeiling: parsed.tierCeiling ? (parsed.tierCeiling[h] ?? 'unavailable') : undefined,
     });
   }
 

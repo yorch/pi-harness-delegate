@@ -1,3 +1,4 @@
+import type { TierCeiling } from './harnesses/types.ts';
 import {
   callTimeoutError,
   type DelegateTemplate,
@@ -42,6 +43,11 @@ export interface DelegateCommandArgs {
    */
   storedTimeout?: boolean;
   storedBudget?: boolean;
+  /**
+   * Internal — set only by the rerun / fan-out-resume planners: per harness, the widest template tier the
+   * human was shown when confirming. The engine refuses a template that is wider when the run starts.
+   */
+  tierCeiling?: Record<string, TierCeiling>;
   /** Flag values that were given but are unusable (e.g. `--budget=0`) — the handler reports these
    *  and runs nothing, rather than silently dropping the flag. Absent when there are none. */
   errors?: string[];

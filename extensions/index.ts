@@ -59,7 +59,7 @@ import {
   isTemplateDanger,
   resolveHarnessName,
 } from './harnesses/registry.ts';
-import type { ActivityEvent } from './harnesses/types.ts';
+import type { ActivityEvent, TierCeiling } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
 import { currentHistoryView, showHistory } from './history.ts';
 import { HISTORY_FLAGS_HINT, parseHistoryArgs } from './history-filter.ts';
@@ -302,6 +302,7 @@ export default function (pi: ExtensionAPI) {
           pr: params.pr,
           addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
+          origin: 'tool',
         },
         signal,
         onUpdate,
@@ -451,6 +452,8 @@ export default function (pi: ExtensionAPI) {
       isDanger: boolean;
       /** Only ever true after `confirmDangerousCommand` approved this invocation's --allow-dangerous. */
       allowDangerous?: boolean;
+      /** The widest template tier a human was shown (rerun) — see `DelegateOptions.tierCeiling`. */
+      tierCeiling?: TierCeiling;
     },
   ): Promise<{
     result: Awaited<ReturnType<typeof delegate>> | null;
@@ -548,6 +551,8 @@ export default function (pi: ExtensionAPI) {
       addDirs,
       verify,
       allowDangerous, // never from config.allowDangerous — only a confirmed --allow-dangerous
+      origin: 'command',
+      tierCeiling: opts.tierCeiling,
       signal: ac.signal,
       onStream: t => {
         liveTail = (liveTail + t).slice(-400);
@@ -731,6 +736,7 @@ export default function (pi: ExtensionAPI) {
       template,
       isDanger: isDanger || allowDangerous,
       allowDangerous,
+      tierCeiling: parsed.tierCeiling ? (parsed.tierCeiling[harnessName] ?? 'unavailable') : undefined,
     });
     if (outcome.cancelled || !outcome.result) {
       const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
@@ -777,8 +783,14 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI) ctx.ui.notify?.(msg, level);
       else process.stderr.write(`${msg}\n`);
     };
-    const usage = `Usage: /delegate rerun [n|run_<id>] [--here] [--fanout] [--resume] [--harness=…] [--mode=…] [--model=…] [--budget=<usd>] [--timeout=<sec>] [--scope=…] [--pr=…] [--add-dir=…] [--verify=<cmd>] [--allow-dangerous]`;
-    const { rest: afterFlags, found } = extractBareFlags(rest, ['here', 'fanout', 'resume'] as const);
+    const usage = `Usage: /delegate rerun [n|run_<id>] [--here] [--fanout] [--resume] [--long-task] [--trust-origin] [--harness=…] [--mode=…] [--model=…] [--budget=<usd>] [--timeout=<sec>] [--scope=…] [--pr=…] [--add-dir=…] [--verify=<cmd>] [--allow-dangerous]`;
+    const { rest: afterFlags, found } = extractBareFlags(rest, [
+      'here',
+      'fanout',
+      'resume',
+      'long-task',
+      'trust-origin',
+    ] as const);
     const words = afterFlags.trim().split(/\s+/).filter(Boolean);
     const selector = words[0] && (/^\d+$/.test(words[0]) || isRunId(words[0])) ? words.shift() : undefined;
     if (!ctx.hasUI && !(selector !== undefined && isRunId(selector))) {
@@ -798,26 +810,64 @@ export default function (pi: ExtensionAPI) {
       allModes,
       new Set([...HARNESS_NAMES, ...Object.keys(ALIASES)]),
     );
-    if (forcedHarness) overrides.harness = forcedHarness;
+    // An alias command (/claude, /codex, …) pins ITS harness: it reruns only a record of that harness, and
+    // whatever the human types does not retarget it. The pinned harness is NOT an override (it must not count
+    // as a typed choice — see planRerun's tier check): it is left unset and the record's own harness (which
+    // must equal it) is used.
+    if (forcedHarness) {
+      if (found.has('fanout')) {
+        say(
+          `rerun: --fanout reruns several harnesses, but /${forcedHarness} pins its own — use /delegate rerun --fanout`,
+          'error',
+        );
+        return;
+      }
+      if (overrides.harness !== undefined && overrides.harness !== forcedHarness) {
+        say(
+          `rerun: /${forcedHarness} pins the ${forcedHarness} harness (it was given ${quoteValue(overrides.harness, 80)}) — use /delegate rerun --harness=… to target another`,
+          'error',
+        );
+        return;
+      }
+      overrides.harness = undefined;
+    }
     if (overrides.errors?.length) {
       say(`${overrides.errors.join('; ')}\n${usage}`, 'error');
       return;
     }
     // a bare number indexes the listing the user last saw (the TUI list is numbered the same way; else the
     // full history); no selector means the newest run that has a record
-    const picked = selectRecord(selector, selector !== undefined && !isRunId(selector) ? currentHistoryView() : []);
+    const picked = selectRecord(
+      selector,
+      selector !== undefined && !isRunId(selector) ? currentHistoryView() : [],
+      forcedHarness,
+    );
     if (!picked.ok) {
       say(`rerun: ${picked.error}\n${usage}`, 'error');
       return;
     }
     const record = picked.record;
+    if (forcedHarness && record.harness !== forcedHarness) {
+      say(
+        `rerun: that run used ${record.harness}, but /${forcedHarness} reruns only ${forcedHarness} runs — use /delegate rerun ${record.runId} (or /${record.harness} rerun ${record.runId})`,
+        'error',
+      );
+      return;
+    }
     const everything = readAllRecordsDetailed();
     const plan = planRerun(
       record,
       overrides,
-      { here: found.has('here'), fanout: found.has('fanout'), resumeOwn: found.has('resume') },
+      {
+        here: found.has('here'),
+        fanout: found.has('fanout'),
+        resumeOwn: found.has('resume'),
+        longTask: found.has('long-task'),
+        trustOrigin: found.has('trust-origin'),
+      },
       {
         cwd: ctx.cwd,
+        hasUI: ctx.hasUI,
         isKnownHarness,
         // today's template, classified by the engine's own rules — see effectiveTemplateTier
         modeTier: (h, m) => {

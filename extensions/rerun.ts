@@ -16,7 +16,7 @@ import { resolve } from 'node:path';
 import type { DelegateCommandArgs } from './command.ts';
 import { legacyOutputsDir, outputsDir } from './config.ts';
 import { HARNESS_NAMES } from './harnesses/registry.ts';
-import type { NormalizedPermission } from './harnesses/types.ts';
+import { type NormalizedPermission, TIER_RANK, type TierCeiling } from './harnesses/types.ts';
 import type { HistoryEntry } from './history-filter.ts';
 import {
   displayText,
@@ -28,18 +28,9 @@ import {
   readRecordsIn,
   type SkippedRecord,
 } from './run-record.ts';
-import { INVISIBLE_OR_CONTROL_RE } from './sanitize.ts';
-import { callTimeoutError, quoteValue } from './templates.ts';
+import { charCount, forbiddenCharacter, renderTextBlock, SCOPE_LIMITS, TASK_LIMITS } from './sanitize.ts';
+import { callTimeoutError, quoteFull, quoteValue } from './templates.ts';
 import { validateDelegateInputs } from './validate.ts';
-
-// One non-global copy of the shared invisible/control set (the exported one carries the `g` flag, whose
-// `lastIndex` makes `.test` stateful). Covers C0/C1 controls (incl. `\r`), bidi, zero-width, tag characters.
-const NON_PRINTABLE_RE = new RegExp(INVISIBLE_OR_CONTROL_RE.source, 'u');
-
-/** True when `text` holds a control / invisible / bidi character. Free text (task, scope) may keep newlines and tabs. */
-export function hasUnsafeChars(text: string, allowNewlines: boolean): boolean {
-  return NON_PRINTABLE_RE.test(allowNewlines ? text.replace(/[\n\t]/g, '') : text);
-}
 
 /**
  * Every usable record on disk — all harness partitions plus the legacy dir — newest transcript first
@@ -81,7 +72,12 @@ function ignoredNote(skipped: readonly SkippedRecord[]): string {
  * transcript mtime, the order history lists), a 1-based position in `view` (the history listing the user
  * last saw, or the unfiltered history), or a run id.
  */
-export function selectRecord(selector: string | undefined, view: readonly HistoryEntry[]): RecordSelection {
+export function selectRecord(
+  selector: string | undefined,
+  view: readonly HistoryEntry[],
+  /** An alias command's own harness: a bare `rerun` then means the newest run of THAT harness. */
+  harness?: string,
+): RecordSelection {
   if (selector !== undefined && isRunId(selector)) {
     const { records, skipped } = readAllRecordsDetailed();
     const hits = records.filter(r => r.record.runId === selector);
@@ -94,10 +90,13 @@ export function selectRecord(selector: string | undefined, view: readonly Histor
   if (selector === undefined) {
     // no selector: the newest *completed* run that has a record (a partial run is rerunnable only by id)
     const { records, skipped } = readAllRecordsDetailed();
-    const rec = records.find(r => !r.record.partial);
+    const rec = records.find(r => !r.record.partial && (harness === undefined || r.record.harness === harness));
     return rec
       ? { ok: true, record: rec.record }
-      : { ok: false, error: `no run records yet — nothing to rerun${ignoredNote(skipped)}` };
+      : {
+          ok: false,
+          error: `no ${harness === undefined ? '' : `${harness} `}run records yet — nothing to rerun${ignoredNote(skipped)}`,
+        };
   }
   if (!/^\d{1,4}$/.test(selector) || Number(selector) < 1)
     return {
@@ -132,10 +131,16 @@ export interface RerunFlags {
   fanout: boolean;
   /** bare `--resume`: continue the record's own session instead of starting fresh. */
   resumeOwn: boolean;
+  /** `--long-task`: the human accepts a task/scope too long for a confirmation to show whole (head + tail are shown). */
+  longTask?: boolean;
+  /** `--trust-origin`: a non-interactive rerun of a record that was not started by a `/delegate` command. */
+  trustOrigin?: boolean;
 }
 
 export interface RerunEnv {
   cwd: string;
+  /** Whether a person will be shown the plan and asked (a UI session). Absent = headless. */
+  hasUI?: boolean;
   isKnownHarness: (name: string) => boolean;
   /**
    * The tier `mode` would run at on `harness` TODAY (the engine's own classification —
@@ -157,7 +162,14 @@ export interface RerunPlan {
   storedAddDirs: string[];
 }
 
-const TIER_RANK: Record<NormalizedPermission, number> = { readonly: 0, edit: 1, danger: 2 };
+/** How a record says it was started, in words — shown in the plan and in refusals. */
+export function describeOrigin(origin: RunRecord['origin']): string {
+  return origin === 'command'
+    ? 'a /delegate command'
+    : origin === 'tool'
+      ? 'the delegate tool (the model)'
+      : 'unknown (a legacy record, or one that does not say)';
+}
 
 /**
  * Turn a record + the human's command-line overrides into the `DelegateCommandArgs` of an ordinary
@@ -165,10 +177,15 @@ const TIER_RANK: Record<NormalizedPermission, number> = { readonly: 0, edit: 1, 
  * `--model=`, …); anything it sets wins over the record. Pure aside from the env callbacks.
  *
  * A rerun uses TODAY's template for the mode, never a stored copy: if that template's tier is WIDER
- * than the recorded run's, it is refused (the human can start the run with the normal command).
+ * than the recorded run's, it is refused (the human can start the run with the normal command) —
+ * unless the human TYPED a different `--mode=`/`--harness=` (an override equal to the record's own
+ * value is not a choice and skips nothing).
  * Stored values are untrusted: a stored `timeoutSec`/budget may only narrow what is configured
  * (`storedTimeout`/`storedBudget`), stored `addDirs` are returned in `storedAddDirs` for the caller to
- * gate like model-set ones; only values typed on the rerun line carry human trust.
+ * gate like model-set ones; only values typed on the rerun line carry human trust. The whole task is
+ * shown in the plan (see `renderTextBlock`): a value too long to show whole is refused unless the human
+ * typed `--long-task`. A record that was not started by a `/delegate command` is flagged in the plan and
+ * is refused non-interactively unless `--trust-origin` was typed.
  */
 export function planRerun(
   record: RunRecord,
@@ -220,13 +237,33 @@ export function planRerun(
     if (h !== 'all' && !env.isKnownHarness(h)) return fail(`unknown harness ${quoteValue(h, 80)}`);
   const mode = overrides.mode ?? record.mode;
 
+  // Who started the run(s) being repeated: shown in the plan; a record that was not started by a
+  // /delegate command (tool call, or unknown) needs `--trust-origin` when there is no person to look at the plan.
+  const started = flags.fanout ? [record, ...env.siblings.filter(r => r.runId !== record.runId)] : [record];
+  const origins = [...new Set(started.map(r => r.origin ?? 'unknown'))];
+  const notCommand = started.some(r => r.origin !== 'command');
+  if (notCommand && !env.hasUI && !flags.trustOrigin)
+    return fail(
+      `${origins.length > 1 ? 'a member of this fan-out was' : 'this run was'} not started by a /delegate command typed by a person — the record says: ${started
+        .filter(r => r.origin !== 'command')
+        .map(r => describeOrigin(r.origin))
+        .filter((v, i, a) => a.indexOf(v) === i)
+        .join(
+          '; ',
+        )} (as recorded, unverified). With no interactive session to show you the plan, pass --trust-origin on the rerun line to repeat it anyway`,
+    );
+
   // Today's template, per harness. The tier is compared with what the recorded run had — a mode that
   // has since been widened (readonly -> edit, edit -> danger) is never silently re-run at the wider tier.
   const recordedTier = (h: string): NormalizedPermission =>
     (h === record.harness ? record : env.siblings.find(r => r.harness === h))?.permission ?? record.permission;
   const targets = harnessNames.filter(h => h !== 'all');
   const tiers: string[] = [];
-  const typedTarget = overrides.mode !== undefined || overrides.harness !== undefined;
+  const ceiling: Record<string, TierCeiling> = {};
+  // typing the SAME value the record already has is not a choice — it skips nothing
+  const typedTarget =
+    (overrides.mode !== undefined && overrides.mode !== record.mode) ||
+    (overrides.harness !== undefined && overrides.harness !== record.harness);
   for (const h of targets) {
     const now = env.modeTier(h, mode);
     if (now === null) {
@@ -234,8 +271,10 @@ export function planRerun(
         return fail(
           `mode ${quoteValue(mode, 80)} is not available for ${h} now — it may have been removed, or be a project-local template in a project pi does not trust (/delegate status shows trust)`,
         );
+      ceiling[h] = 'unavailable';
       continue;
     }
+    ceiling[h] = now;
     const was = recordedTier(h);
     tiers.push(`${h}: ${now}${now === was ? '' : ` (recorded run: ${was})`}`);
     if (!typedTarget && TIER_RANK[now] > TIER_RANK[was])
@@ -246,6 +285,7 @@ export function planRerun(
 
   const task = input.task;
   const scope = overrides.scope ?? input.scope ?? undefined;
+  const storedScope = overrides.scope === undefined && input.scope !== null;
   const pr = overrides.pr ?? input.pr ?? undefined;
   const storedAddDirs = overrides.addDirs === undefined && input.addDirs.length > 0 ? input.addDirs : [];
   const addDirs = overrides.addDirs ?? (input.addDirs.length > 0 ? input.addDirs : undefined);
@@ -263,19 +303,43 @@ export function planRerun(
   }
 
   // Stored values are untrusted: the same gates a typed command goes through, applied up front so a
-  // bad record is a clear error rather than a failure deep in a run (delegate() re-validates too).
+  // bad record is a clear error rather than a failure deep in a run (delegate() re-validates too). The
+  // exact text is what runs; anything refused here is a character that acts on a terminal or spoofs what
+  // is displayed — everything else (ZWJ emoji, variation selectors, …) passes and is ESCAPED on display.
   if (!task.trim()) return fail('the stored task is empty');
-  if (hasUnsafeChars(task, true) || (scope !== undefined && hasUnsafeChars(scope, true)))
-    return fail('the stored task/scope contains control or invisible characters — refusing to rerun it');
-  for (const [label, v] of [
-    ['model', model],
-    ['pr', pr],
-    ['sessionId', sessionId],
-  ] as const)
-    if (v !== undefined && hasUnsafeChars(v, false))
-      return fail(`the stored ${label} contains control or invisible characters — refusing to rerun it`);
-  if (addDirs?.some(d => hasUnsafeChars(d, false)))
-    return fail('a stored addDirs entry contains control or invisible characters — refusing to rerun it');
+  for (const [label, v, ws] of [
+    ['task', task, true],
+    ['scope', scope, true],
+    ['model', model, false],
+    ['pr', pr, false],
+    ['sessionId', sessionId, false],
+  ] as const) {
+    const bad = v === undefined ? null : forbiddenCharacter(v, ws);
+    if (bad !== null)
+      return fail(
+        `the stored ${label} contains a control or direction-changing character (${bad}) — refusing to rerun it`,
+      );
+  }
+  for (const d of addDirs ?? []) {
+    const bad = forbiddenCharacter(d, false);
+    if (bad !== null)
+      return fail(
+        `a stored addDirs entry contains a control or direction-changing character (${bad}) — refusing to rerun it`,
+      );
+  }
+  // A value a confirmation cannot show whole is not run on the strength of a partial view.
+  const taskLen = charCount(task);
+  const scopeLen = scope === undefined ? 0 : charCount(scope);
+  if (!flags.longTask) {
+    if (taskLen > TASK_LIMITS.full)
+      return fail(
+        `the stored task is ${taskLen} characters — more than the ${TASK_LIMITS.full} a confirmation shows whole. Pass --long-task to repeat it anyway (the confirmation then shows its first ${TASK_LIMITS.head} and last ${TASK_LIMITS.tail} characters and says how many were not shown)`,
+      );
+    if (storedScope && scopeLen > SCOPE_LIMITS.full)
+      return fail(
+        `the stored scope is ${scopeLen} characters — more than the ${SCOPE_LIMITS.full} a confirmation shows whole. Pass --long-task to repeat it anyway (the confirmation then shows its first ${SCOPE_LIMITS.head} and last ${SCOPE_LIMITS.tail} characters and says how many were not shown)`,
+      );
+  }
   if (budget !== undefined && !(typeof budget === 'number' && Number.isFinite(budget) && budget > 0))
     return fail('the stored budget is not a positive number');
   if (timeoutSec !== undefined) {
@@ -309,23 +373,28 @@ export function planRerun(
     `Re-run ${record.runId}`,
     // every name was checked against the known harnesses (or is `all`) above, so it is plain text
     `harness: ${harnessNames.join(', ')}`,
-    `mode: ${quoteValue(mode, 80)} — today's template of that name, not a stored copy`,
+    `mode: ${quoteFull(mode)} — today's template of that name, not a stored copy`,
     `permission tier now: ${tiers.length > 0 ? tiers.join('; ') : 'resolved per harness at run time'}`,
-    `task: ${quoteValue(displayText(task, 300), 320)}`,
+    `originally started by: ${started.length > 1 ? origins.map(o => describeOrigin(o === 'unknown' ? null : (o as 'tool' | 'command'))).join('; ') : describeOrigin(record.origin)} (as recorded in the sidecar, unverified)`,
   );
-  if (scope !== undefined) summary.push(`scope: ${quoteValue(displayText(scope, 200), 220)}`);
-  if (pr !== undefined) summary.push(`pr: ${quoteValue(pr, 120)}`);
+  if (notCommand)
+    summary.push(
+      'WARNING: this was NOT typed by you as a /delegate command — the record says it was started by something else (or does not say). Check the task below before approving.',
+    );
+  summary.push(renderTextBlock('task', task, TASK_LIMITS));
+  if (scope !== undefined) summary.push(renderTextBlock('scope', scope, SCOPE_LIMITS));
+  if (pr !== undefined) summary.push(`pr: ${quoteFull(pr)}`);
   if (addDirs !== undefined)
     summary.push(
-      `addDirs: ${addDirs.map(d => quoteValue(d, 200)).join(', ')}${storedAddDirs.length > 0 ? ' (from the record)' : ''}`,
+      `addDirs: ${addDirs.map(d => quoteFull(d)).join(', ')}${storedAddDirs.length > 0 ? ' (from the record)' : ''}`,
     );
-  if (model !== undefined) summary.push(`model: ${quoteValue(model, 120)}`);
+  if (model !== undefined) summary.push(`model: ${quoteFull(model)}`);
   if (budget !== undefined)
     summary.push(`budget: $${budget}${storedBudget ? ' (stored; can only lower a configured budget)' : ''}`);
   if (timeoutSec !== undefined)
     summary.push(`timeout: ${timeoutSec}s${storedTimeout ? ' (stored; can only lower the configured timeout)' : ''}`);
-  summary.push(sessionId === undefined ? 'session: fresh' : `session: resumes ${quoteValue(sessionId, 140)}`);
-  summary.push(`directory: ${quoteValue(env.cwd, 200)}`);
+  summary.push(sessionId === undefined ? 'session: fresh' : `session: resumes ${quoteFull(sessionId)}`);
+  summary.push(`directory: ${quoteFull(env.cwd)}`);
 
   const args: DelegateCommandArgs = { task, harness: harnessSpec, mode };
   if (scope !== undefined) args.scope = scope;
@@ -339,5 +408,7 @@ export function planRerun(
   if (sessionId !== undefined) args.sessionId = sessionId;
   if (overrides.verify !== undefined) args.verify = overrides.verify;
   if (overrides.allowDangerous) args.allowDangerous = true;
+  // the tier(s) shown above are the most the run may resolve to — see DelegateOptions.tierCeiling
+  if (targets.length > 0) args.tierCeiling = ceiling;
   return { errors, notices, args, summary, storedAddDirs };
 }

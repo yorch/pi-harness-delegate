@@ -42,8 +42,14 @@ import {
   isTemplateDanger,
   nativePermissionTier,
 } from './harnesses/registry.ts';
-import type { ActivityEvent, Harness, NormalizedPermission } from './harnesses/types.ts';
-import { buildRunRecord, newRunId, type RunRecord, writeRunRecord } from './run-record.ts';
+import {
+  type ActivityEvent,
+  type Harness,
+  type NormalizedPermission,
+  TIER_RANK,
+  type TierCeiling,
+} from './harnesses/types.ts';
+import { buildRunRecord, newRunId, type RunOrigin, type RunRecord, writeRunRecord } from './run-record.ts';
 import { runHarness } from './runner.ts';
 import { sanitizeTemplateText } from './sanitize.ts';
 import {
@@ -134,6 +140,14 @@ export interface DelegateOptions {
   onAcquired?: () => void;
   /** Shared by every member of one fan-out, recorded in each member's run record (null/absent for a single run). */
   fanoutId?: string;
+  /** Who started this run — recorded in the run record: the `delegate` tool (the model) or a `/delegate` command. */
+  origin?: RunOrigin;
+  /**
+   * The widest template tier this run may resolve to — the tier a human was shown when confirming a
+   * rerun / fan-out resume (`TierCeiling`). Checked against the template this call actually loads, so a
+   * template swapped between the confirmation and the run cannot run at a tier nobody approved.
+   */
+  tierCeiling?: TierCeiling;
 }
 
 /** Verify commands run on the host after the harness exits — bounded independent of harness timeoutMs. */
@@ -446,6 +460,15 @@ export async function delegate(
         .map(k => sanitizeTemplateText(k, 64))
         .join(', ')}`,
     );
+  // A rerun / fan-out resume carries the tier its human was shown: the template loaded NOW must not be
+  // wider (it may have been swapped since the confirmation) — checked on this very load, before any slot.
+  if (opts.tierCeiling !== undefined) {
+    const now = effectiveTemplateTier(harnessName, template);
+    if (opts.tierCeiling === 'unavailable' || TIER_RANK[now] > TIER_RANK[opts.tierCeiling])
+      throw new Error(
+        `mode ${quoteValue(mode, 200)} on ${harnessName} now runs at ${now} permission, but ${opts.tierCeiling === 'unavailable' ? 'it did not resolve' : `${opts.tierCeiling} permission`} when you confirmed — its template changed after the confirmation, so nothing was run`,
+      );
+  }
   const task = opts.task || template.defaultTask;
   if (!task) throw new Error(`delegate mode ${quoteValue(mode, 200)} requires a task`);
   // permission: normalized, danger requires explicit per-call allowDangerous:true (tool: model-set,
@@ -576,6 +599,7 @@ export async function delegate(
     buildRunRecord({
       runId,
       fanoutId: opts.fanoutId ?? null,
+      origin: opts.origin ?? null,
       harness: harnessName,
       mode,
       permission,
