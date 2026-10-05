@@ -359,7 +359,10 @@ test(
       ),
       /session\/new timed out after 2000ms/,
     );
-    assert.ok(Date.now() - started < 30_000, 'must not wait for the overall timeoutMs (60s)');
+    // ~2s expected; 20s leaves a loaded machine 10x headroom while staying clearly below both the overall
+    // timeoutMs (60s) and the default HANDSHAKE_TIMEOUT_MS (30s) the override replaces
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 20_000, `must fail at the 2s handshake timeout, not a 30s/60s one (took ${elapsed}ms)`);
     assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed');
   },
 );
