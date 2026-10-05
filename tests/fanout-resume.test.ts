@@ -857,3 +857,36 @@ test('fan-out resume (e2e, command): the padded follow-up shows head + tail with
     });
   });
 });
+
+test('delegate tool: resumeFanout binds the shown tier to each member — a template swapped after the approval does not run', async () => {
+  await withSandbox(
+    { templates: { 'claude/rev': tpl('rev', 'readonly'), 'codex/rev': tpl('rev', 'readonly') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { commands, tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const d = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+          await capture(() => d('claude,codex rev look', fakeCtx(cwd)));
+          const { id } = fanoutIdOf();
+          clear(argsFile);
+          const u = uiCtx(cwd, true);
+          const real = u.ctx.ui.confirm;
+          u.ctx.ui.confirm = async (t: string, m: string) => {
+            const ok = await real(t, m);
+            writeFileSync(join(cwd, '.pi/delegate/templates/codex/rev.md'), tpl('rev', 'edit'));
+            return ok;
+          };
+          await (tools.get('delegate') as CapturedTool).execute(
+            't',
+            { resumeFanout: id, task: 'go' },
+            undefined,
+            undefined,
+            u.ctx,
+          );
+          assert.ok(ran(argsFile, 'claude'), 'the unchanged member ran');
+          assert.ok(!ran(argsFile, 'codex'), 'the swapped member did not');
+        });
+      });
+    },
+  );
+});
