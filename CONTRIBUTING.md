@@ -47,6 +47,14 @@ Everything this extension reads or writes under `~/.pi/agent` — `settings.json
 resolves from `PI_CODING_AGENT_DIR` when it's set. Tests point it at a temp dir; you can do the same for a
 throwaway manual session.
 
+As a safety net, `bun test` preloads `tests/helpers/preload.ts` (wired in `bunfig.toml`), which pins
+`PI_CODING_AGENT_DIR` to a fresh `mkdtemp` dir under `os.tmpdir()` for the whole test process — overriding any
+outer value — and removes it on exit. A test that sets its own via `withEnv`/`withSandbox` is restored to that
+pinned dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. The opt-in
+live suite (`PI_DELEGATE_LIVE=1`) skips the pin: spawned harnesses inherit the env, and `omp` (the `amp`
+harness) reads `PI_CODING_AGENT_DIR` as its own agent dir for auth/models. `bunfig.toml` and `tests/` are not
+in `package.json` `files`, so none of this ships.
+
 ### Setting env vars in tests
 
 Use `withEnv({ NAME: value }, fn)` (or `restoreEnv(name, prev)`) from `tests/helpers/env.ts` — never
