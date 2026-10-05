@@ -4,7 +4,7 @@
  * `process.env` stores the *string* `"undefined"` (Node and Bun both coerce). A restored
  * `PI_CODING_AGENT_DIR="undefined"` once made a run that outlived its sandbox write transcripts into a
  * relative `undefined/delegate/outputs/...` directory inside the repo. `tests/env-hygiene.test.ts`
- * fails the suite if any other test file writes to `process.env` directly.
+ * fails the suite if any other test file uses `process.env` other than to read it.
  */
 
 /** Restore `name` to `prev`, deleting it when it was unset (`prev === undefined`). */

@@ -68,6 +68,18 @@ export interface CleanupProcess {
   listenerCount(event: string): number;
 }
 
+/** The real `process`, behind the `CleanupProcess` shape. Delegating methods instead of passing
+ *  `process` itself: tests/env-hygiene.test.ts bans aliasing `process` into a variable. */
+function realProcess(): CleanupProcess {
+  return {
+    pid: process.pid,
+    on: (event, listener) => process.on(event, listener),
+    off: (event, listener) => process.off(event, listener),
+    kill: (pid, signal) => process.kill(pid, signal),
+    listenerCount: event => process.listenerCount(event),
+  };
+}
+
 /**
  * Remove `dir` when the process ends: on `'exit'` (normal end of `bun test`, pass or fail) and on
  * SIGINT/SIGTERM/SIGHUP. A signal handler cleans up, removes *all* of these handlers (so the re-raise
@@ -82,7 +94,7 @@ export interface CleanupProcess {
  * `'exit'` handler cleans up whenever the process does end (or a leftover dir stays under
  * `os.tmpdir()` if that listener kills it by a signal — harmless).
  */
-export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = process): void {
+export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = realProcess()): void {
   let done = false;
   const cleanup = () => {
     if (done) return;

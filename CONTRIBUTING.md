@@ -80,11 +80,17 @@ Use `withEnv({ NAME: value }, fn)` (or `restoreEnv(name, prev)`) from `tests/hel
 into a relative `undefined/delegate/outputs/...` directory inside the repo. The helper deletes a var that was
 unset and restores it in `finally`, even when `fn` is async or throws (`tests/env.test.ts` covers it).
 
-`tests/env-hygiene.test.ts` fails if any other test file (`.ts`/`.js`/`.mjs`/`.tsx`/… under `tests/`) writes to
-`process.env` or `Bun.env` directly — plain, compound or `++` assignment, `delete`, `Object.assign`/`defineProperty`,
-`Reflect.set`, or aliasing env into a variable (`const e = process.env`, `const { env } = process`). It scans whole
-files with comments and string literals stripped, so mentioning the pattern in a comment or message is fine. To
-hand a child process a modified env, build a copy (`{ ...process.env, X: '1' }`) instead.
+`tests/env-hygiene.test.ts` fails if any other source file under `tests/` (`.ts`/`.js`/`.mjs`/`.tsx`/…,
+`fixtures/` included) touches `process.env`/`Bun.env`/`import.meta.env` in anything but a plain read. It is an
+allowlist, not a list of banned write shapes: `env.X`/`env[k]` used as a value, and the env object itself only in
+`'X' in process.env`, `{ ...process.env }`, `{ env: process.env }` (a spawn option), `Object.keys/values/entries/hasOwn(process.env)`,
+`const { A } = process.env` or `typeof`. Everything else fails — assignments of every kind, `delete`, `++`, passing
+`process.env` to a function, destructuring/parenthesised targets (`[process.env.X] = …`, `(process.env).X = …`).
+Using `process`/`Bun` as a bare value (`const p = process`, `const { env } = process`), `= globalThis`, and importing
+from `process`/`node:process` (or `env`/`*` from `bun`) are banned outright. It scans whole files with comments and
+string/regex text stripped, so mentioning the pattern in a comment or message is fine. To hand a child process a
+modified env, build a copy (`{ ...process.env, X: '1' }`) instead. If it flags a harmless shape (e.g.
+`obj[process.env.K] = v`, or a default value inside a destructuring pattern), read the var into a local first.
 
 As a runtime backstop, the preload's `afterEach` fails any test that leaves an env var whose value is exactly
 `"undefined"` or `"null"` (and removes it so later tests aren't affected). It catches what a static scan can't, but

@@ -51,9 +51,9 @@ registerPinnedDirCleanup(pinnedAgentDir);
 restoreEnv('PI_CODING_AGENT_DIR', pinnedAgentDir);
 markPreloaded({ pinnedAgentDir, outerAgentDir });
 
-const preexistingCoerced = new Set(coercedEnvVars(process.env));
+const preexistingCoerced = new Set(coercedEnvVars({ ...process.env }));
 afterEach(() => {
-  const bad = coercedEnvVars(process.env, preexistingCoerced);
+  const bad = coercedEnvVars({ ...process.env }, preexistingCoerced);
   if (bad.length === 0) return;
   const shown = bad.map(name => `${name}=${JSON.stringify(process.env[name])}`).join(', ');
   for (const name of bad) restoreEnv(name, undefined);
