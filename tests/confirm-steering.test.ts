@@ -7,6 +7,7 @@ import {
   confirmDangerousCommand,
   confirmDangerousToolCall,
   STEERING_DISPLAY,
+  steeringFieldLines,
   TOOL_PARAM_DISPLAY,
 } from '../extensions/validate.ts';
 import { unwrap } from './helpers/dialog.ts';
@@ -233,4 +234,24 @@ test('a tool fan-out records origin "tool" (not "command"), so repeating it head
       });
     });
   });
+});
+
+test('steeringFieldLines: the typed model / budget / timeout / verify are listed unless a RESOLVED will-apply row carries them', () => {
+  const typed = { model: 'opus', budgetUsd: 4, timeoutSec: 90, verify: 'make test' };
+  const plain = steeringFieldLines(typed).join('\n');
+  assert.match(plain, /model: "opus"/);
+  assert.match(plain, /budget: \$4/);
+  assert.match(plain, /timeout: 90s/);
+  assert.match(plain, /verify \(runs on this machine after the harness exits\): "make test"/);
+  const resolved = steeringFieldLines({ ...typed, effective: ['will apply (claude): model "opus", budget $4'] }).join(
+    '\n',
+  );
+  assert.doesNotMatch(resolved, /model: |budget: |timeout: |verify \(/, 'not repeated next to the will-apply row');
+  // a mode that does not resolve has no will-apply facts: the typed values must still be shown
+  const unresolved = steeringFieldLines({
+    ...typed,
+    effective: ['will apply (claude): mode "x" does not resolve for this harness'],
+  }).join('\n');
+  assert.match(unresolved, /model: "opus"/);
+  assert.match(unresolved, /budget: \$4/);
 });

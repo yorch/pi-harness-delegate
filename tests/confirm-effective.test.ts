@@ -384,3 +384,110 @@ test('a fan-out will-apply: one shared row, and a member lists only what differs
     },
   );
 });
+
+test('a fan-out member that LACKS a fact the others share says so (the shared row would otherwise claim it for everyone)', async () => {
+  await withSandbox(
+    {
+      templates: {
+        'claude/v': tpl('v', 'edit', `verify: ${VERIFY}`),
+        'codex/v': tpl('v', 'edit', `verify: ${VERIFY}`),
+        'opencode/v': tpl('v', 'edit'),
+      },
+    },
+    async ({ cwd }) => {
+      const rows = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude', 'codex', 'opencode'], 'v', {
+        model: 'same',
+      });
+      assert.match(
+        rows[0],
+        /^will apply \(all 3\): model "same".*verify "echo VERIFY-RAN" \(from the template; runs on this machine/,
+      );
+      assert.deepEqual(rows.slice(1), ['will apply (opencode): no verify command']);
+    },
+  );
+});
+
+test('a stored (narrow-only) budget / timeout is labelled as such in the will-apply row', async () => {
+  await withSandbox({ settings: { maxBudgetUsd: 2, timeoutMs: 60_000 }, templates: TEMPLATES }, async ({ cwd }) => {
+    const row = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude'], 'edit', {
+      budgetUsd: 1,
+      budgetNarrowOnly: true,
+      timeoutSec: 30,
+    }).join('\n');
+    assert.match(row, /budget \$1 \(stored: only lowers\)/);
+    assert.match(row, /timeout 30s \(only lowers\)/);
+    const typed = effectiveRunLines(fakeCtx(cwd), loadConfig(), ['claude'], 'edit', {
+      budgetUsd: 1,
+      timeoutSec: 30,
+      timeoutMayRaise: true,
+    }).join('\n');
+    assert.doesNotMatch(typed, /only lowers/);
+  });
+});
+
+test('tool danger confirm with an empty task and a template defaultTask: the dialog says which task actually runs', async () => {
+  await withSandbox(
+    { templates: { 'claude/dflt': tpl('dflt', 'edit', 'defaultTask: do the template job') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const rec = recorder();
+          const { tools } = await loadExtension(rec.exec);
+          const u = uiCtx(cwd, true);
+          await (tools.get('delegate') as CapturedTool).execute(
+            't',
+            { harness: 'claude', mode: 'dflt', task: '', allowDangerous: true },
+            undefined,
+            undefined,
+            u.ctx,
+          );
+          assert.match(unwrap(u.asked[0]), /no task given: the template's default task runs: "do the template job"/);
+          assert.ok(argvOf(argsFile).join('\n').includes('do the template job'));
+          // a task that was given is the one that runs: nothing about a default task
+          const given = uiCtx(cwd, true);
+          await (tools.get('delegate') as CapturedTool).execute(
+            't',
+            { harness: 'claude', mode: 'dflt', task: 'my own task', allowDangerous: true },
+            undefined,
+            undefined,
+            given.ctx,
+          );
+          assert.doesNotMatch(unwrap(given.asked[0]), /default task/);
+        });
+      });
+    },
+  );
+});
+
+test('command resume plan: the verify line follows the tier the resumed run will have (--allow-dangerous escalates a readonly template)', async () => {
+  const templates = {
+    'claude/ro': tpl('ro', 'readonly', `verify: ${VERIFY}`),
+    'codex/ro': tpl('ro', 'readonly', `verify: ${VERIFY}`),
+  };
+  for (const allow of [false, true])
+    await withSandbox({ templates }, async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const rec = recorder();
+          const { commands } = await loadExtension(rec.exec);
+          const quiet = process.stdout.write.bind(process.stdout);
+          process.stdout.write = (() => true) as typeof process.stdout.write;
+          const h = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+          try {
+            await h('claude,codex ro first pass', fakeCtx(cwd));
+            const dir = outputsDir('claude');
+            const name = readdirSync(dir).find(f => f.endsWith('.json')) as string;
+            const id = (JSON.parse(readFileSync(join(dir, name), 'utf8')) as RunRecord).fanoutId as string;
+            rec.verifies.length = 0;
+            const u = uiCtx(cwd, true);
+            await h(`--resume=${id} ${allow ? '--allow-dangerous ' : ''}again`, u.ctx);
+            const plan = shownVerify(u.asked[0]);
+            assert.equal(plan, allow ? 'run' : 'skip', `plan dialog, --allow-dangerous=${allow}`);
+            assert.equal(plan === 'run', rec.verifies.length > 0, `plan said ${plan}; ran ${rec.verifies.length}x`);
+          } finally {
+            process.stdout.write = quiet;
+          }
+        });
+      });
+    });
+});

@@ -171,11 +171,11 @@ export const STEERING_DISPLAY: Record<keyof DelegateOptions, 'shown' | 'hidden'>
   allowDangerous: 'hidden', // the very thing being confirmed
   sessionId: 'shown',
   pr: 'shown',
-  addDirs: 'shown',
+  addDirs: 'shown', // the call's own; the template's `addDirs:` and the native permission it passes on: `effectiveRunLines`
   timeoutSec: 'shown',
   timeoutSecMayRaise: 'hidden', // set by the command path only; the shown timeout is the typed value
   maxBudgetNarrowOnly: 'hidden', // narrows a shown budget, never widens
-  verify: 'shown', // and a template's own verify command: `effectiveRunLines`
+  verify: 'shown', // and a template's own verify command, judged on the tier the run will have once escalated: `effectiveRunLines`
   onStream: 'hidden', // callbacks / plumbing, not run steering
   onActivity: 'hidden',
   signal: 'hidden',

@@ -381,3 +381,27 @@ test('repro: a 5-harness fan-out with a 4-word task is ACCEPTED at 80x24 (one sh
     });
   });
 });
+
+test('at the largest task a narrow terminal accepts (the hint row wraps below 49 columns), the whole dialog is still on screen in both layouts', async () => {
+  for (const columns of [40, 44, 48, 49, 60]) {
+    const vp = { columns, rows: 30 };
+    let best: string | undefined;
+    let n = 0;
+    for (; n < 25; n++) {
+      const task = Array.from({ length: n + 1 }, (_, i) => `L${i}`).join('\n');
+      const t = capture();
+      try {
+        await confirmDangerousToolCall(
+          t.ctx,
+          { harness: 'claude', mode: 'fix', task },
+          { harnesses: ['claude'], mode: 'fix', effective: eff, viewport: vp },
+        );
+      } catch {
+        break;
+      }
+      best = t.asked[0];
+    }
+    assert.ok(best !== undefined && n >= 3, `${columns}: some task is accepted (${n})`);
+    assertOnScreen(best as string, vp, ['DANGER', 'will apply', `L${n - 1}`], `${columns}x30 largest (${n} lines)`);
+  }
+});

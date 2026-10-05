@@ -43,6 +43,13 @@ function quoteHead(text: string, max: number): string {
 }
 
 type Facts = [key: string, text: string][];
+/** What a fact is called when a member says it does not have it. */
+const FACT_NAMES: Record<string, string> = {
+  native: 'native permission',
+  'tpl-dirs': 'template addDirs',
+  'tpl-task': 'default task',
+  verify: 'verify command',
+};
 
 /**
  * `will apply` rows for the harness(es) of a run: the resolved model, budget, timeout, transport, the native
@@ -145,7 +152,7 @@ export function effectiveRunLines(
       const own = m.facts.filter(f => shared.get(f[0]) !== f[1]).map(f => f[1]);
       // a member that LACKS a shared fact says so (the shared row would otherwise claim it for everyone)
       const lacks = [...shared.keys()].filter(k => at(m, k) === undefined);
-      if (lacks.length > 0) own.push(`no ${lacks.join(' / ')}`);
+      if (lacks.length > 0) own.push(`no ${lacks.map(k => FACT_NAMES[k] ?? k).join(' / ')}`);
       if (own.length > 0) out.push(`will apply (${safeName(m.name)}): ${own.join(', ')}`);
     }
     rows.unshift(...out);

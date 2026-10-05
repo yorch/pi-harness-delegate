@@ -7,6 +7,7 @@ import {
   describeTextSummary,
   dialogFrameRows,
   layoutConfirmation,
+  measureText,
   textTooLongReason,
   type Viewport,
 } from '../extensions/confirm-layout.ts';
@@ -310,17 +311,16 @@ test('a cut block needs MIN_BLOCK_ROWS rows: with fewer left the confirmation is
       onOverflow: 'headtail',
       viewport: { columns: 80, rows },
     });
-  let first = -1;
-  for (let rows = 12; rows < 40 && first < 0; rows++) if (at(rows).ok) first = rows;
-  assert.ok(first > 12, `found the smallest terminal that shows the cut block (${first})`);
-  const below = at(first - 1);
-  assert.equal(below.ok, false, `${first - 1} rows is one too few`);
+  // 1 critical row + 2 summary rows + the separator: 18 rows leave 3 for the block, 19 leave 4 (= MIN_BLOCK_ROWS)
+  const below = at(18);
+  assert.equal(below.ok, false, '18 rows leave 3 rows for the block: one too few');
   if (!below.ok) assert.equal(below.kind, 'critical');
-  const ok = at(first);
+  const ok = at(19);
   assert.ok(ok.ok);
   if (ok.ok) {
     const blockRows = ok.lines.indexOf('');
-    assert.ok(blockRows >= 4, `the block has at least its header, a row, the marker and a row (${blockRows})`);
+    assert.equal(blockRows, 4, 'the block has its header, a row, the marker and a row');
+    assert.match(ok.lines.join('\n'), /\(\d+ rows not shown in the middle/);
   }
 });
 
@@ -362,4 +362,62 @@ test('a huge text is refused before it is measured against the width (model-set:
     textTooLongReason('y'.repeat(2001), { full: 2000, maxRows: 20 }, { columns: 80, rows: 40 }) ?? '',
     /2001 characters/,
   );
+});
+
+test('the character-limit refusal of a model-set text costs far less than measuring it (it never reaches the width measuring)', () => {
+  // distinct wide characters defeat the per-character width cache: measuring this text is the slow path
+  const text = Array.from({ length: 99_000 }, (_, i) => String.fromCodePoint(0x4e00 + (i % 20_000))).join('');
+  const t0 = performance.now();
+  measureText(text, { columns: 80, rows: 40 });
+  const measuring = performance.now() - t0;
+  const t1 = performance.now();
+  const r = layoutConfirmation({
+    blocks: [{ label: 'Task', text, limits: { full: 2000, maxRows: 20 }, summaryLabel: 'task' }],
+    critical: ['DANGER: x'],
+    summaries: [],
+    onOverflow: 'refuse',
+    viewport: { columns: 80, rows: 40 },
+  });
+  const refusing = performance.now() - t1;
+  assert.ok(!r.ok && r.kind === 'blocks');
+  assert.ok(refusing < measuring / 2, `refusing took ${refusing}ms, measuring the same text ${measuring}ms`);
+});
+
+test('a model-set block that is within its limits but has too few rows left: under 3 rows the TERMINAL is refused (enlarge it), from 3 the text is (shorten it)', () => {
+  const at = (text: string, rows: number) =>
+    layoutConfirmation({
+      blocks: [{ label: 'Task', text, limits: { full: 5000, maxRows: 100 }, summaryLabel: 'task' }],
+      critical: ['DANGER: x'],
+      summaries: [],
+      onOverflow: 'refuse',
+      // 1 critical row + 1 summary row + the separator leave `rows - 12 - 3` rows for the block
+      viewport: { columns: 80, rows },
+    });
+  const two = 'a\nb'; // header + 2 rows = 3
+  const three = 'a\nb\nc'; // header + 3 rows = 4
+  const short = at(two, 17); // 2 rows left: too few to show even this
+  assert.ok(!short.ok && short.kind === 'critical', JSON.stringify(short));
+  assert.ok(at(two, 18).ok, '3 rows left: shown whole');
+  const text = at(three, 18); // 3 rows left, 4 needed: the text is too long for this terminal
+  assert.ok(!text.ok && text.kind === 'blocks', JSON.stringify(text));
+  assert.match(text.ok ? '' : text.reason, /needs 4 display rows, but only 3 fit on this terminal \(80x18\)/);
+  assert.ok(at(three, 19).ok);
+});
+
+test('the refusal grammar: "the task needs N display rows", "the scope and task need N display rows"', () => {
+  const block = (label: string, text: string) => ({
+    label,
+    text,
+    limits: { full: 5000, maxRows: 100 },
+    summaryLabel: label,
+  });
+  const both = layoutConfirmation({
+    blocks: [block('Scope', 'a\nb\nc'), block('Task', 'a\nb\nc')],
+    critical: ['DANGER: x'],
+    summaries: [],
+    onOverflow: 'refuse',
+    viewport: { columns: 80, rows: 20 },
+  });
+  assert.ok(!both.ok);
+  assert.match(both.ok ? '' : both.reason, /the scope and task need \d+ display rows, but only \d+ fit/);
 });
