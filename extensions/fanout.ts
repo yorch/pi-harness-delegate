@@ -63,6 +63,8 @@ export interface FanoutResumeSessions {
   noSession: string[];
   /** Members whose run record could not be read — listed in the report, never silently dropped. */
   unreadable?: string[];
+  /** Per harness, the template tier the human was shown (`planFanoutResume`) — the run may not exceed it. */
+  tierCeiling?: Record<string, TierCeiling>;
 }
 
 /** The recorded session of harness `h` in a fan-out resume. A harness with no mapping FAILS (throws) —
@@ -138,6 +140,7 @@ export async function runFanoutTool(
           waitForSlot: true,
           fanoutId,
           origin: 'tool',
+          tierCeiling: resume?.tierCeiling ? (resume.tierCeiling[h] ?? 'unavailable') : undefined,
           onAcquired: () =>
             onUpdate?.({ content: [{ type: 'text', text: `[${h}] running…` }], details: { progress: 0.5 } }),
         },

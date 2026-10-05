@@ -50,7 +50,7 @@ import {
   takePendingReport,
 } from './engine.ts';
 import { closeWhenMounted, type RunUiState, runFanoutCommand, runFanoutTool } from './fanout.ts';
-import { type FanoutResumePlan, planFanoutResume } from './fanout-resume.ts';
+import { type FanoutResumePlan, formatFanoutResumePlan, planFanoutResume } from './fanout-resume.ts';
 import {
   ALIASES,
   getHarness,
@@ -59,7 +59,7 @@ import {
   isTemplateDanger,
   resolveHarnessName,
 } from './harnesses/registry.ts';
-import type { ActivityEvent, TierCeiling } from './harnesses/types.ts';
+import type { ActivityEvent, NormalizedPermission, TierCeiling } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
 import { currentHistoryView, showHistory } from './history.ts';
 import { HISTORY_FLAGS_HINT, parseHistoryArgs } from './history-filter.ts';
@@ -206,6 +206,25 @@ export default function (pi: ExtensionAPI) {
       mode || config.defaultMode,
     );
 
+  /** Today's tier of `mode` on `harness` — the engine's own classification of the template as it loads NOW
+   *  (project-local templates only when pi's trust store trusts the project) — or `null` when it does not resolve. */
+  const todaysModeTier =
+    (ctx: ExtensionContext) =>
+    (harness: string, mode: string): NormalizedPermission | null => {
+      const t = loadTemplates(ctx.cwd, harness, isProjectTrusted(ctx)).get(mode);
+      return t ? effectiveTemplateTier(harness, t) : null;
+    };
+
+  /** Ask a person to approve a fan-out resume plan. A UI session only: with nobody to ask, `false`. */
+  const confirmResumePlan = async (ctx: ExtensionContext, text: string): Promise<boolean> => {
+    if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') return false;
+    try {
+      return await ctx.ui.confirm('Resume this recorded fan-out?', text);
+    } catch {
+      return false;
+    }
+  };
+
   // ── Tools ────────────────────────────────────────────────────────────────
 
   /**
@@ -253,13 +272,26 @@ export default function (pi: ExtensionAPI) {
             `resumeFanout must be a fan-out id (fan_ + 16 hex), got ${quoteValue(rawParams.resumeFanout.slice(0, 40), 100)}`,
           );
         const known = readAllRecordsDetailed();
+        // a model-set `mode` is compared with the recorded tier like the recorded mode itself (it is not a human's choice)
         const plan = planFanoutResume(
           rawParams.resumeFanout,
           known.records.map(l => l.record),
           ctx.cwd,
+          { modeTier: todaysModeTier(ctx), mode: rawParams.mode, modeTypedByHuman: false },
           known.skipped,
         );
         if (!plan.ok) throw new Error(plan.error);
+        // The model is asking to continue sessions that already hold context and tool history, on every
+        // member, with a prompt of its own: a person always sees the plan and approves it — and with nobody
+        // to ask (headless) it is refused outright.
+        if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function')
+          throw new Error(
+            `resumeFanout ${rawParams.resumeFanout} needs a person to approve it, but there is no interactive UI — refusing (resume it yourself with /delegate --resume=${rawParams.resumeFanout} <prompt>)`,
+          );
+        if (
+          !(await confirmResumePlan(ctx, formatFanoutResumePlan(rawParams.resumeFanout, plan, rawParams.task, 'tool')))
+        )
+          throw new Error(`resumeFanout ${rawParams.resumeFanout} was declined by the user — nothing was run`);
         resumePlan = plan;
         harness = plan.harnesses.join(',');
       }
@@ -641,10 +673,21 @@ export default function (pi: ExtensionAPI) {
         parsed.sessionId,
         known.records.map(l => l.record),
         ctx.cwd,
+        { modeTier: todaysModeTier(ctx), mode: parsed.mode, modeTypedByHuman: true },
         known.skipped,
       );
       if (!plan.ok) {
         say(plan.error);
+        return;
+      }
+      // An interactive session always sees the plan (members, session ids, today's tier, the follow-up
+      // task) and must approve it. Headless: the human typed the explicit fan-out id — allowed, the other
+      // gates (agreement, tier check, danger confirm) still apply.
+      if (
+        ctx.hasUI &&
+        !(await confirmResumePlan(ctx, formatFanoutResumePlan(parsed.sessionId, plan, parsed.task, 'command')))
+      ) {
+        say(`resume of fan-out ${parsed.sessionId} was declined — nothing was run`);
         return;
       }
       if (plan.noSession.length > 0)
@@ -657,6 +700,7 @@ export default function (pi: ExtensionAPI) {
         );
       parsed.harness = plan.harnesses.join(',');
       parsed.mode = parsed.mode ?? plan.mode;
+      parsed.tierCeiling = plan.tierCeiling;
       parsed.sessionId = undefined;
       await runFanoutCommand(pi, ui, ctx, parsed, {
         sessions: plan.sessions,
@@ -870,10 +914,7 @@ export default function (pi: ExtensionAPI) {
         hasUI: ctx.hasUI,
         isKnownHarness,
         // today's template, classified by the engine's own rules — see effectiveTemplateTier
-        modeTier: (h, m) => {
-          const t = loadTemplates(ctx.cwd, h, trusted).get(m);
-          return t ? effectiveTemplateTier(h, t) : null;
-        },
+        modeTier: todaysModeTier(ctx),
         siblings: record.fanoutId
           ? everything.records.map(l => l.record).filter(r => r.fanoutId === record.fanoutId)
           : [],

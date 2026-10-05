@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { outputsDir } from '../extensions/config.ts';
-import { planFanoutResume } from '../extensions/fanout-resume.ts';
+import { formatFanoutResumePlan, planFanoutResume } from '../extensions/fanout-resume.ts';
 import { buildRunRecord, newFanoutId, newRunId, type RunRecord } from '../extensions/run-record.ts';
 import {
   type CapturedTool,
@@ -12,11 +12,16 @@ import {
   fakeCtx,
   loadExtension,
   readArgs,
+  tpl,
+  uiCtx,
   withFakeBinaries,
   withOnlyFakes,
   withSandbox,
 } from './helpers/sandbox.ts';
 import { UNSAFE } from './helpers/unsafe.ts';
+
+/** Today's tier is the recorded one (edit) unless a test says otherwise. */
+const ENV = { modeTier: () => 'edit' as const };
 
 const rec = (over: Partial<RunRecord>): RunRecord => ({
   ...buildRunRecord({
@@ -54,7 +59,7 @@ test('planFanoutResume: each member keeps its own harness + session; sessionless
     rec({ fanoutId: newFanoutId(), harness: 'devin', sessionId: 'other' }),
     rec({ fanoutId: null, harness: 'opencode', sessionId: 'single' }),
   ];
-  const plan = planFanoutResume(fid, records, '/proj');
+  const plan = planFanoutResume(fid, records, '/proj', ENV);
   assert.ok(plan.ok);
   if (plan.ok) {
     assert.deepEqual(plan.harnesses, ['claude', 'codex']);
@@ -64,20 +69,22 @@ test('planFanoutResume: each member keeps its own harness + session; sessionless
   }
 });
 
-test('planFanoutResume: the most recent record of a harness wins; errors for unknown id, other cwd, no sessions, hostile ids', () => {
+test('planFanoutResume: errors for unknown id, other cwd, no sessions, hostile ids; two records of a harness naming different sessions are ambiguous', () => {
   const fid = newFanoutId();
   const older = rec({ fanoutId: fid, sessionId: 'old', startedAt: '2026-01-01T00:00:00.000Z' });
   const newer = rec({ fanoutId: fid, sessionId: 'new', startedAt: '2026-02-01T00:00:00.000Z' });
-  const p = planFanoutResume(fid, [newer, older], '/proj');
-  assert.ok(p.ok && p.sessions.claude === 'new');
-  const unknown = planFanoutResume(newFanoutId(), [newer], '/proj');
+  const ambiguous = planFanoutResume(fid, [newer, older], '/proj', ENV);
+  assert.ok(!ambiguous.ok && /different sessions.*ambiguous/.test(ambiguous.error), JSON.stringify(ambiguous));
+  const same = planFanoutResume(fid, [newer, { ...older, sessionId: 'new' }], '/proj', ENV);
+  assert.ok(same.ok && same.sessions.claude === 'new', 'the same session twice is not ambiguous');
+  const unknown = planFanoutResume(newFanoutId(), [newer], '/proj', ENV);
   assert.ok(!unknown.ok && /unknown fan-out id/.test(unknown.error));
-  const elsewhere = planFanoutResume(fid, [newer], '/somewhere/else');
+  const elsewhere = planFanoutResume(fid, [newer], '/somewhere/else', ENV);
   assert.ok(!elsewhere.ok && /not the current directory/.test(elsewhere.error));
-  const none = planFanoutResume(fid, [rec({ fanoutId: fid, sessionId: null })], '/proj');
+  const none = planFanoutResume(fid, [rec({ fanoutId: fid, sessionId: null })], '/proj', ENV);
   assert.ok(!none.ok && /nothing to resume/.test(none.error));
   for (const bad of ['--dangerously-bypass', 'a b', 'x'.repeat(200), 'a\u001b[31m']) {
-    const h = planFanoutResume(fid, [rec({ fanoutId: fid, sessionId: bad })], '/proj');
+    const h = planFanoutResume(fid, [rec({ fanoutId: fid, sessionId: bad })], '/proj', ENV);
     assert.ok(!h.ok && /unusable/.test(h.error), bad);
     assert.ok(!h.ok && !h.error.includes('\u001b'));
   }
@@ -250,10 +257,47 @@ test('delegate tool: resumeFanout resumes the recorded members; it cannot be com
         await assert.rejects(() => call({ resumeFanout: id, sessionId: 'abc' }), /mutually exclusive/);
         await assert.rejects(() => call({ resumeFanout: 'nope' }), /must be a fan-out id/);
         await assert.rejects(() => call({ resumeFanout: 'fan_0000000000000000' }), /unknown fan-out id/);
-        await assert.rejects(() => call({ resumeFanout: id, allowDangerous: true }), /no interactive UI/);
-        await assert.rejects(() => call({ resumeFanout: id, addDirs: ['/etc'] }), /no interactive UI/);
+        // headless: nobody to approve a model-requested resume — refused outright, whatever else is set
+        for (const extra of [{}, { allowDangerous: true }, { addDirs: ['/etc'] }])
+          await assert.rejects(
+            () => call({ resumeFanout: id, ...extra }),
+            /needs a person to approve it.*no interactive UI/,
+          );
+        // a person who declines the plan runs nothing
+        const declined = uiCtx(cwd, false);
+        await assert.rejects(
+          () => tool.execute('t', { task: 'again', resumeFanout: id }, undefined, undefined, declined.ctx),
+          /declined by the user/,
+        );
+        assert.match(declined.asked[0], /Resume fan-out fan_[0-9a-f]{16}/);
+        assert.match(declined.asked[0], /claude — session "sess-1" · tier now edit/);
+        assert.match(declined.asked[0], /codex — session "thr-1"/);
+        assert.match(declined.asked[0], /started by a \/delegate command/);
+        assert.match(declined.asked[0], /WARNING: this was requested by the delegate tool \(the model\)/);
+        assert.match(declined.asked[0], /follow-up task \(5 characters\):\n {2}> again/);
         assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'), 'refusals run nothing');
-        const res = (await call({ resumeFanout: id })) as {
+        // the allowDangerous / addDirs confirms still fire after the plan is approved (a second dialog)
+        const dangerous = uiCtx(cwd, false);
+        await assert.rejects(
+          () =>
+            tool.execute(
+              't',
+              { task: 'again', resumeFanout: id, allowDangerous: true },
+              undefined,
+              undefined,
+              dangerous.ctx,
+            ),
+          /declined/,
+        );
+        assert.equal(dangerous.asked.length, 1, 'the plan was asked first, and declining it stops there');
+        const approving = uiCtx(cwd, true);
+        const res = (await tool.execute(
+          't',
+          { task: 'again', resumeFanout: id },
+          undefined,
+          undefined,
+          approving.ctx,
+        )) as {
           details: { fanout: boolean; runs: { harness: string; ok: boolean }[] };
         };
         assert.equal(res.details.fanout, true);
@@ -280,26 +324,36 @@ test('planFanoutResume: harness names are canonicalized so the session lookup al
       rec({ fanoutId: fid, harness: 'omp', sessionId: 'a-1' }),
     ],
     '/proj',
+    ENV,
   );
   assert.ok(plan.ok);
   if (plan.ok) {
     assert.deepEqual(plan.harnesses, ['claude', 'amp']);
     assert.deepEqual(plan.sessions, { claude: 'c-1', amp: 'a-1' });
     // every harness the fan-out launches has a session under exactly that name
-    for (const h of plan.harnesses) assert.ok(Object.hasOwn(plan.sessions, h));
+    assert.deepEqual(Object.keys(plan.sessions).sort(), [...plan.harnesses].sort());
   }
-  const bad = planFanoutResume(fid, [rec({ fanoutId: fid, harness: 'claude,codex', sessionId: 's' })], '/proj');
+  const bad = planFanoutResume(fid, [rec({ fanoutId: fid, harness: 'claude,codex', sessionId: 's' })], '/proj', ENV);
   assert.ok(!bad.ok && /not a known harness/.test(bad.error));
-  const evil = planFanoutResume(fid, [rec({ fanoutId: fid, harness: 'x\u001b[31m\u202e', sessionId: 's' })], '/proj');
+  const evil = planFanoutResume(
+    fid,
+    [rec({ fanoutId: fid, harness: 'x\u001b[31m\u202e', sessionId: 's' })],
+    '/proj',
+    ENV,
+  );
   assert.ok(!evil.ok && !UNSAFE.test(evil.error), evil.ok ? '' : JSON.stringify(evil.error));
 });
 
-test("planFanoutResume: the newest record (input order, newest first) wins — a record's own startedAt is not trusted", () => {
+test("planFanoutResume: a record's own startedAt is never trusted — a planted 'newer' duplicate cannot take over a harness's session", () => {
   const fid = newFanoutId();
   const claimsFuture = rec({ fanoutId: fid, sessionId: 'planted', startedAt: '2999-01-01T00:00:00.000Z' });
-  const realNewest = rec({ fanoutId: fid, sessionId: 'real', startedAt: '2001-01-01T00:00:00.000Z' });
-  const p = planFanoutResume(fid, [realNewest, claimsFuture], '/proj');
-  assert.ok(p.ok && p.sessions.claude === 'real');
+  const real = rec({ fanoutId: fid, sessionId: 'real', startedAt: '2001-01-01T00:00:00.000Z' });
+  const p = planFanoutResume(fid, [real, claimsFuture], '/proj', ENV);
+  assert.ok(!p.ok && /ambiguous/.test(p.error));
+  // a partial record of the same harness (no session) next to the real one is fine
+  const partial = rec({ fanoutId: fid, sessionId: null, partial: true });
+  const q = planFanoutResume(fid, [real, partial], '/proj', ENV);
+  assert.ok(q.ok && q.sessions.claude === 'real');
 });
 
 test('planFanoutResume: members whose record was unreadable are LISTED, and a fan-out of only unreadable records says so', () => {
@@ -308,9 +362,15 @@ test('planFanoutResume: members whose record was unreadable are LISTED, and a fa
     { file: 'a.md', reason: 'invalid field "sessionId"', fanoutId: fid, harness: 'codex' },
     { file: 'b.md', reason: 'x', fanoutId: newFanoutId(), harness: 'devin' },
   ];
-  const plan = planFanoutResume(fid, [rec({ fanoutId: fid, harness: 'claude', sessionId: 'c-1' })], '/proj', skipped);
+  const plan = planFanoutResume(
+    fid,
+    [rec({ fanoutId: fid, harness: 'claude', sessionId: 'c-1' })],
+    '/proj',
+    ENV,
+    skipped,
+  );
   assert.ok(plan.ok && plan.unreadable.length === 1 && plan.unreadable[0] === 'codex');
-  const onlyBad = planFanoutResume(fid, [], '/proj', skipped);
+  const onlyBad = planFanoutResume(fid, [], '/proj', ENV, skipped);
   assert.ok(!onlyBad.ok && /no usable run record.*unreadable record\(s\) for: "?codex/.test(onlyBad.error));
 });
 
@@ -405,4 +465,267 @@ test('fan-out resume: a harness with no session mapping FAILS (command path) ins
       });
     });
   });
+});
+
+// ── members must agree; per-member tier check; the plan is always shown ───────────────────────────────────────
+
+test('planFanoutResume: members that disagree on the mode or the recorded tier are refused — one forged record cannot decide for the rest', () => {
+  const fid = newFanoutId();
+  const legit = rec({ fanoutId: fid, harness: 'claude', mode: 'review', permission: 'readonly', sessionId: 'c-1' });
+  const forged = rec({ fanoutId: fid, harness: 'codex', mode: 'tinker', permission: 'edit', sessionId: 'x-1' });
+  // the forged one is NEWEST (first): the old planner took ITS mode for everyone
+  const plan = planFanoutResume(fid, [forged, legit], '/proj', ENV);
+  assert.ok(!plan.ok);
+  assert.match(plan.error, /disagree on the mode \/ permission tier/);
+  assert.match(plan.error, /claude → mode "review", readonly/);
+  assert.match(plan.error, /codex → mode "tinker", edit/);
+  // same mode, different tier is a disagreement too
+  const tierOnly = planFanoutResume(fid, [{ ...forged, mode: 'review' }, legit], '/proj', ENV);
+  assert.ok(!tierOnly.ok && /disagree/.test(tierOnly.error));
+  // agreeing members resume
+  assert.ok(
+    planFanoutResume(fid, [{ ...forged, mode: 'review', permission: 'readonly' }, legit], '/proj', {
+      modeTier: () => 'readonly',
+    }).ok,
+  );
+  // the disagreement message is escaped
+  const evilMode = planFanoutResume(fid, [{ ...forged, mode: 'a\u202eb' }, legit], '/proj', ENV);
+  assert.ok(!evilMode.ok && !UNSAFE.test(evilMode.error));
+});
+
+test("planFanoutResume: today's tier is compared per member; a human-typed mode skips it, a model-set one does not", () => {
+  const fid = newFanoutId();
+  const records = [
+    rec({ fanoutId: fid, harness: 'claude', mode: 'review', permission: 'readonly', sessionId: 'c-1' }),
+    rec({ fanoutId: fid, harness: 'codex', mode: 'review', permission: 'readonly', sessionId: 't-1' }),
+  ];
+  // only codex's template has been widened since
+  const widenedOnCodex = { modeTier: (h: string) => (h === 'codex' ? ('edit' as const) : ('readonly' as const)) };
+  const refused = planFanoutResume(fid, records, '/proj', widenedOnCodex);
+  assert.ok(
+    !refused.ok && /on codex now runs at edit permission.*ran at readonly/.test(refused.error),
+    JSON.stringify(refused),
+  );
+  // a mode the HUMAN typed is their choice
+  const typed = planFanoutResume(fid, records, '/proj', { ...widenedOnCodex, mode: 'other', modeTypedByHuman: true });
+  assert.ok(typed.ok && typed.mode === 'other');
+  // the tool's `mode` param is model-set: compared like the recorded one
+  const modelSet = planFanoutResume(fid, records, '/proj', {
+    ...widenedOnCodex,
+    mode: 'other',
+    modeTypedByHuman: false,
+  });
+  assert.ok(!modelSet.ok && /widened/.test(modelSet.error));
+  // narrower is fine and is shown; a mode that no longer resolves is shown as unavailable and capped
+  const ok = planFanoutResume(fid, records, '/proj', { modeTier: h => (h === 'codex' ? null : 'readonly') });
+  assert.ok(ok.ok);
+  if (ok.ok) {
+    assert.deepEqual(ok.tierCeiling, { claude: 'readonly', codex: 'unavailable' });
+    assert.deepEqual(
+      ok.members.map(m => [m.harness, m.sessionId, m.nowTier]),
+      [
+        ['claude', 'c-1', 'readonly'],
+        ['codex', 't-1', null],
+      ],
+    );
+  }
+});
+
+test('formatFanoutResumePlan: harnesses, whole session ids, tiers, origins and the whole follow-up task — escaped', () => {
+  const fid = newFanoutId();
+  const plan = planFanoutResume(
+    fid,
+    [
+      rec({ fanoutId: fid, harness: 'claude', sessionId: 'c-1', origin: 'command', permission: 'edit' }),
+      rec({ fanoutId: fid, harness: 'codex', sessionId: 't-1', origin: 'tool', permission: 'edit' }),
+      rec({ fanoutId: fid, harness: 'amp', sessionId: null, permission: 'edit' }),
+    ],
+    '/proj',
+    { modeTier: h => (h === 'claude' ? 'readonly' : 'edit') },
+  );
+  assert.ok(plan.ok);
+  if (!plan.ok) return;
+  const text = formatFanoutResumePlan(fid, plan, `go on\n${'x'.repeat(2500)}\u001b[31m`, 'command');
+  assert.match(text, /claude — session "c-1" · tier now readonly \(recorded: edit\) · started by a \/delegate command/);
+  assert.match(text, /codex — session "t-1" · tier now edit · started by the delegate tool \(the model\)/);
+  assert.match(text, /not resumed \(no recorded session id\): amp/);
+  assert.match(text, /WARNING: at least one member was NOT recorded as started by a \/delegate command/);
+  assert.match(text, /\(\d+ characters not shown in the middle\)/);
+  assert.ok(!UNSAFE.test(text));
+  assert.ok(
+    !/WARNING/.test(
+      formatFanoutResumePlan(
+        fid,
+        { ...plan, members: plan.members.map(m => ({ ...m, origin: 'command' as const })) },
+        'x',
+        'command',
+      ),
+    ),
+  );
+});
+
+function forgeMember(harness: string, name: string, over: Partial<RunRecord>, futureSec = 0): RunRecord {
+  const dir = outputsDir(harness);
+  mkdirSync(dir, { recursive: true });
+  const base = rec({ harness, transcriptFile: join(dir, `${name}.md`) } as Partial<RunRecord>);
+  const r = { ...base, harness, transcript: `${name}.md`, ...over } as RunRecord;
+  writeFileSync(join(dir, `${name}.md`), '# forged\n');
+  writeFileSync(join(dir, `${name}.json`), JSON.stringify(r));
+  if (futureSec) {
+    const t = Date.now() / 1000 + futureSec;
+    utimesSync(join(dir, `${name}.md`), t, t);
+  }
+  return r;
+}
+
+test('fan-out resume (e2e): a forged newer member cannot hijack the mode — refused before any confirm, nothing runs', async () => {
+  await withSandbox(
+    {
+      templates: {
+        'claude/review': tpl('review', 'readonly'),
+        'claude/tinker': tpl('tinker', 'edit'),
+        'codex/tinker': tpl('tinker', 'edit'),
+      },
+    },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const d = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+          const F = newFanoutId();
+          forgeMember('claude', '2026-01-01T00-00-00-000Z-review', {
+            cwd,
+            fanoutId: F,
+            mode: 'review',
+            permission: 'readonly',
+            sessionId: 'legit-claude',
+            origin: 'command',
+          });
+          forgeMember(
+            'codex',
+            '2026-01-01T00-00-01-000Z-tinker',
+            { cwd, fanoutId: F, mode: 'tinker', permission: 'edit', sessionId: 'attacker-sess', origin: 'command' },
+            3600,
+          );
+          const u = uiCtx(cwd, true);
+          await d(`--resume=${F} continue please`, u.ctx);
+          assert.equal(u.asked.length, 0, 'refused before anything was asked');
+          assert.ok(
+            u.notes.some(n => /disagree on the mode \/ permission tier/.test(n)),
+            u.notes.join('|'),
+          );
+          assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'), 'nothing ran');
+          const headless = await capture(() => d(`--resume=${F} continue please`, fakeCtx(cwd)));
+          assert.match(headless.err, /disagree/);
+          assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
+        });
+      });
+    },
+  );
+});
+
+test('fan-out resume (e2e, command): a UI session always sees the plan — decline runs nothing; headless with the typed id still runs', async () => {
+  await withSandbox(
+    { templates: { 'claude/tinker': tpl('tinker', 'edit'), 'codex/tinker': tpl('tinker', 'edit') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const d = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+          await capture(() => d('claude,codex tinker first pass', fakeCtx(cwd)));
+          const { id } = fanoutIdOf();
+          clear(argsFile);
+          const no = uiCtx(cwd, false);
+          await d(`--resume=${id} follow up please`, no.ctx);
+          assert.equal(no.asked.length, 1);
+          assert.match(no.asked[0], /tier now edit/);
+          assert.match(no.asked[0], /follow-up task \(16 characters\):\n {2}> follow up please/);
+          assert.ok(
+            no.notes.some(n => /declined — nothing was run/.test(n)),
+            no.notes.join('|'),
+          );
+          assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
+          const yes = uiCtx(cwd, true);
+          await d(`--resume=${id} follow up please`, yes.ctx);
+          assert.ok(ran(argsFile, 'claude') && ran(argsFile, 'codex'), yes.notes.join('|'));
+          clear(argsFile);
+          await capture(() => d(`--resume=${id} again headless`, fakeCtx(cwd)));
+          assert.ok(ran(argsFile, 'claude') && ran(argsFile, 'codex'), 'the human typed the id: allowed headless');
+        });
+      });
+    },
+  );
+});
+
+test("fan-out resume (e2e): a member's template widened since is refused per member; swapped after the confirm it does not run", async () => {
+  await withSandbox(
+    { templates: { 'claude/rev': tpl('rev', 'readonly'), 'codex/rev': tpl('rev', 'readonly') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const d = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+          await capture(() => d('claude,codex rev look', fakeCtx(cwd)));
+          const { id } = fanoutIdOf();
+          clear(argsFile);
+          // swapped between the confirmation and the run
+          const u = uiCtx(cwd, true);
+          const real = u.ctx.ui.confirm;
+          u.ctx.ui.confirm = async (t: string, m: string) => {
+            const ok = await real(t, m);
+            writeFileSync(join(cwd, '.pi/delegate/templates/codex/rev.md'), tpl('rev', 'edit'));
+            return ok;
+          };
+          await d(`--resume=${id} go`, u.ctx);
+          assert.ok(ran(argsFile, 'claude'), 'the unchanged member ran');
+          assert.ok(!ran(argsFile, 'codex'), 'the swapped member did not');
+          // and now that the template IS wider, the plan refuses it up front
+          clear(argsFile);
+          const again = uiCtx(cwd, true);
+          await d(`--resume=${id} go`, again.ctx);
+          assert.equal(again.asked.length, 0);
+          assert.ok(
+            again.notes.some(n => /on codex now runs at edit permission.*ran at readonly/.test(n)),
+            again.notes.join('|'),
+          );
+          assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
+        });
+      });
+    },
+  );
+});
+
+test('delegate tool: a model-set mode on resumeFanout is compared with the recorded tier (a human-typed one is not)', async () => {
+  await withSandbox(
+    {
+      templates: {
+        'claude/rev': tpl('rev', 'readonly'),
+        'claude/wide': tpl('wide', 'edit'),
+        'codex/rev': tpl('rev', 'readonly'),
+        'codex/wide': tpl('wide', 'edit'),
+      },
+    },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+        await withOnlyFakes(argsFile, async () => {
+          const { commands, tools } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+          const d = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+          await capture(() => d('claude,codex rev look', fakeCtx(cwd)));
+          const { id } = fanoutIdOf();
+          clear(argsFile);
+          const tool = tools.get('delegate') as CapturedTool;
+          const u = uiCtx(cwd, true);
+          await assert.rejects(
+            () => tool.execute('t', { task: 'x', resumeFanout: id, mode: 'wide' }, undefined, undefined, u.ctx),
+            /now runs at edit permission.*ran at readonly/,
+          );
+          assert.equal(u.asked.length, 0);
+          assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
+          // typed by the human on the command line: their choice
+          await d(`--resume=${id} --mode=wide go`, uiCtx(cwd, true).ctx);
+          assert.ok(ran(argsFile, 'claude') && ran(argsFile, 'codex'));
+        });
+      });
+    },
+  );
 });
