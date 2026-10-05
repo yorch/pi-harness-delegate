@@ -57,6 +57,12 @@ export async function closeWhenMounted(getClose: () => (() => void) | null, capM
   });
 }
 
+/** Per-member sessions for a fan-out resume (`planFanoutResume`) — each harness continues its own session. */
+export interface FanoutResumeSessions {
+  sessions: Record<string, string>;
+  noSession: string[];
+}
+
 /** `delegate({harness:"all"|"a,b"})` — resolve the requested harnesses to detected installs, run the
  *  existing `delegate()` engine concurrently across all of them (bounded by `maxConcurrent` via
  *  `acquireSlot({wait:true})` — see concurrency.ts), and mechanically synthesize one comparison
@@ -68,6 +74,7 @@ export async function runFanoutTool(
   params: DelegateToolParams,
   signal: AbortSignal | undefined,
   onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
+  resume?: FanoutResumeSessions,
 ): Promise<{ content: { type: 'text'; text: string }[]; details: Record<string, unknown>; usage?: Usage }> {
   const resumeErr = fanoutResumeError(params.harness, params.sessionId);
   if (resumeErr) throw new Error(resumeErr);
@@ -113,7 +120,7 @@ export async function runFanoutTool(
           maxBudgetUsd: params.maxBudgetUsd,
           timeoutSec: params.timeoutSec,
           allowDangerous: params.allowDangerous === true,
-          sessionId: params.sessionId,
+          sessionId: resume ? resume.sessions[h] : params.sessionId,
           pr: params.pr,
           addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
@@ -165,7 +172,7 @@ export async function runFanoutTool(
     }
   }
 
-  const report = buildFanoutReport({ runs, skipped, unknown });
+  const report = buildFanoutReport({ runs, skipped, unknown, noSession: resume?.noSession });
   const okCount = runs.filter(r => r.ok).length;
   const head = `## delegate all — ${mode} (${okCount}/${runs.length} ok)`;
   const usage = mapClaudeUsage({
@@ -390,6 +397,7 @@ export async function runFanoutCommand(
   ui: RunUiState,
   ctx: ExtensionContext,
   parsed: ReturnType<typeof parseDelegateCommand>,
+  resume?: FanoutResumeSessions,
 ): Promise<void> {
   const harnessSpec = parsed.harness as string;
   const modeForReport = parsed.mode ?? loadConfig().defaultMode;
@@ -458,7 +466,7 @@ export async function runFanoutCommand(
       model: parsed.model,
       budget: parsed.budget,
       timeoutSec: parsed.timeoutSec,
-      sessionId: parsed.sessionId,
+      sessionId: resume ? resume.sessions[h] : parsed.sessionId,
       pr: parsed.pr,
       addDirs: parsed.addDirs,
       verify: parsed.verify,
@@ -513,7 +521,7 @@ export async function runFanoutCommand(
 
   const runs = orderFanoutResults(resolved, [...immediateFailures, ...completed]);
   const okCount = runs.filter(r => r.ok).length;
-  const report = buildFanoutReport({ runs, skipped, unknown });
+  const report = buildFanoutReport({ runs, skipped, unknown, noSession: resume?.noSession });
   injectReport(ctx, {
     harness: 'all',
     mode: modeForReport,

@@ -833,6 +833,9 @@ export interface DelegateToolParams {
   maxBudgetUsd?: number;
   allowDangerous?: boolean;
   sessionId?: string;
+  /** A fan-out id (`fan_…`) from a past fan-out's report/run records: resume every member on its own
+   *  harness with its own recorded session. See fanout-resume.ts for why this widens nothing. */
+  resumeFanout?: string;
   pr?: string;
   addDirs?: string[];
   /** Per-call harness timeout in seconds, bounded — can only lower the configured timeout, never

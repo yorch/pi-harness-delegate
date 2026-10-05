@@ -322,7 +322,7 @@ export function isFanoutSpec(harness: string | undefined): boolean {
  */
 export function fanoutResumeError(harnessSpec: string | undefined, sessionId: string | undefined): string | null {
   if (!sessionId || !isFanoutSpec(harnessSpec)) return null;
-  return `cannot resume session "${sessionId}" across a fan-out (harness "${harnessSpec}") — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=${sessionId} …)`;
+  return `cannot resume session "${sessionId}" across a fan-out (harness "${harnessSpec}") — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=${sessionId} …); to resume every member of a past fan-out, pass its fan-out id instead (--resume=fan_…, shown in the fan-out report)`;
 }
 
 export type HarnessFilterResolution =

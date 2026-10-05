@@ -289,11 +289,19 @@ export function orderFanoutResults<T extends { harness: string }>(order: readonl
  * Groups per-harness metrics/output and rolls up total spend via `aggregateSpend`/`formatSpend`.
  * Header-free — callers wrap this body with their own `## <label> (...)` header.
  */
-export function buildFanoutReport(opts: { runs: FanoutRunSummary[]; skipped: string[]; unknown: string[] }): string {
+export function buildFanoutReport(opts: {
+  runs: FanoutRunSummary[];
+  skipped: string[];
+  unknown: string[];
+  /** Members of a resumed fan-out that recorded no session id — skipped, and said so. */
+  noSession?: string[];
+}): string {
   const lines: string[] = [];
   if (opts.unknown.length > 0) lines.push(`_unknown harness(es), skipped: ${opts.unknown.join(', ')}_`);
   if (opts.skipped.length > 0) lines.push(`_not installed, skipped: ${opts.skipped.join(', ')}_`);
-  if (opts.unknown.length > 0 || opts.skipped.length > 0) lines.push('');
+  if (opts.noSession && opts.noSession.length > 0)
+    lines.push(`_no recorded session id, skipped: ${opts.noSession.join(', ')}_`);
+  if (opts.unknown.length > 0 || opts.skipped.length > 0 || (opts.noSession?.length ?? 0) > 0) lines.push('');
 
   const spend = aggregateSpend(opts.runs.map(r => ({ harness: r.harness, cost: r.cost })));
   lines.push(`**Total spend:** ${formatSpend(spend.total)}`, '');

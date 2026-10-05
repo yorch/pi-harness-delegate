@@ -49,6 +49,7 @@ import {
   takePendingReport,
 } from './engine.ts';
 import { closeWhenMounted, type RunUiState, runFanoutCommand, runFanoutTool } from './fanout.ts';
+import { type FanoutResumePlan, planFanoutResume } from './fanout-resume.ts';
 import {
   ALIASES,
   getHarness,
@@ -71,7 +72,7 @@ import {
 } from './modes.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
 import { planRerun, readAllRecords, selectRecord } from './rerun.ts';
-import { isRunId } from './run-record.ts';
+import { isFanoutId, isRunId } from './run-record.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
 import { callTimeoutError, type DelegateTemplate, loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
@@ -89,6 +90,7 @@ const DELEGATE_TOOL_GUIDELINES: readonly string[] = [
   'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
   'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
   'sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run\'s details (letters, digits, . _ : - only). It cannot be combined with a fan-out harness ("all" or a comma list) — a session belongs to one harness.',
+  "resumeFanout continues a past fan-out: pass its fan-out id (fan_…, printed in that fan-out's report/details) and every member resumes its own recorded session on its own harness. Do not combine it with harness or sessionId; it cannot resume anything the user's run records do not name, and the allowDangerous / addDirs confirmations apply as usual.",
   'pr must be a PR number, an http(s) pull-request URL (https://<host>/<owner>/<repo>/pull/<n>), or owner/repo#123.',
   'addDirs inside the working directory are accepted as-is; any entry outside it asks the human to confirm interactively and is refused in a non-interactive session.',
   'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
@@ -151,6 +153,12 @@ const DELEGATE_TOOL_PARAMS = Type.Object({
   sessionId: Type.Optional(
     Type.String({
       description: 'Resume an existing delegated session (pass its session id from a previous run details).',
+    }),
+  ),
+  resumeFanout: Type.Optional(
+    Type.String({
+      description:
+        "Resume a past fan-out: its fan-out id (fan_…, from that fan-out's report or details). Every member continues its own recorded session on its own harness. Cannot be combined with harness or sessionId. Only sessions the user's own run records name can be resumed, and the usual allowDangerous / addDirs confirmations still apply.",
     }),
   ),
   allowDangerous: Type.Optional(
@@ -230,9 +238,31 @@ export default function (pi: ExtensionAPI) {
       // "a,b"` (detection filtering, waitForSlot queueing, fanoutResumeError). Resolved *before* the
       // confirm gates, so the allowDangerous confirm names every harness that will run and the
       // addDirs confirm (headless: refusal) covers the whole fan-out.
+      // A fan-out resume names its own harnesses (the recorded members) — see fanout-resume.ts.
+      let resumePlan: Extract<FanoutResumePlan, { ok: true }> | undefined;
+      if (rawParams.resumeFanout !== undefined) {
+        if (rawParams.sessionId !== undefined)
+          throw new Error(
+            "resumeFanout and sessionId are mutually exclusive — a fan-out resume uses each member's own recorded session",
+          );
+        if (harness !== undefined)
+          throw new Error('resumeFanout resumes the harnesses recorded for that fan-out — omit harness');
+        if (!isFanoutId(rawParams.resumeFanout))
+          throw new Error(
+            `resumeFanout must be a fan-out id (fan_ + 16 hex), got ${JSON.stringify(rawParams.resumeFanout.slice(0, 40))}`,
+          );
+        const plan = planFanoutResume(rawParams.resumeFanout, readAllRecords(), ctx.cwd);
+        if (!plan.ok) throw new Error(plan.error);
+        resumePlan = plan;
+        harness = plan.harnesses.join(',');
+      }
       if (harness === undefined)
         harness = templateHarnessDefault(templateForDefaults(ctx, config, rawParams.mode)?.harnesses);
-      const params: DelegateToolParams = { ...rawParams, harness };
+      const params: DelegateToolParams = {
+        ...rawParams,
+        harness,
+        ...(resumePlan ? { mode: rawParams.mode ?? resumePlan.mode } : {}),
+      };
       // an out-of-range per-call timeout fails the call before any confirm prompt, and once — not
       // once per fan-out row
       if (params.timeoutSec !== undefined) {
@@ -245,8 +275,8 @@ export default function (pi: ExtensionAPI) {
       // Same trust model for model-set addDirs: inside cwd is fine, anything outside needs a human
       // (fail closed without a UI). Covers single, fan-out, and the claude_delegate alias.
       await confirmToolAddDirs(ctx, params.addDirs);
-      if (params.harness && isFanoutSpec(params.harness)) {
-        return runFanoutTool(pi, ctx, config, params, signal, onUpdate);
+      if (params.harness && (resumePlan || isFanoutSpec(params.harness))) {
+        return runFanoutTool(pi, ctx, config, params, signal, onUpdate, resumePlan);
       }
       const { content, details, result } = await runDelegateForTool(
         pi,
@@ -575,6 +605,35 @@ export default function (pi: ExtensionAPI) {
     forcedHarness: string | undefined,
     trusted: boolean,
   ): Promise<void> => {
+    // `--resume=<fan-out id>`: resume every member of a past fan-out on its own harness with its own
+    // recorded session. A fan-out id is recognized by its exact format AND a lookup against the run
+    // records (a well-formed id matching no record is an error, never a plain session id). It then
+    // takes the normal fan-out path — detection filtering, slot queueing, the danger confirm.
+    if (parsed.sessionId && isFanoutId(parsed.sessionId)) {
+      const say = (msg: string) => {
+        if (ctx.hasUI) ctx.ui.notify(msg, 'error');
+        else process.stderr.write(`${msg}\n`);
+      };
+      if (forcedHarness || parsed.harness) {
+        say(
+          '--resume=<fan-out id> resumes the harnesses recorded for that fan-out — do not name a harness (and it is not available on the per-harness alias commands)',
+        );
+        return;
+      }
+      const plan = planFanoutResume(parsed.sessionId, readAllRecords(), ctx.cwd);
+      if (!plan.ok) {
+        say(plan.error);
+        return;
+      }
+      if (plan.noSession.length > 0)
+        say(`resuming fan-out ${parsed.sessionId}; no recorded session id, skipped: ${plan.noSession.join(', ')}`);
+      parsed.harness = plan.harnesses.join(',');
+      parsed.mode = parsed.mode ?? plan.mode;
+      parsed.sessionId = undefined;
+      await runFanoutCommand(pi, ui, ctx, parsed, { sessions: plan.sessions, noSession: plan.noSession });
+      return;
+    }
+
     // No harness given (and no alias command): the mode's template may name default harness(es).
     // Several make this a fan-out through the normal path below — same detection filtering,
     // reporting, slot queueing and single --allow-dangerous confirm as a typed list.
