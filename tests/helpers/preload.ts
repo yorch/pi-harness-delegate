@@ -21,6 +21,10 @@
  * every other file pinned. (The preload can't tell which files a run will load: inside it,
  * `process.argv` names only the first test file, not the command line.)
  *
+ * The pinned dir is removed when the process ends: on 'exit' (end of `bun test`, pass or fail) and on
+ * SIGINT/SIGTERM/SIGHUP, which otherwise kill bun without running 'exit' handlers. The signal is
+ * re-raised after cleanup, so Ctrl-C still stops the run with the conventional 128+n status.
+ *
  * The write goes through `restoreEnv` (tests/helpers/env.ts), so this file needs no exemption from
  * `tests/env-hygiene.test.ts`.
  */
@@ -28,11 +32,10 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { restoreEnv } from './env.ts';
-import { markPreloaded, PRELOAD_AGENT_DIR_PREFIX, removePinnedDir } from './preload-state.ts';
+import { markPreloaded, PRELOAD_AGENT_DIR_PREFIX, registerPinnedDirCleanup } from './preload-state.ts';
 
 const outerAgentDir = process.env.PI_CODING_AGENT_DIR;
 const pinnedAgentDir = mkdtempSync(join(tmpdir(), PRELOAD_AGENT_DIR_PREFIX));
-// 'exit' handlers must be synchronous — rmSync is. Bun fires 'exit' at the end of `bun test`, pass or fail.
-process.on('exit', () => removePinnedDir(pinnedAgentDir));
+registerPinnedDirCleanup(pinnedAgentDir);
 restoreEnv('PI_CODING_AGENT_DIR', pinnedAgentDir);
 markPreloaded({ pinnedAgentDir, outerAgentDir });

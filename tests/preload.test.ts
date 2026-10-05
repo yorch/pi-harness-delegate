@@ -8,7 +8,14 @@ import { agentDir } from '../extensions/config.ts';
 import { withEnv } from './helpers/env.ts';
 // Never import ./helpers/preload.ts here: that would run the pin as a side effect of this import and
 // hide a run where bun didn't apply the preload at all. Only the side-effect-free state module.
-import { PRELOAD_AGENT_DIR_PREFIX, preloadState } from './helpers/preload-state.ts';
+import {
+  CLEANUP_SIGNALS,
+  type CleanupProcess,
+  PRELOAD_AGENT_DIR_PREFIX,
+  preloadState,
+  registerPinnedDirCleanup,
+} from './helpers/preload-state.ts';
+import { waitFor } from './helpers/wait.ts';
 
 // The preload (tests/helpers/preload.ts, wired in bunfig.toml) pins PI_CODING_AGENT_DIR to a temp dir for
 // the whole `bun test` process — live mode included (tests/live.test.ts un-pins only around its own runs).
@@ -125,4 +132,88 @@ test('preload: live mode (PI_DELEGATE_LIVE=1) still pins the agent dir for every
     run.cleanup();
     rmSync(outer, { recursive: true, force: true });
   }
+});
+
+/** Child test body: prints its pinned dir, then hangs until signalled. */
+const HANG_AFTER_PRINT =
+  "test('child', { timeout: 120_000 }, async () => { console.log('PINNED=' + process.env.PI_CODING_AGENT_DIR); " +
+  'await new Promise(r => setTimeout(r, 120_000)); });';
+
+for (const [sig, status] of [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+] as const) {
+  test(`preload: ${sig} mid-run removes the pinned dir and still kills bun test by ${sig}`, {
+    timeout: 60_000,
+  }, async () => {
+    const run = startChildBunTest(HANG_AFTER_PRINT, childEnv({}, ['PI_DELEGATE_LIVE']));
+    try {
+      const pinned = await waitFor(() => /PINNED=(.*)\n/.exec(run.output())?.[1]?.trim(), {
+        timeoutMs: 30_000,
+        label: 'the child to print its pinned dir',
+      });
+      assert.ok(basename(pinned).startsWith(PRELOAD_AGENT_DIR_PREFIX), pinned);
+      assert.ok(existsSync(pinned), 'pinned dir exists while the child runs');
+      run.child.kill(sig);
+      const { code, signal } = await run.exited;
+      // Re-raised, not swallowed: the child dies *by the signal* (128+n in a shell), never exits 0/1.
+      assert.equal(signal, sig, `expected death by ${sig}, got code=${code} signal=${signal} (status ${status})`);
+      assert.equal(existsSync(pinned), false, `pinned dir must be removed on ${sig}: ${pinned}`);
+    } finally {
+      run.child.kill('SIGKILL');
+      run.cleanup();
+    }
+  });
+}
+
+/** A fake `process` recording listeners and re-raised signals. */
+function fakeProcess() {
+  const listeners = new Map<string, Array<(signal: NodeJS.Signals) => void>>();
+  const killed: Array<[number, string]> = [];
+  const proc: CleanupProcess = {
+    pid: 4242,
+    on: (event, l) => listeners.set(event, [...(listeners.get(event) ?? []), l]),
+    off: (event, l) =>
+      listeners.set(
+        event,
+        (listeners.get(event) ?? []).filter(x => x !== l),
+      ),
+    kill: (pid, signal) => killed.push([pid, signal]),
+  };
+  const emit = (event: string, ...args: unknown[]) => {
+    for (const l of [...(listeners.get(event) ?? [])]) (l as (...a: unknown[]) => void)(...args);
+  };
+  return { proc, listeners, killed, emit };
+}
+
+test('preload cleanup: a signal removes the captured dir once, detaches every handler, and re-raises', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-unit-'));
+  const other = mkdtempSync(join(tmpdir(), 'preload-cleanup-other-'));
+  const { proc, listeners, killed, emit } = fakeProcess();
+  try {
+    registerPinnedDirCleanup(dir, proc);
+    for (const ev of ['exit', ...CLEANUP_SIGNALS]) assert.equal(listeners.get(ev)?.length, 1, ev);
+    // the removed path is the captured one, whatever the env says by then
+    await withEnv({ PI_CODING_AGENT_DIR: other }, () => {
+      emit('SIGTERM', 'SIGTERM');
+      assert.equal(existsSync(dir), false, 'captured dir removed');
+      assert.equal(existsSync(other), true, 'never re-reads PI_CODING_AGENT_DIR');
+      assert.deepEqual(killed, [[4242, 'SIGTERM']], 're-raised exactly once, same signal, own pid');
+      for (const ev of ['exit', ...CLEANUP_SIGNALS]) assert.equal(listeners.get(ev)?.length, 0, `${ev} detached`);
+      emit('exit'); // nothing left to run — and cleanup is idempotent anyway
+      assert.deepEqual(killed, [[4242, 'SIGTERM']]);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test("preload cleanup: 'exit' removes the dir without re-raising anything", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-exit-'));
+  const { proc, killed, emit } = fakeProcess();
+  registerPinnedDirCleanup(dir, proc);
+  emit('exit', 0);
+  assert.equal(existsSync(dir), false);
+  assert.deepEqual(killed, []);
 });

@@ -44,3 +44,43 @@ export function removePinnedDir(dir: string): void {
     // best-effort: a leftover dir under os.tmpdir() is harmless
   }
 }
+
+/** The signals the preload cleans up on before re-raising (each would otherwise kill the process
+ *  without running `'exit'` handlers). */
+export const CLEANUP_SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
+/** The subset of `process` the cleanup registration needs — injectable so it can be unit-tested. */
+export interface CleanupProcess {
+  pid: number;
+  on(event: string, listener: (signal: NodeJS.Signals) => void): unknown;
+  off(event: string, listener: (signal: NodeJS.Signals) => void): unknown;
+  kill(pid: number, signal: NodeJS.Signals): unknown;
+}
+
+/**
+ * Remove `dir` when the process ends: on `'exit'` (normal end of `bun test`, pass or fail) and on
+ * SIGINT/SIGTERM/SIGHUP. A signal handler cleans up, removes *all* of these handlers (so the re-raise
+ * below hits the default disposition instead of looping back here), then re-raises the same signal so
+ * the process still dies by it — Ctrl-C is never swallowed and the exit status stays the conventional
+ * 128+n. Cleanup runs at most once however many of these fire.
+ */
+export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = process): void {
+  let done = false;
+  const cleanup = () => {
+    if (done) return;
+    done = true;
+    removePinnedDir(dir);
+  };
+  const detach = () => {
+    proc.off('exit', cleanup);
+    for (const sig of CLEANUP_SIGNALS) proc.off(sig, onSignal);
+  };
+  function onSignal(sig: NodeJS.Signals): void {
+    cleanup();
+    detach();
+    proc.kill(proc.pid, sig);
+  }
+  // 'exit' handlers must be synchronous — rmSync is.
+  proc.on('exit', cleanup);
+  for (const sig of CLEANUP_SIGNALS) proc.on(sig, onSignal);
+}
