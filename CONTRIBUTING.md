@@ -104,8 +104,8 @@ it's not a proof: a test that coerces and cleans up within its own body slips pa
 Measure what is on screen with pi's own component, never by counting `\n` or assuming a width:
 `tests/helpers/dialog.ts` (`renderDialog(title, message, {columns, rows})` renders the real
 `ExtensionSelectorComponent`, whose last `rows` rows are what a terminal shows; `unwrap`/`textOf` join the
-`  ┆ ` continuation rows back for `includes`/`match` checks). The layout reads `process.stdout.columns`/`rows`:
-`withSandbox` pins 80x40 for a test, `withViewport(cols, rows, fn)` (tests/helpers/viewport.ts) sets another, and
+`  ┆ ` continuation rows back for `includes`/`match` checks). `tests/helpers/screen.ts` (`screenOf`) models what a terminal shows in pi's regular layout (document tail + footer) and in its fullscreen layout (the real `VStack` dock, which clips the dialog's bottom) with the status/footer rows at their worst: assert Yes/No and every critical row on those screens, at 40x24, 50x30, 60x24, 80x24 and larger. The layout reads `process.stdout.columns`/`rows` (as they are; unknown = 80x24, under 40 columns refused):
+`withSandbox` pins 80x40 for a test, `testAt80x40` (tests/helpers/viewport.ts) does the same for a whole file, `withViewport(cols, rows, fn)` (tests/helpers/viewport.ts) sets another, and
 the pure APIs take a `viewport` argument. A new confirmation call site needs a fully-populated case in
 `tests/confirm-call-sites.test.ts`.
 
