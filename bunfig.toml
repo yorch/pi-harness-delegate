@@ -1,0 +1,4 @@
+[test]
+# Pins PI_CODING_AGENT_DIR to a throwaway temp dir for the whole `bun test` process, so nothing a test
+# leaves running can ever write into the developer's real ~/.pi/agent. See tests/helpers/preload.ts.
+preload = ["./tests/helpers/preload.ts"]
