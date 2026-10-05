@@ -11,6 +11,7 @@ import { withEnv } from './helpers/env.ts';
 import {
   CLEANUP_SIGNALS,
   type CleanupProcess,
+  coercedEnvVars,
   PRELOAD_AGENT_DIR_PREFIX,
   preloadState,
   registerPinnedDirCleanup,
@@ -216,4 +217,34 @@ test("preload cleanup: 'exit' removes the dir without re-raising anything", () =
   emit('exit', 0);
   assert.equal(existsSync(dir), false);
   assert.deepEqual(killed, []);
+});
+
+test('env backstop: coercedEnvVars finds exactly the "undefined"/"null" values, minus ignored ones', () => {
+  const env = { A: 'undefined', B: 'null', C: 'x', D: '', E: 'Undefined', F: 'null ', G: 'undefined' };
+  assert.deepEqual(coercedEnvVars(env), ['A', 'B', 'G']);
+  assert.deepEqual(coercedEnvVars(env, new Set(['G'])), ['A', 'B']);
+});
+
+test('env backstop: a test that coerces undefined into process.env fails, and the next test starts clean', {
+  timeout: 60_000,
+}, async () => {
+  // A child run (outside tests/, so the static hygiene guard never sees this file) doing the exact
+  // bug the backstop exists for (Reflect.set: same coercion as `process.env.X = prev`).
+  const body = [
+    "test('coerces', () => { const prev = undefined; Reflect.set(process.env, 'ZZ_BACKSTOP_PROBE', prev); });",
+    "test('next', () => { console.log('NEXT_SEES=' + JSON.stringify(process.env.ZZ_BACKSTOP_PROBE)); });",
+  ].join('\n');
+  const run = startChildBunTest(body, childEnv({}, ['PI_DELEGATE_LIVE', 'ZZ_BACKSTOP_PROBE']));
+  try {
+    const { code } = await run.exited;
+    const out = run.output();
+    assert.notEqual(code, 0, out);
+    assert.match(out, /env backstop \(tests\/helpers\/preload\.ts\): this test left ZZ_BACKSTOP_PROBE="undefined"/);
+    assert.match(out, /\(fail\) coerces/);
+    assert.match(out, /^\s*1 pass$/m, 'only the offending test fails');
+    assert.match(out, /^\s*1 fail$/m);
+    assert.match(out, /NEXT_SEES=undefined/, 'the backstop removes the coerced var so the failure does not cascade');
+  } finally {
+    run.cleanup();
+  }
 });

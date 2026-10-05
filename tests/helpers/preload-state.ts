@@ -45,6 +45,16 @@ export function removePinnedDir(dir: string): void {
   }
 }
 
+/** Env values that only ever come from coercing `undefined`/`null` into `process.env`. */
+export const COERCED_ENV_VALUES: ReadonlySet<string> = new Set(['undefined', 'null']);
+
+/** Names of env vars whose value is exactly `"undefined"`/`"null"`, minus the `ignore`d ones. */
+export function coercedEnvVars(env: NodeJS.ProcessEnv, ignore: ReadonlySet<string> = new Set()): string[] {
+  return Object.keys(env)
+    .filter(name => !ignore.has(name) && COERCED_ENV_VALUES.has(env[name] as string))
+    .sort();
+}
+
 /** The signals the preload cleans up on before re-raising (each would otherwise kill the process
  *  without running `'exit'` handlers). */
 export const CLEANUP_SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];

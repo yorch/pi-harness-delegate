@@ -25,17 +25,37 @@
  * SIGINT/SIGTERM/SIGHUP, which otherwise kill bun without running 'exit' handlers. The signal is
  * re-raised after cleanup, so Ctrl-C still stops the run with the conventional 128+n status.
  *
- * The write goes through `restoreEnv` (tests/helpers/env.ts), so this file needs no exemption from
- * `tests/env-hygiene.test.ts`.
+ * Runtime backstop for the `process.env.X = prev` restore bug (`tests/env-hygiene.test.ts` is the
+ * primary, static guard): after every test, any env var whose value is exactly `"undefined"` or `"null"`
+ * — what assigning `undefined`/`null` to `process.env` stores — fails that test and is removed, so the
+ * failure lands on the first offending test instead of cascading. Vars that already held such a value
+ * in the outer env are ignored. It is a backstop, not a proof: a test that coerces and cleans up within
+ * its own body, or a write that lands after its test's `afterEach`, slips past it.
+ *
+ * Every env write here goes through `restoreEnv` (tests/helpers/env.ts), so this file needs no
+ * exemption from `tests/env-hygiene.test.ts`.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { afterEach } from 'node:test';
 import { restoreEnv } from './env.ts';
-import { markPreloaded, PRELOAD_AGENT_DIR_PREFIX, registerPinnedDirCleanup } from './preload-state.ts';
+import { coercedEnvVars, markPreloaded, PRELOAD_AGENT_DIR_PREFIX, registerPinnedDirCleanup } from './preload-state.ts';
 
 const outerAgentDir = process.env.PI_CODING_AGENT_DIR;
 const pinnedAgentDir = mkdtempSync(join(tmpdir(), PRELOAD_AGENT_DIR_PREFIX));
 registerPinnedDirCleanup(pinnedAgentDir);
 restoreEnv('PI_CODING_AGENT_DIR', pinnedAgentDir);
 markPreloaded({ pinnedAgentDir, outerAgentDir });
+
+const preexistingCoerced = new Set(coercedEnvVars(process.env));
+afterEach(() => {
+  const bad = coercedEnvVars(process.env, preexistingCoerced);
+  if (bad.length === 0) return;
+  const shown = bad.map(name => `${name}=${JSON.stringify(process.env[name])}`).join(', ');
+  for (const name of bad) restoreEnv(name, undefined);
+  throw new Error(
+    `env backstop (tests/helpers/preload.ts): this test left ${shown} in process.env — almost certainly ` +
+      '`process.env.X = prev` with prev undefined/null. Use withEnv()/restoreEnv() from tests/helpers/env.ts.',
+  );
+});
