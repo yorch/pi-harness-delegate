@@ -65,7 +65,7 @@ test('tool danger confirm: scope, session, pr, model, budget, timeout and ALL ad
   assert.match(text, /model: "opus\\u202e"/, 'escaped');
   assert.match(text, /budget: \$12\.5/);
   assert.match(text, /timeout: 600s/);
-  assert.match(text, /addDirs \(2\): "\.\/inside", "\/outside"/);
+  assert.match(text, /addDirs \(2\): "\.\/inside" · "\/outside"/);
   assert.ok(!UNSAFE.test(text));
   const last = text.trimEnd().split('\n');
   assert.match(last[last.length - 2], /^scope: 32 chars, 2 lines — first line: src\/$/);

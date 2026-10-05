@@ -93,6 +93,61 @@ export function effectiveTemplateTier(harnessName: string, template: DelegateTem
   return templateRunTier(harness, template);
 }
 
+/** What a run's permission resolves to, given the template and whether `allowDangerous` was approved. */
+export interface RunPermission {
+  nativeClass: ReturnType<typeof classifyNativePermission>;
+  /** The tier the template runs at when nothing escalates it (`templateRunTier`). */
+  templateTier: NormalizedPermission;
+  isNativeDanger: boolean;
+  /** The native permission as it would be passed on: a safe one in its canonical spelling, else as declared. */
+  nativePerm: string | undefined;
+  /** The template needs danger (a `permission: danger` or a danger / unlisted native value): refused without `allowDangerous`. */
+  needsDanger: boolean;
+  /** The tier the run ACTUALLY has: `danger` once escalated (or when the template needs it), else `templateTier`. */
+  permission: NormalizedPermission;
+  /** The native permission that reaches argv / ACP: dropped when an escalation moved the run off the template's own tier. */
+  nativePermissionForRun: string | undefined;
+}
+
+/**
+ * The ONE place a run's tier and native permission are decided — `delegate()` and the confirmation dialogs'
+ * "will apply" lines (effective.ts) both read it, so a dialog can never describe a different permission than the
+ * engine runs with (a readonly template escalated by `allowDangerous` is `danger`, and so its verify command DOES
+ * run). Pure. When `needsDanger && !allowDangerous` the engine refuses the run; `permission` is then `danger`.
+ */
+export function resolveRunPermission(
+  harness: Harness,
+  template: DelegateTemplate,
+  allowDangerous: boolean,
+): RunPermission {
+  const nativeClass = classifyNativePermission(harness, template.nativePermission);
+  // The tier the template actually runs at: a native read-only value (`permission: plan`) is filed
+  // under `edit` by normalizePermission, but runs as `readonly` — recorded as such and, above all,
+  // subject to resolveVerifyPlan's readonly skip. Only ever narrows (never `danger`), and the
+  // canonical native value below is still what reaches argv/ACP.
+  const templateTier = templateRunTier(harness, template);
+  const isNativeDanger = nativeClass === 'danger' || nativeClass === 'unlisted';
+  // A safe native matches its allowlist case-insensitively (`Plan`), but what reaches argv/ACP is
+  // always the allowlist's canonical spelling (`plan`, claude's camelCase `acceptEdits`) — never the
+  // template's. Danger/unlisted values keep the template's own spelling (see registry.ts).
+  const nativePerm =
+    nativeClass === 'safe'
+      ? canonicalSafeNativePermission(harness, template.nativePermission)
+      : template.nativePermission;
+  const needsDanger = template.permission === 'danger' || isNativeDanger;
+  // explicit per-call escalation applies to any template
+  const permission: NormalizedPermission = needsDanger || allowDangerous ? 'danger' : templateTier;
+  // Dropped when an explicit escalation moved us off the template's own tier — see
+  // resolveNativePermission(). Applies to both transports. Exception: an `unlisted` native mode
+  // gated as danger runs as declared once confirmed — it is no wider than the harness's own danger
+  // mode, and swapping it for that mode would silently widen a merely-unrecognised one.
+  const nativePermissionForRun =
+    nativeClass === 'unlisted' && permission === 'danger'
+      ? nativePerm
+      : resolveNativePermission(templateTier, permission, nativePerm);
+  return { nativeClass, templateTier, isNativeDanger, nativePerm, needsDanger, permission, nativePermissionForRun };
+}
+
 export interface DelegateOptions {
   harness?: string;
   task: string;
@@ -503,15 +558,12 @@ export async function delegate(
   if (!task) throw new Error(`delegate mode ${quoteValue(mode, 200)} requires a task`);
   // permission: normalized, danger requires explicit per-call allowDangerous:true (tool: model-set,
   // human-confirmed in execute(); command: --allow-dangerous, human-confirmed in the handler). Resolved (and
-  // the danger refusal thrown) before acquireSlot() — it's pure, so a refused run never occupies
-  // (or, for fan-out, waits for) a concurrency slot it can't use.
-  const nativeClass = classifyNativePermission(harness, template.nativePermission);
-  // The tier the template actually runs at: a native read-only value (`permission: plan`) is filed
-  // under `edit` by normalizePermission, but runs as `readonly` — recorded as such and, above all,
-  // subject to resolveVerifyPlan's readonly skip. Only ever narrows (never `danger`), and the
-  // canonical native value below is still what reaches argv/ACP.
-  const templateTier: NormalizedPermission = templateRunTier(harness, template);
-  const isNativeDanger = nativeClass === 'danger' || nativeClass === 'unlisted';
+  // the danger refusal thrown, below) before acquireSlot() — it's pure, so a refused run never occupies
+  // (or, for fan-out, waits for) a concurrency slot it can't use. `resolveRunPermission` is the ONE
+  // definition of the tier and native permission a run gets: the confirmation dialogs (effective.ts) call it
+  // too, so what a person is shown is what runs (verify, native permission).
+  const { nativeClass, templateTier, isNativeDanger, nativePerm, needsDanger, permission, nativePermissionForRun } =
+    resolveRunPermission(harness, template, opts.allowDangerous === true);
 
   // A template permission problem (an unrecognized legacy value failed closed to readonly, or an
   // ignored legacy key) is otherwise only visible in `/delegate list` — say so where the run happens.
@@ -546,38 +598,16 @@ export async function delegate(
   // not spawn the process and surface a cryptic native failure. See config.ts's resolveTransport.
   const transport = resolveTransport(config, harnessName, harness);
 
-  let permission: NormalizedPermission = templateTier;
-  // A safe native matches its allowlist case-insensitively (`Plan`), but what reaches argv/ACP is
-  // always the allowlist's canonical spelling (`plan`, claude's camelCase `acceptEdits`) — never the
-  // template's. Danger/unlisted values keep the template's own spelling (see registry.ts).
-  const nativePerm =
-    nativeClass === 'safe'
-      ? canonicalSafeNativePermission(harness, template.nativePermission)
-      : template.nativePermission;
-  if (template.permission === 'danger' || isNativeDanger) {
-    if (opts.allowDangerous !== true) {
-      const why =
-        nativeClass === 'unlisted'
-          ? ` (native permission ${quoteValue(String(nativePerm), 200)} is not a known readonly/edit mode for ${harnessName}, so it is treated as danger)`
-          : '';
-      throw new Error(
-        `template ${quoteValue(mode, 200)} requires danger permission${why} — never a default: pass allowDangerous:true on the delegate tool, or --allow-dangerous on /delegate (both ask you to confirm interactively)`,
-      );
-    }
-    permission = 'danger';
-  } else if (opts.allowDangerous === true) {
-    // explicit per-call escalation for any template
-    permission = 'danger';
+  if (needsDanger && opts.allowDangerous !== true) {
+    const why =
+      nativeClass === 'unlisted'
+        ? ` (native permission ${quoteValue(String(nativePerm), 200)} is not a known readonly/edit mode for ${harnessName}, so it is treated as danger)`
+        : '';
+    throw new Error(
+      `template ${quoteValue(mode, 200)} requires danger permission${why} — never a default: pass allowDangerous:true on the delegate tool, or --allow-dangerous on /delegate (both ask you to confirm interactively)`,
+    );
   }
   const permissionForDisplay = nativePerm ?? permission;
-  // Dropped when an explicit escalation moved us off the template's own tier — see
-  // resolveNativePermission(). Applies to both transports. Exception: an `unlisted` native mode
-  // gated as danger runs as declared once confirmed — it is no wider than the harness's own danger
-  // mode, and swapping it for that mode would silently widen a merely-unrecognised one.
-  const nativePermissionForRun =
-    nativeClass === 'unlisted' && permission === 'danger'
-      ? nativePerm
-      : resolveNativePermission(templateTier, permission, nativePerm);
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);

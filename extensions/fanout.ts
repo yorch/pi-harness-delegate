@@ -540,6 +540,7 @@ export async function runFanoutCommand(
             timeoutSec: parsed.timeoutSec,
             timeoutMayRaise: parsed.storedTimeout !== true,
             verify: parsed.verify,
+            allowDangerous: true, // this IS the danger confirmation: every member runs at the danger tier (verify runs)
           },
         ),
       });

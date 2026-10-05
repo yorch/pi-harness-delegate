@@ -286,19 +286,30 @@ export function groupTaskScopes(members: readonly { name: string; task: string; 
 
 const money = (n: number): string => `$${n}`;
 
-/** The one-line-per-fact part of a steering display (everything but the multi-line task / scope blocks). */
+/**
+ * The one-line-per-fact part of a steering display (everything but the multi-line task / scope blocks). The
+ * model, budget, timeout and verify of a run are shown ONCE, in the `will apply` row(s) of `effective` (resolved
+ * the way the engine resolves them — the value that applies, not just the one that was typed); without `effective`
+ * (a caller that cannot resolve them) the typed values are listed here instead. Session, pr and addDirs are
+ * one row each.
+ */
 export function steeringFieldLines(s: RunSteering): string[] {
   const out: string[] = [];
-  if (s.model !== undefined) out.push(`model: ${quoteFull(s.model)}`);
+  const resolved =
+    s.effective !== undefined &&
+    s.effective.length > 0 &&
+    !s.effective.some(l => l.endsWith('does not resolve for this harness'));
+  if (!resolved && s.model !== undefined) out.push(`model: ${quoteFull(s.model)}`);
   if (s.sessionId !== undefined) out.push(`session: resumes ${quoteFull(s.sessionId)}`);
   if (s.sessions && Object.keys(s.sessions).length > 0)
     out.push(...Object.entries(s.sessions).map(([h, id]) => `session (${safeName(h)}): resumes ${quoteFull(id)}`));
   if (s.pr !== undefined) out.push(`pr: ${quoteFull(s.pr)}`);
-  if (s.budgetUsd !== undefined) out.push(`budget: ${money(s.budgetUsd)}${s.notes?.budgetUsd ?? ''}`);
-  if (s.timeoutSec !== undefined) out.push(`timeout: ${s.timeoutSec}s${s.notes?.timeoutSec ?? ''}`);
+  if (!resolved && s.budgetUsd !== undefined) out.push(`budget: ${money(s.budgetUsd)}${s.notes?.budgetUsd ?? ''}`);
+  if (!resolved && s.timeoutSec !== undefined) out.push(`timeout: ${s.timeoutSec}s${s.notes?.timeoutSec ?? ''}`);
   if (s.addDirs !== undefined && s.addDirs.length > 0)
-    out.push(`addDirs (${s.addDirs.length}): ${s.addDirs.map(quoteFull).join(', ')}${s.notes?.addDirs ?? ''}`);
-  if (s.verify !== undefined) out.push(`verify (runs on this machine after the harness exits): ${quoteFull(s.verify)}`);
+    out.push(`addDirs (${s.addDirs.length}): ${s.addDirs.map(quoteFull).join(' · ')}${s.notes?.addDirs ?? ''}`);
+  if (!resolved && s.verify !== undefined)
+    out.push(`verify (runs on this machine after the harness exits): ${quoteFull(s.verify)}`);
   if (s.effective !== undefined) out.push(...s.effective);
   return out;
 }

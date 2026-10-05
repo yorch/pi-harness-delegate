@@ -482,8 +482,8 @@ test('/delegate rerun (e2e, UI): the plan is always confirmed first — decline 
       assert.match(declined.asked[0], /permission tier now: claude: edit/);
       assert.match(declined.asked[0], /task \(14 characters, 1 lines\):\n {2}> fix the widget/);
       assert.match(declined.asked[0], /Scope \(8 characters, 1 lines\):\n {2}> src\/a.ts/);
-      assert.match(declined.asked[0], /budget: \$2/);
-      assert.match(declined.asked[0], /timeout: 120s/);
+      assert.match(declined.asked[0], /budget \$2/);
+      assert.match(declined.asked[0], /timeout 120s/);
       assert.ok(!ran(argsFile), 'declined: nothing runs');
       assert.ok(declined.notes.some(n => /declined — nothing was run/.test(n)));
       const approved = ui(cwd, true);
@@ -1389,4 +1389,23 @@ test('planRerun: a typed list that names a RECORDED fan-out member keeps the tie
     planRerun(claude, { task: '', harness: 'claude,codex', mode: 'other' }, flags({ fanout: true }), widened).errors,
     [],
   );
+});
+
+test('planRerun: the will-apply resolution is told whether --allow-dangerous was typed (the run then has the danger tier)', () => {
+  for (const allow of [false, true]) {
+    const calls: boolean[] = [];
+    const plan = planRerun(
+      record(),
+      { task: '', ...(allow ? { allowDangerous: true } : {}) },
+      flags(),
+      env({
+        effective: (_h, _m, call) => {
+          calls.push(call.allowDangerous === true);
+          return ['will apply (claude): x'];
+        },
+      }),
+    );
+    assert.deepEqual(plan.errors, []);
+    assert.deepEqual(calls, [allow], `allowDangerous=${allow}`);
+  }
 });

@@ -10,7 +10,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { resolveVerifyPlan } from './activity.ts';
 import { resolveHarnessList } from './command.ts';
 import { type DelegateConfig, resolveModelForHarness, resolveRunTimeoutMs, resolveTransport } from './config.ts';
-import { effectiveTemplateTier, isProjectTrusted } from './engine.ts';
+import { isProjectTrusted, mergeAddDirs, resolveRunPermission } from './engine.ts';
 import { detectAll, getHarness, HARNESS_NAMES, isKnownHarness, resolveHarnessName } from './harnesses/registry.ts';
 import { loadTemplates, quoteFull } from './templates.ts';
 import { safeName } from './validate.ts';
@@ -25,9 +25,33 @@ export interface EffectiveCall {
   /** A human typed the timeout (it may raise the configured one); a model-set or stored one only lowers. */
   timeoutMayRaise?: boolean;
   verify?: string;
+  /**
+   * `allowDangerous` is being confirmed / applied for this run: the run's tier is then `danger` whatever the
+   * template says — which is what decides whether the verify command runs (`resolveRunPermission`, engine.ts, the
+   * engine's own rule). Every call site that confirms or applies `allowDangerous` MUST say so.
+   */
+  allowDangerous?: boolean;
+  /** The task the call carries (the tool's): empty means the engine runs the template's `defaultTask`, which is then shown. */
+  task?: string;
 }
 
-/** `will apply (<harness>): …` for each harness — the resolved model, budget, timeout, transport and verify. */
+/** `text` quoted in full when it is short, else its first `max` characters, escaped, with the exact count left out. */
+function quoteHead(text: string, max: number): string {
+  const cps = Array.from(text);
+  if (cps.length <= max) return quoteFull(text);
+  return `${quoteFull(cps.slice(0, max).join(''))} (+${cps.length - max} more characters)`;
+}
+
+type Facts = [key: string, text: string][];
+
+/**
+ * `will apply` rows for the harness(es) of a run: the resolved model, budget, timeout, transport, the native
+ * permission the run passes on, the template's own `addDirs`, and the verify command — each resolved with the SAME
+ * functions the engine uses (`resolveModelForHarness`, `resolveRunTimeoutMs`, `resolveTransport`,
+ * `resolveRunPermission`, `resolveVerifyPlan`, `mergeAddDirs`). One row for a single harness; for a fan-out one
+ * shared row (`will apply (all N): …`) for what every member has in common plus one short row per member for only the
+ * facts that differ — so a 5-harness fan-out costs a row or two, not five long ones.
+ */
 export function effectiveRunLines(
   ctx: ExtensionContext,
   config: DelegateConfig,
@@ -36,21 +60,28 @@ export function effectiveRunLines(
   call: EffectiveCall,
 ): string[] {
   const trusted = isProjectTrusted(ctx);
-  return harnessNames.map(name => {
-    const label = `will apply (${safeName(name)})`;
+  const rows: string[] = [];
+  const members: { name: string; facts: Facts }[] = [];
+  for (const name of harnessNames) {
     const harness = getHarness(name);
     const template = loadTemplates(ctx.cwd, name, trusted).get(mode);
-    if (!harness || !template) return `${label}: mode ${quoteFull(mode)} does not resolve for this harness`;
+    if (!harness || !template) {
+      rows.push(`will apply (${safeName(name)}): mode ${quoteFull(mode)} does not resolve for this harness`);
+      continue;
+    }
+    const facts: Facts = [];
     const raw = call.model ?? template.model ?? config.harnesses[name]?.model ?? config.model;
     const model = resolveModelForHarness(config, name, call.model, template.model);
     const aliased = raw !== undefined && model !== undefined && raw !== model ? ` (alias ${quoteFull(raw)})` : '';
+    facts.push(['model', `model ${model === undefined ? 'harness default' : `${quoteFull(model)}${aliased}`}`]);
     const configured = template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[name]?.maxBudgetUsd;
+    const narrowed = call.budgetUsd !== undefined && call.budgetNarrowOnly === true && configured !== undefined;
     const budget =
-      call.budgetUsd === undefined
-        ? configured
-        : call.budgetNarrowOnly === true && configured !== undefined
-          ? Math.min(call.budgetUsd, configured)
-          : call.budgetUsd;
+      call.budgetUsd === undefined ? configured : narrowed ? Math.min(call.budgetUsd, configured) : call.budgetUsd;
+    facts.push([
+      'budget',
+      `budget ${budget === undefined ? 'none' : `$${budget}`}${call.budgetNarrowOnly === true && call.budgetUsd !== undefined ? ' (stored: only lowers)' : ''}`,
+    ]);
     const timeoutMs = resolveRunTimeoutMs(
       config,
       name,
@@ -58,18 +89,56 @@ export function effectiveRunLines(
       call.timeoutSec,
       call.timeoutMayRaise === true,
     );
+    facts.push([
+      'timeout',
+      `timeout ${Math.round(timeoutMs / 1000)}s${call.timeoutSec !== undefined && call.timeoutMayRaise !== true ? ' (only lowers)' : ''}`,
+    ]);
     let transport: string;
     try {
       transport = resolveTransport(config, name, harness);
     } catch (err) {
       transport = `INVALID (${err instanceof Error ? err.message : 'error'})`;
     }
-    const verify = resolveVerifyPlan(call.verify, template.verify, effectiveTemplateTier(name, template));
-    const verifyText = !verify
-      ? ''
-      : `, verify ${quoteFull(verify.command)} (${call.verify ? 'typed' : 'from the template'}${verify.skip ? '; not run on a readonly tier' : '; runs on this machine after the harness exits'})`;
-    return `${label}: model ${model === undefined ? 'harness default' : `${quoteFull(model)}${aliased}`}, budget ${budget === undefined ? 'none' : `$${budget}`}, timeout ${Math.round(timeoutMs / 1000)}s, transport ${transport}${verifyText}`;
-  });
+    facts.push(['transport', `transport ${transport}`]);
+    // the permission the run ACTUALLY has (escalated by an approved allowDangerous): the engine's own rule
+    const perm = resolveRunPermission(harness, template, call.allowDangerous === true);
+    if (perm.nativePermissionForRun !== undefined)
+      facts.push(['native', `native permission ${quoteFull(perm.nativePermissionForRun)} (as the template declares)`]);
+    const dirs = mergeAddDirs(ctx.cwd, template.addDirs, undefined);
+    if (dirs) facts.push(['tpl-dirs', `template addDirs (${dirs.length}): ${dirs.map(quoteFull).join(' · ')}`]);
+    if (!call.task && template.defaultTask)
+      facts.push([
+        'tpl-task',
+        `no task given: the template's default task runs: ${quoteHead(template.defaultTask, 100)}`,
+      ]);
+    const verify = resolveVerifyPlan(call.verify, template.verify, perm.permission);
+    if (verify)
+      facts.push([
+        'verify',
+        `verify ${quoteFull(verify.command)} (${call.verify ? 'typed' : 'from the template'}; ${verify.skip ? 'NOT run: readonly tier' : 'runs on this machine after the harness exits'})`,
+      ]);
+    members.push({ name, facts });
+  }
+  if (members.length === 1) {
+    const m = members[0];
+    rows.unshift(`will apply (${safeName(m.name)}): ${m.facts.map(f => f[1]).join(', ')}`);
+    return rows;
+  }
+  if (members.length > 1) {
+    const keys = [...new Set(members.flatMap(m => m.facts.map(f => f[0])))];
+    const at = (m: (typeof members)[number], k: string): string | undefined => m.facts.find(f => f[0] === k)?.[1];
+    const same = (k: string): boolean => members.every(m => at(m, k) !== undefined && at(m, k) === at(members[0], k));
+    const shared = keys.filter(same);
+    const out: string[] = [];
+    if (shared.length > 0)
+      out.push(`will apply (all ${members.length}): ${shared.map(k => at(members[0], k)).join(', ')}`);
+    for (const m of members) {
+      const own = m.facts.filter(f => !shared.includes(f[0])).map(f => f[1]);
+      if (own.length > 0) out.push(`will apply (${safeName(m.name)}): ${own.join(', ')}`);
+    }
+    rows.unshift(...out);
+  }
+  return rows;
 }
 
 /**

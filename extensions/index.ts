@@ -305,6 +305,9 @@ export default function (pi: ExtensionAPI) {
             model: rawParams.model,
             budgetUsd: rawParams.maxBudgetUsd,
             timeoutSec: rawParams.timeoutSec,
+            task: rawParams.task,
+            // the plan is shown before the danger confirm, but is what a danger run would do: show that tier
+            allowDangerous: rawParams.allowDangerous === true,
           }),
         };
         const tooBig = steeringRefusal(steering);
@@ -345,6 +348,8 @@ export default function (pi: ExtensionAPI) {
               model: params.model,
               budgetUsd: params.maxBudgetUsd,
               timeoutSec: params.timeoutSec,
+              task: params.task,
+              allowDangerous: true, // this IS the danger confirmation: the run has the danger tier (verify runs)
             }),
           },
         );
@@ -732,6 +737,7 @@ export default function (pi: ExtensionAPI) {
             timeoutSec: parsed.timeoutSec,
             timeoutMayRaise: parsed.storedTimeout !== true,
             verify: parsed.verify,
+            allowDangerous: parsed.allowDangerous === true,
           }),
         });
         if (!shown.ok) {
@@ -821,6 +827,7 @@ export default function (pi: ExtensionAPI) {
             timeoutSec: parsed.timeoutSec,
             timeoutMayRaise: parsed.storedTimeout !== true,
             verify: parsed.verify,
+            allowDangerous: true, // this IS the danger confirmation: the run has the danger tier (verify runs)
           }),
         });
         allowDangerous = true;

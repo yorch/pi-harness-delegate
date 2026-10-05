@@ -792,7 +792,7 @@ test('formatFanoutResumePlan: scope, model, pr, budget, timeout and addDirs are 
     'pr: "12"',
     'budget: $3',
     'timeout: 90s',
-    '"./inside", "/outside"',
+    '"./inside" · "/outside"',
   ])
     assert.ok(text.includes(part), `${part}\n${text}`);
   const last = text.trimEnd().split('\n');
@@ -833,7 +833,7 @@ test('delegate tool: resumeFanout refuses a model-set task or scope too long to 
           undefined,
           ok.ctx,
         );
-        assert.match(ok.asked[0], /model: "opus"/);
+        assert.match(ok.asked[0], /model "opus"/);
         assert.match(ok.asked[0], /Scope \(4 characters, 1 lines\):\n {2}> src\//);
       });
     });

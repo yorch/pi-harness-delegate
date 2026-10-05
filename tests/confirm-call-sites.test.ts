@@ -34,18 +34,20 @@ const critical = (message: string): string => {
 };
 
 /** One needle per `shown` command option: where it must appear in the critical section of a command confirmation. */
-const COMMAND_NEEDLES: Record<string, string> = {
-  task: 'task: ', // the summary line
-  harness: 'claude',
-  mode: 'tinker',
-  model: 'model: "opus"',
-  scope: 'scope: ', // the summary line
-  budget: 'budget: $4',
-  timeoutSec: 'timeout: 120s',
-  sessionId: 'session: resumes "sess-1"',
-  pr: 'pr: "9"',
-  verify: 'verify (runs on this machine after the harness exits): "make test"',
-  addDirs: 'addDirs (1): "../x"',
+// (model / budget / timeout / verify are in the `will apply` row when the call site resolved them — `model "opus"` —
+// and in a plain `model: "opus"` line when it could not)
+const COMMAND_NEEDLES: Record<string, RegExp> = {
+  task: /task: /, // the summary line
+  harness: /claude/,
+  mode: /tinker/,
+  model: /model:? "opus"/,
+  scope: /scope: /, // the summary line
+  budget: /budget:? \$4/,
+  timeoutSec: /timeout:? 120s/,
+  sessionId: /session: resumes "sess-1"/,
+  pr: /pr: "9"/,
+  verify: /verify[^"\n]*"make test"/,
+  addDirs: /addDirs \(1\): "\.\.\/x"/,
 };
 
 const FLAGS =
@@ -60,19 +62,19 @@ test('the needle table covers exactly the options classified `shown` (a new one 
   assert.deepEqual(Object.keys(COMMAND_NEEDLES).sort(), SHOWN);
 });
 
-const needlesFor = (skip: string[] = []): string[] =>
+const needlesFor = (skip: string[] = []): RegExp[] =>
   Object.entries(COMMAND_NEEDLES)
     .filter(([k]) => !skip.includes(k))
     .map(([, v]) => v);
 
 function assertAllShown(message: string, skip: string[] = []): void {
   const c = critical(message);
-  for (const need of needlesFor(skip)) assert.ok(c.includes(need), `${need} is in the critical section\n${message}`);
+  for (const need of needlesFor(skip)) assert.ok(need.test(c), `${need} is in the critical section\n${message}`);
   // and the dialog as a whole fits the real 80x40 screen with all of it visible
   const d = renderDialog('t', message, { columns: 80, rows: 40 });
   assert.ok(d.all.length <= 40, `fits (${d.all.length} rows)`);
   const screen = unwrap(d.visible.join('\n').replace(/\n {1}/g, '\n'));
-  for (const need of needlesFor(skip)) assert.ok(screen.includes(need), `${need} is on the real screen\n${screen}`);
+  for (const need of needlesFor(skip)) assert.ok(need.test(screen), `${need} is on the real screen\n${screen}`);
 }
 
 const TEMPLATES = { 'claude/tinker': tpl('tinker', 'edit'), 'codex/tinker': tpl('tinker', 'edit') };
@@ -203,7 +205,7 @@ test('call site: command resume plan shows every typed option (S17: verify)', as
     assert.equal(u.asked.length, 1);
     assertAllShown(u.asked[0], ['sessionId', 'harness', 'mode']);
     assert.match(critical(u.asked[0]), /codex — session "thr-1"/);
-    assert.match(critical(u.asked[0]), /verify \(runs on this machine/);
+    assert.match(critical(u.asked[0]), /verify "make test" \(typed; runs on this machine/);
   });
 });
 

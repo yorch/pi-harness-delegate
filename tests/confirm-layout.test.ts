@@ -63,7 +63,7 @@ function assertCriticalOnScreen(message: string, vp: Viewport, label: string): v
     'model: "opus-x"',
     'budget: $12.5',
     'timeout: 600s',
-    'addDirs (2): "./inside", "/outside"',
+    'addDirs (2): "./inside" · "/outside"',
   ])
     assert.ok(
       screen.includes(needle),

@@ -462,6 +462,7 @@ export function planRerun(
         timeoutSec,
         timeoutMayRaise: !storedTimeout,
         verify: overrides.verify,
+        allowDangerous: overrides.allowDangerous === true,
       }),
       notes: {
         budgetUsd: storedBudget ? ' (stored; can only lower a configured budget)' : undefined,
