@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildPrompt, fenceScope, fenceUntrusted } from '../extensions/engine.ts';
+import { buildPrompt, expandedPromptLength, fenceScope, fenceUntrusted } from '../extensions/engine.ts';
 import { collectModes, formatModeRow, formatModesForModel } from '../extensions/modes.ts';
 import { type DelegateTemplate, parseTemplate, scanTemplateVariables } from '../extensions/templates.ts';
 import { CLAUDE_RESULT, fakeCtx, fakePi, readArgs, tpl, withFakeBinaries, withSandbox } from './helpers/sandbox.ts';
@@ -257,5 +257,54 @@ test('repeating a placeholder is bounded: >16 uses is refused, and a repeated {{
   assert.doesNotThrow(() => buildPrompt(once, 'T', { heading: 'h', data: 'x'.repeat(3_000_000) }, '/r', 'claude'));
   assert.doesNotThrow(() =>
     buildPrompt(mk('plain body'), 'T', { heading: 'h', data: 'x'.repeat(3_000_000) }, '/r', 'claude'),
+  );
+});
+
+test('a repeated placeholder is refused from the computed length — the expanded prompt is never built', () => {
+  // `replace` on the template body is where the expansion would happen: a refused template must not reach it
+  let replaced = false;
+  const amplified = mk('{{scope}}\n'.repeat(16));
+  const spy = Object.assign(new String(amplified.prompt), {
+    replace: () => {
+      replaced = true;
+      return '';
+    },
+  }) as unknown as string;
+  const big = { heading: 'Current git diff:', data: 'x'.repeat(200_000) };
+  assert.throws(
+    () => buildPrompt({ ...amplified, prompt: spy }, 'T', big, '/r', 'claude', NONCE),
+    /expanded prompt is \d+ characters/,
+  );
+  assert.equal(replaced, false, 'refused before any replacement was made');
+});
+
+test('expandedPromptLength is exact: it equals the real prompt length, and the limit is crossed by exactly one character', () => {
+  const t = mk('A {{ task }} B {{scope}} C {{unknown}} D {{task}} {{cwd}} {{harness}} {{mode}}', 'skill: s1');
+  const scope = { heading: 'Heading:', data: 'some/path' };
+  const real = buildPrompt(t, 'the task', scope, '/r', 'claude', NONCE);
+  const head = `You are being delegated a subtask by the pi coding agent.\nWorking directory: /r\nHarness: claude\nMode: ${t.name}\n`;
+  const block = `${scope.heading}\n${fenceUntrusted(scope.data, NONCE)}`;
+  const values: Record<string, string> = {
+    task: 'the task',
+    scope: block,
+    cwd: '"/r"',
+    harness: 'claude',
+    mode: `"${t.name}"`,
+  };
+  const tail = `\n\nUse the "s1" skill.`;
+  assert.equal(
+    expandedPromptLength(head, t.prompt, tail, n => (n in values ? values[n].length : null)),
+    real.length,
+  );
+  // boundary: a prompt of exactly 2 MiB passes, one more character is refused
+  const rep = mk('{{task}}{{task}}');
+  const fixed = buildPrompt(rep, '', null, '/r', 'claude', NONCE).length;
+  const MAX = 2 * 1024 * 1024;
+  const half = (MAX - fixed) / 2;
+  assert.ok(Number.isInteger(half));
+  assert.doesNotThrow(() => buildPrompt(rep, 'x'.repeat(half), null, '/r', 'claude', NONCE));
+  assert.throws(
+    () => buildPrompt(rep, 'x'.repeat(half + 1), null, '/r', 'claude', NONCE),
+    /expanded prompt is 2097154 characters/,
   );
 });

@@ -1,6 +1,8 @@
-import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
+import { ensurePrivateDir } from './private-dir.ts';
+import { newestFirst } from './recency.ts';
 import { sanitizeTemplateText } from './sanitize.ts';
 
 function truncate(s: string, max: number): string {
@@ -344,20 +346,15 @@ export function buildClaudeReportContent(opts: {
   return buildReportContent({ harness: 'claude', ...opts });
 }
 
-/** Delete oldest transcript files beyond `maxCount` (0 = keep everything). */
 /**
  * Write one transcript to `dir` (created if needed) and return its path. Transcripts hold the
  * delegated prompt, repo diffs, and the harness's full output — owner-only: the directory is
  * `0700` and each file `0600` (chmod'd explicitly too, since `mkdirSync`'s `mode` only applies to
- * directories it creates and is subject to the umask).
+ * directories it creates and is subject to the umask). A symlinked directory is used as it is, its target's
+ * permissions untouched (`ensurePrivateDir`).
  */
 export function writeTranscript(dir: string, mode: string, text: string): string {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    // best-effort — e.g. a dir owned by someone else; the file mode below still applies
-  }
+  ensurePrivateDir(dir);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const file = join(dir, `${stamp}-${safeSegmentName(mode)}.md`);
   writeFileSync(file, text, { encoding: 'utf8', mode: 0o600 });
@@ -369,19 +366,50 @@ export function writeTranscript(dir: string, mode: string, text: string): string
   return file;
 }
 
-export function pruneOutputs(dir: string, maxCount: number): void {
-  if (maxCount <= 0) return;
+/**
+ * Delete the oldest transcript files (and their sidecars) beyond `maxCount` (0 = keep every transcript), and
+ * stale crash-orphaned sidecar temp files. `keep` names transcripts that must survive this call.
+ */
+export function pruneOutputs(
+  dir: string,
+  maxCount: number,
+  /** Transcript file names (basenames) that must survive this call — the one just written. */
+  keep: readonly string[] = [],
+  now: number = Date.now(),
+): void {
   let files: string[];
   try {
     files = readdirSync(dir);
   } catch {
     return;
   }
+  // Crash-orphaned atomic-write temp files (`<sidecar>.json.<pid>.<12 hex>.tmp`, see writeRunRecord) are
+  // garbage once an hour old. Only that exact generated shape, only regular files (lstat — a link is
+  // never followed). Independent of `maxCount`: "keep every transcript" does not mean "keep the litter".
+  for (const f of files) {
+    if (!SIDECAR_TMP_NAME_RE.test(f)) continue;
+    try {
+      const st = lstatSync(join(dir, f));
+      if (st.isFile() && now - st.mtimeMs > SIDECAR_TMP_MAX_AGE_MS) rmSync(join(dir, f));
+    } catch {
+      // best-effort
+    }
+  }
+  if (maxCount <= 0) return;
+  // Newest first by the shared ordering (recency.ts): a transcript dated in the FUTURE sorts last, so a
+  // flood of planted future-dated files can't make every real transcript "old" — and the transcript this
+  // run just wrote is never a candidate at all (`keep`).
   const byMtime = files
     .filter(f => f.endsWith('.md'))
-    .map(f => ({ f, mtime: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
-    .sort((a, b) => b.mtime - a.mtime);
-  for (const { f } of byMtime.slice(maxCount)) {
+    .map(f => ({ f, mtimeMs: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
+    .sort((a, b) => newestFirst({ mtimeMs: a.mtimeMs, name: a.f }, { mtimeMs: b.mtimeMs, name: b.f }, now));
+  const kept = new Set<string>(byMtime.filter(({ f }) => keep.includes(f)).map(({ f }) => f));
+  for (const { f } of byMtime) {
+    if (kept.size >= Math.max(maxCount, keep.length)) break;
+    kept.add(f);
+  }
+  for (const { f } of byMtime) {
+    if (kept.has(f)) continue;
     try {
       rmSync(join(dir, f));
     } catch {
@@ -394,9 +422,9 @@ export function pruneOutputs(dir: string, maxCount: number): void {
   // kept ones (pruned just now, or an orphan) is removed. Every other `.json` — notes a user dropped
   // in the directory, anything not written by `writeTranscript`+`writeRunRecord` — is left alone.
   // The transcript is always written before its sidecar, so a live run never looks orphaned.
-  const kept = new Set(byMtime.slice(0, maxCount).map(({ f }) => f.replace(/\.md$/, '')));
+  const keptBase = new Set([...kept].map(f => f.replace(/\.md$/, '')));
   for (const f of files) {
-    if (!SIDECAR_NAME_RE.test(f) || kept.has(f.replace(/\.json$/, ''))) continue;
+    if (!SIDECAR_NAME_RE.test(f) || keptBase.has(f.replace(/\.json$/, ''))) continue;
     try {
       if (!lstatSync(join(dir, f)).isFile()) continue;
       rmSync(join(dir, f));
@@ -405,6 +433,11 @@ export function pruneOutputs(dir: string, maxCount: number): void {
     }
   }
 }
+
+/** A temp file `writeRunRecord` crashed before renaming: `<ISO stamp>-<mode>.json.<pid>.<12 hex>.tmp`. */
+export const SIDECAR_TMP_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-.+\.json\.\d+\.[0-9a-f]{12}\.tmp$/;
+/** How old such a temp file must be before it is removed. */
+export const SIDECAR_TMP_MAX_AGE_MS = 60 * 60 * 1000;
 
 /** The name `writeTranscript` + `recordPathFor` give a sidecar: `2026-10-05T12-00-00-123Z-<mode>.json`. */
 export const SIDECAR_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-.+\.json$/;

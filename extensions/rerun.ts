@@ -23,6 +23,7 @@ import {
   isRunId,
   type LocatedRecord,
   loadRecordForTranscript,
+  MAX_SIDECARS_SCANNED,
   newestFirst,
   type RunRecord,
   readRecordsIn,
@@ -38,20 +39,27 @@ import { validateDelegateInputs } from './validate.ts';
  * in their own harness's directory count (`readRecordsIn`); unusable ones come back in `skipped`.
  * Never throws.
  */
-export function readAllRecordsDetailed(): { records: LocatedRecord[]; skipped: SkippedRecord[] } {
+export function readAllRecordsDetailed(): {
+  records: LocatedRecord[];
+  skipped: SkippedRecord[];
+  /** Outputs directories with more transcripts than were scanned (only the newest `MAX_SIDECARS_SCANNED` count). */
+  truncated: string[];
+} {
   const records: LocatedRecord[] = [];
   const skipped: SkippedRecord[] = [];
+  const truncated: string[] = [];
   const dirs: [string, string][] = [...HARNESS_NAMES.map(h => [outputsDir(h), h] as [string, string])];
   dirs.push([legacyOutputsDir(), 'claude']);
   for (const [dir, harness] of dirs) {
     const r = readRecordsIn(dir, harness);
     records.push(...r.records);
     skipped.push(...r.skipped);
+    if (r.truncated) truncated.push(dir === legacyOutputsDir() ? `${harness} (legacy directory)` : harness);
   }
   records.sort((a, b) =>
     newestFirst({ mtimeMs: a.mtimeMs, name: a.transcript }, { mtimeMs: b.mtimeMs, name: b.transcript }),
   );
-  return { records, skipped };
+  return { records, skipped, truncated };
 }
 
 /** Every usable record (see `readAllRecordsDetailed`), newest transcript first. */
@@ -61,10 +69,18 @@ export function readAllRecords(): RunRecord[] {
 
 export type RecordSelection = { ok: true; record: RunRecord } | { ok: false; error: string };
 
-/** " (N record file(s) were ignored: <reason>)" for an error message, or '' when none were. */
-function ignoredNote(skipped: readonly SkippedRecord[]): string {
-  if (skipped.length === 0) return '';
-  return ` (${skipped.length} record file(s) were ignored as unusable, e.g. ${quoteValue(displayText(skipped[0].reason, 100), 140)})`;
+/** " (N record file(s) were ignored: <reason>; the scan stopped at …)" for an error message, or '' when there is nothing to say. */
+function ignoredNote(skipped: readonly SkippedRecord[], truncated: readonly string[] = []): string {
+  const parts: string[] = [];
+  if (skipped.length > 0)
+    parts.push(
+      `${skipped.length} record file(s) were ignored as unusable, e.g. ${quoteValue(displayText(skipped[0].reason, 100), 140)}`,
+    );
+  if (truncated.length > 0)
+    parts.push(
+      `only the newest ${MAX_SIDECARS_SCANNED} transcripts in each outputs directory are scanned and ${truncated.join(', ')} ${truncated.length > 1 ? 'have' : 'has'} more — older runs are not listed`,
+    );
+  return parts.length > 0 ? ` (${parts.join('; ')})` : '';
 }
 
 /**
@@ -79,23 +95,23 @@ export function selectRecord(
   harness?: string,
 ): RecordSelection {
   if (selector !== undefined && isRunId(selector)) {
-    const { records, skipped } = readAllRecordsDetailed();
+    const { records, skipped, truncated } = readAllRecordsDetailed();
     const hits = records.filter(r => r.record.runId === selector);
     if (hits.length > 1)
       return { ok: false, error: `run id ${selector} is ambiguous — ${hits.length} records claim it` };
     return hits[0]
       ? { ok: true, record: hits[0].record }
-      : { ok: false, error: `no run record with id ${selector}${ignoredNote(skipped)}` };
+      : { ok: false, error: `no run record with id ${selector}${ignoredNote(skipped, truncated)}` };
   }
   if (selector === undefined) {
     // no selector: the newest *completed* run that has a record (a partial run is rerunnable only by id)
-    const { records, skipped } = readAllRecordsDetailed();
+    const { records, skipped, truncated } = readAllRecordsDetailed();
     const rec = records.find(r => !r.record.partial && (harness === undefined || r.record.harness === harness));
     return rec
       ? { ok: true, record: rec.record }
       : {
           ok: false,
-          error: `no ${harness === undefined ? '' : `${harness} `}run records yet — nothing to rerun${ignoredNote(skipped)}`,
+          error: `no ${harness === undefined ? '' : `${harness} `}run records yet — nothing to rerun${ignoredNote(skipped, truncated)}`,
         };
   }
   if (!/^\d{1,4}$/.test(selector) || Number(selector) < 1)

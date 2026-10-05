@@ -17,7 +17,6 @@ import {
   constants,
   fstatSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readdirSync,
   readSync,
@@ -28,6 +27,8 @@ import {
 import { dirname, join } from 'node:path';
 import { HARNESS_NAMES } from './harnesses/registry.ts';
 import type { StreamedUsage } from './harnesses/types.ts';
+import { ensurePrivateDir } from './private-dir.ts';
+import { newestFirst } from './recency.ts';
 import { sanitizeTemplateText } from './sanitize.ts';
 
 export const RUN_RECORD_VERSION = 1;
@@ -242,18 +243,14 @@ function serializeWithinCap(record: RunRecord): string {
  * Write the sidecar next to its transcript (`0600`) and return its path. Atomic and symlink-safe: the
  * bytes go to a fresh, uniquely named temp file created with `O_EXCL` (`'wx'`, never follows a
  * pre-existing link) and are then `rename`d over the final name — `rename` replaces a pre-existing
- * symlink (or file) at that name instead of writing through it. The directory is (re)asserted `0700`.
+ * symlink (or file) at that name instead of writing through it. The directory is (re)asserted `0700` (never
+ * through a symlinked directory — see `ensurePrivateDir`).
  * Throws on I/O failure (the caller treats a record as best-effort).
  */
 export function writeRunRecord(transcriptFile: string, record: RunRecord): string {
   const file = recordPathFor(transcriptFile);
   const dir = dirname(file);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    // best-effort — e.g. a dir owned by someone else
-  }
+  ensurePrivateDir(dir);
   const text = serializeWithinCap(record);
   const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   let fd: number | undefined;
@@ -545,10 +542,9 @@ export function loadRecordForTranscript(transcriptPath: string, dirHarness: stri
   return { ok: true, record: r };
 }
 
-/** Newest first by transcript mtime; the file name breaks ties so the order is total and shared. */
-export function newestFirst(a: { mtimeMs: number; name: string }, b: { mtimeMs: number; name: string }): number {
-  return b.mtimeMs - a.mtimeMs || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0);
-}
+// The one ordering history, rerun, resume and pruning share (recency.ts): newest transcript mtime first,
+// future-dated files last.
+export { newestFirst };
 
 export interface SkippedRecord {
   file: string;

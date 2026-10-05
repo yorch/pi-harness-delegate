@@ -1002,7 +1002,7 @@ test('/delegate rerun (e2e): runs record who started them; a headless rerun of a
       rmSync(`${argsFile}.claude`, { force: true });
       assert.match((await capture(() => h(`rerun ${legacy.runId}`, fakeCtx(cwd)))).err, /unknown.*--trust-origin/s);
       const asked = ui(cwd, false);
-      await h('rerun', asked.ctx);
+      await h(`rerun ${legacy.runId}`, asked.ctx);
       assert.match(asked.asked[0], /unknown \(a legacy record/);
       assert.match(asked.asked[0], /NOT typed by you/);
     });
@@ -1115,4 +1115,58 @@ test('alias commands: /claude rerun refuses a record from another harness, --fan
       });
     },
   );
+});
+
+test('rerun (e2e): a flood of future-dated junk transcripts neither hides the real runs nor makes new ones get pruned', async () => {
+  await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const h = await handlerOf();
+      await capture(() => h('claude tinker the legitimate run', fakeCtx(cwd)));
+      const dir = outputsDir('claude');
+      const future = Date.now() / 1000 + 3600;
+      for (let i = 0; i < 12; i++) {
+        const f = join(dir, `9999-junk-${i}.md`);
+        writeFileSync(f, 'junk');
+        utimesSync(f, future, future);
+      }
+      rmSync(`${argsFile}.claude`, { force: true });
+      const u = ui(cwd, true);
+      await h('rerun', u.ctx);
+      assert.ok(ran(argsFile), `rerun found the legitimate run: ${u.notes.join('|')}`);
+      assert.match(u.asked[0], /the legitimate run/);
+      // more real runs (maxTranscripts is 5 in the sandbox): each new transcript + sidecar survives its own prune
+      for (let i = 0; i < 3; i++) {
+        await new Promise(r => setTimeout(r, 12));
+        await capture(() => h(`claude tinker real run ${i}`, fakeCtx(cwd)));
+        const files = readdirSync(dir);
+        const sidecars = files.filter(f => f.endsWith('.json'));
+        assert.ok(sidecars.length >= i + 2, `after run ${i}: ${files.join(', ')}`);
+      }
+      assert.equal(
+        readdirSync(dir).filter(f => f.startsWith('9999-junk')).length,
+        5 - recordedIds().length,
+        'junk is what gets pruned',
+      );
+    });
+  });
+});
+
+test('rerun: when more transcripts exist than the scan reads, the "not found" message says so', async () => {
+  await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async () => {
+      const h = await handlerOf();
+      await capture(() => h('claude tinker the real one', fakeCtx(cwd)));
+      const [id] = recordedIds();
+      const dir = outputsDir('claude');
+      const t = Date.now() / 1000 + 1;
+      for (let i = 0; i < 2010; i++) {
+        const f = join(dir, `zzzz-${String(i).padStart(4, '0')}.md`);
+        writeFileSync(f, 'x');
+        utimesSync(f, t, t);
+      }
+      const r = await capture(() => h(`rerun ${id}`, fakeCtx(cwd)));
+      assert.match(r.err, /no run record with id/);
+      assert.match(r.err, /only the newest 2000 transcripts in each outputs directory are scanned and claude has more/);
+    });
+  });
 });

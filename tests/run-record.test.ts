@@ -1,25 +1,32 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
+  lutimesSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { pruneOutputs } from '../extensions/activity.ts';
+import { pruneOutputs, SIDECAR_TMP_MAX_AGE_MS, writeTranscript } from '../extensions/activity.ts';
 import { outputsDir } from '../extensions/config.ts';
+import { FUTURE_SKEW_MS, newestFirst } from '../extensions/recency.ts';
 import {
   buildRunRecord,
   displayText,
   isFanoutId,
   isRunId,
+  loadRecordForTranscript,
   MAX_SIDECARS_SCANNED,
   newFanoutId,
   newRunId,
@@ -498,4 +505,153 @@ test('delegate: the verify command text (template or --verify) is stored nowhere
       });
     },
   );
+});
+
+// ── future mtimes, crash-orphaned temp files, symlinked directories, non-regular transcripts ───────────────────
+
+test('newestFirst: a future-dated file sorts after every believable one, whatever its name; skew is tolerated', () => {
+  const now = 1_000_000_000_000;
+  const real = { mtimeMs: now - 5000, name: 'a-real.md' };
+  const planted = { mtimeMs: now + 3600_000, name: 'zzz-planted.md' };
+  const skewed = { mtimeMs: now + FUTURE_SKEW_MS - 1, name: 'b-skewed.md' };
+  assert.deepEqual(
+    [planted, real, skewed].sort((a, b) => newestFirst(a, b, now)),
+    [skewed, real, planted],
+  );
+  assert.equal(newestFirst({ mtimeMs: now, name: 'a' }, { mtimeMs: now, name: 'b' }, now), 1, 'ties: the name decides');
+  const older = { mtimeMs: now - 10, name: 'x' };
+  assert.ok(newestFirst(older, real, now) < 0, 'ordinary files: newest first');
+});
+
+test('pruneOutputs: a flood of future-dated files does not push real transcripts out; the one just written always survives', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    // three real runs (past), each with a sidecar
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(join(dir, `${STAMP(i)}.md`), '#');
+      writeFileSync(join(dir, `${STAMP(i)}.json`), '{}');
+      utimesSync(join(dir, `${STAMP(i)}.md`), now / 1000 - 100 + i, now / 1000 - 100 + i);
+    }
+    // ten planted files an hour in the FUTURE, named to sort "newest"
+    for (let i = 0; i < 10; i++) {
+      const f = join(dir, `${STAMP(50 + i, 'zzz')}.md`);
+      writeFileSync(f, 'junk');
+      utimesSync(f, now / 1000 + 3600, now / 1000 + 3600);
+    }
+    pruneOutputs(dir, 3, [`${STAMP(2)}.md`]);
+    const left = readdirSync(dir).sort();
+    for (let i = 0; i < 3; i++)
+      assert.ok(left.includes(`${STAMP(i)}.md`) && left.includes(`${STAMP(i)}.json`), `real run ${i} kept: ${left}`);
+    assert.equal(left.filter(f => f.includes('zzz')).length, 0, 'the planted files are what got pruned');
+    // and with the real runs OLDER than the keep quota allows, the one just written still survives
+    pruneOutputs(dir, 1, [`${STAMP(0)}.md`]);
+    assert.deepEqual(
+      readdirSync(dir).filter(f => f.endsWith('.md')),
+      [`${STAMP(0)}.md`],
+    );
+  });
+});
+
+test('pruneOutputs: crash-orphaned sidecar temp files are removed after an hour — only the exact generated shape, only regular files', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    const old = (name: string, ageMs = SIDECAR_TMP_MAX_AGE_MS + 60_000) => {
+      writeFileSync(join(dir, name), 'x');
+      utimesSync(join(dir, name), (now - ageMs) / 1000, (now - ageMs) / 1000);
+    };
+    const orphan = `${STAMP(1)}.json.4242.0123456789ab.tmp`;
+    old(orphan);
+    old(`${STAMP(2)}.json.4242.0123456789ab.tmp`, 5 * 60_000); // too recent: a live writer may own it
+    old(`${STAMP(3)}.json.4242.0123456789ab.tmp`, -3600_000); // future-dated: never "old"
+    old('notes.json.4242.0123456789ab.tmp'); // not generated-shaped
+    old(`${STAMP(4)}.json.4242.XYZ.tmp`); // wrong random part
+    old(`${STAMP(5)}.json.tmp`);
+    old('my-notes.tmp');
+    const target = join(tmpdir(), `tmp-target-${process.pid}`);
+    writeFileSync(target, 'precious');
+    const ancient = (now - SIDECAR_TMP_MAX_AGE_MS - 60_000) / 1000;
+    symlinkSync(target, join(dir, `${STAMP(6)}.json.4242.0123456789ab.tmp`));
+    lutimesSync(join(dir, `${STAMP(6)}.json.4242.0123456789ab.tmp`), ancient, ancient); // an OLD link: still not ours to remove
+    mkdirSync(join(dir, `${STAMP(7)}.json.4242.0123456789ab.tmp`));
+    try {
+      pruneOutputs(dir, 0); // "keep every transcript" does not keep the litter
+      const left = readdirSync(dir).sort();
+      assert.ok(!left.includes(orphan), `stale temp removed: ${left}`);
+      assert.equal(left.length, 8, left.join(', '));
+      assert.equal(readFileSync(target, 'utf8'), 'precious', 'a symlink is never followed');
+      assert.ok(lstatSync(join(dir, `${STAMP(6)}.json.4242.0123456789ab.tmp`)).isSymbolicLink());
+    } finally {
+      rmSync(target, { force: true });
+    }
+  });
+});
+
+test('a symlinked outputs directory: its target keeps its permissions (record and transcript writes), and a warning is emitted once', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(join(dir, '..'), { recursive: true });
+    const target = mkdtempSync(join(tmpdir(), 'outputs-target-'));
+    chmodSync(target, 0o755);
+    symlinkSync(target, dir);
+    const warnings: string[] = [];
+    const onWarning = (w: Error) => warnings.push(w.message);
+    process.on('warning', onWarning);
+    try {
+      const t1 = writeTranscript(dir, 'review', '# t');
+      writeRunRecord(t1, GOOD());
+      writeTranscript(dir, 'review', '# t2');
+      await new Promise(r => setTimeout(r, 20));
+      assert.equal(statSync(target).mode & 0o777, 0o755, 'the symlink target was not chmod-ed');
+      assert.ok(lstatSync(dir).isSymbolicLink());
+      assert.equal(readdirSync(target).filter(f => f.endsWith('.md')).length >= 1, true, 'writes still land there');
+      assert.equal(statSync(t1).mode & 0o777, 0o600, 'files are still private');
+      assert.equal(warnings.filter(w => /symbolic link/.test(w)).length, 1, warnings.join('|'));
+    } finally {
+      process.off('warning', onWarning);
+      rmSync(target, { recursive: true, force: true });
+    }
+    // an ordinary directory is still made owner-only
+    const plain = join(dir, '..', 'plain-outputs');
+    mkdirSync(plain, { mode: 0o755 });
+    chmodSync(plain, 0o755);
+    writeTranscript(plain, 'review', '# t');
+    assert.equal(statSync(plain).mode & 0o777, 0o700);
+  });
+});
+
+test('loadRecordForTranscript: a symlinked or FIFO TRANSCRIPT is never a record (even with a valid sidecar next to it)', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const real = join(dir, `${STAMP(1)}.md`);
+    writeFileSync(real, '# real');
+    const rec = (name: string) => ({ ...GOOD(), transcript: `${name}.md` });
+    // a symlink named like a transcript, pointing at a regular file
+    const link = join(dir, `${STAMP(2)}.md`);
+    symlinkSync(real, link);
+    writeFileSync(join(dir, `${STAMP(2)}.json`), JSON.stringify(rec(STAMP(2))));
+    const viaLink = loadRecordForTranscript(link, 'claude');
+    assert.ok(!viaLink.ok && viaLink.reason === 'transcript is not a regular file');
+    // a FIFO named like a transcript: refused, and the check never opens it (no hang)
+    const fifo = join(dir, `${STAMP(3)}.md`);
+    execFileSync('mkfifo', [fifo]);
+    writeFileSync(join(dir, `${STAMP(3)}.json`), JSON.stringify(rec(STAMP(3))));
+    const t0 = Date.now();
+    const f = loadRecordForTranscript(fifo, 'claude');
+    assert.ok(Date.now() - t0 < 2000);
+    assert.ok(!f.ok && f.reason === 'transcript is not a regular file');
+    // the real pair is fine
+    writeFileSync(join(dir, `${STAMP(1)}.json`), JSON.stringify(rec(STAMP(1))));
+    assert.ok(loadRecordForTranscript(real, 'claude').ok);
+    // and an enumeration neither lists nor hangs on them
+    const { records } = readRecordsIn(dir, 'claude');
+    assert.deepEqual(
+      records.map(r => r.transcript),
+      [real],
+    );
+  });
 });

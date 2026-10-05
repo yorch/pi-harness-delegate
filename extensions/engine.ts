@@ -5,7 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { acpView, runAcpHarness } from './acp-runner.ts';
 import {
@@ -344,6 +344,26 @@ export function fenceScope(data: string, nonce: string = untrustedNonce(data)): 
 }
 
 /**
+ * The exact length of the prompt `buildPrompt` assembles — `head`, a newline, `body` with every known
+ * placeholder replaced by its value, then `tail` — computed from the placeholder matches alone
+ * (`valueLength(name)` is the replacement's length, `null` for an unknown name, which stays literal).
+ * Pure; allocates nothing proportional to the result.
+ */
+export function expandedPromptLength(
+  head: string,
+  body: string,
+  tail: string,
+  valueLength: (name: string) => number | null,
+): number {
+  let length = head.length + 1 + body.length + tail.length;
+  for (const m of body.matchAll(TEMPLATE_VARIABLE_RE)) {
+    const v = valueLength(m[1]);
+    if (v !== null) length += v - m[0].length;
+  }
+  return length;
+}
+
+/**
  * Assemble the harness prompt. The template body and the caller's `task` are the instructions;
  * scope content is delimited per `ScopeSection.kind` — external text (diffs, PR bodies, gh stderr)
  * via `fenceUntrusted`, free-text scope via `fenceScope`. `nonce` is injectable only for
@@ -378,39 +398,49 @@ export function buildPrompt(
       throw new Error(
         `template ${quoteValue(template.name, 200)} uses {{${name}}} ${n} times (at most ${MAX_PLACEHOLDER_USES} are allowed) — refusing to build the prompt`,
       );
-  const values: Record<TemplateVariable, () => string> = {
-    task: () => task,
-    scope: () => scopeBlock ?? '(no scope restriction)',
-    cwd: () => quoteValue(cwd, 500),
-    harness: () => harness,
-    mode: () => quoteValue(template.name, 200),
+  const values: Record<TemplateVariable, string> = {
+    task,
+    scope: scopeBlock ?? '(no scope restriction)',
+    cwd: quoteValue(cwd, 500),
+    harness,
+    mode: quoteValue(template.name, 200),
   };
-  const body =
-    used.size === 0
-      ? template.prompt
-      : template.prompt.replace(TEMPLATE_VARIABLE_RE, (whole, name: string) =>
-          (TEMPLATE_VARIABLES as readonly string[]).includes(name) ? values[name as TemplateVariable]() : whole,
-        );
-  let prompt = [
+  const isKnownVariable = (name: string): name is TemplateVariable =>
+    (TEMPLATE_VARIABLES as readonly string[]).includes(name);
+  const head = [
     `You are being delegated a subtask by the pi coding agent.`,
     `Working directory: ${cwd}`,
     `Harness: ${harness}`,
     `Mode: ${template.name}`,
     ``,
-    body,
   ].join('\n');
   // Absent a placeholder, the task/scope sections are appended exactly as before — so a scope can
   // never be silently dropped by a template that only positions {{task}}, and vice versa.
-  if (!used.has('task')) prompt += `\n\n# Task\n${task}`;
-  if (scopeBlock !== null && !used.has('scope')) prompt += `\n\n# Scope\n${scopeBlock}`;
-  if (template.skill) prompt += `\n\nUse the "${template.skill}" skill.`;
+  const tail = [
+    used.has('task') ? '' : `\n\n# Task\n${task}`,
+    scopeBlock !== null && !used.has('scope') ? `\n\n# Scope\n${scopeBlock}` : '',
+    template.skill ? `\n\nUse the "${template.skill}" skill.` : '',
+  ].join('');
   // A repeated placeholder multiplies its value (a diff-sized {{scope}} x16). Bounded only in that
-  // amplifying case — a single use, or no placeholder, behaves exactly as before.
-  if (prompt.length > MAX_EXPANDED_PROMPT_CHARS && Object.values(scanned.counts).some(n => n > 1))
-    throw new Error(
-      `template ${quoteValue(template.name, 200)}: the expanded prompt is ${prompt.length} characters (limit ${MAX_EXPANDED_PROMPT_CHARS} when a placeholder is repeated) — use each of {{task}}/{{scope}} once, or narrow the scope`,
+  // amplifying case — a single use, or no placeholder, behaves exactly as before. The resulting length is
+  // computed from the match lengths BEFORE anything is replaced or joined, so a refused template never
+  // allocates the expanded string (a multi-megabyte diff times sixteen) just to throw it away.
+  if (Object.values(scanned.counts).some(n => n > 1)) {
+    const length = expandedPromptLength(head, template.prompt, tail, name =>
+      isKnownVariable(name) ? values[name].length : null,
     );
-  return prompt;
+    if (length > MAX_EXPANDED_PROMPT_CHARS)
+      throw new Error(
+        `template ${quoteValue(template.name, 200)}: the expanded prompt is ${length} characters (limit ${MAX_EXPANDED_PROMPT_CHARS} when a placeholder is repeated) — use each of {{task}}/{{scope}} once, or narrow the scope`,
+      );
+  }
+  const body =
+    used.size === 0
+      ? template.prompt
+      : template.prompt.replace(TEMPLATE_VARIABLE_RE, (whole, name: string) =>
+          isKnownVariable(name) ? values[name] : whole,
+        );
+  return `${head}\n${body}${tail}`;
 }
 
 /** The shared single-run engine. Exported for tests only — pi loads this module's default export. */
@@ -810,9 +840,11 @@ export async function delegate(
   } catch (_e) {
     void _e;
   }
-  pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts);
+  // the transcript just written is never a pruning candidate, whatever the directory's other mtimes say
+  const justWritten = [basename(file)];
+  pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts, justWritten);
   // also prune legacy if claude
-  if (harnessName === 'claude') pruneOutputs(legacyOutputsDir(), config.maxTranscripts);
+  if (harnessName === 'claude') pruneOutputs(legacyOutputsDir(), config.maxTranscripts, justWritten);
 
   const output = result.result || result.streamedText || '(empty result)';
   return {

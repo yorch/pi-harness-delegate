@@ -293,14 +293,14 @@ A per-run cap, resolved call → template → global config → per-harness conf
 
 ## Run records
 
-Every run (each member of a fan-out too, and a run that died after streaming output) writes a small JSON **sidecar** next to its transcript: `<transcript basename>.json`, mode `0600` in a `0700` directory. It is what `/delegate history` filters, `/delegate rerun` and fan-out resume read. Pruning (`maxTranscripts`) removes a transcript's sidecar with it, and orphaned sidecars are cleaned up too — but **only** files named exactly like the ones the extension writes (`<ISO timestamp>-<mode>.json`) and only regular files: a `.json` you put in that directory yourself, or a symlink, is never deleted. The sidecar is written atomically (temp file, then rename — never through a pre-existing symlink).
+Every run (each member of a fan-out too, and a run that died after streaming output) writes a small JSON **sidecar** next to its transcript: `<transcript basename>.json`, mode `0600` in a `0700` directory. It is what `/delegate history` filters, `/delegate rerun` and fan-out resume read. Pruning (`maxTranscripts`) removes a transcript's sidecar with it, and orphaned sidecars are cleaned up too — but **only** files named exactly like the ones the extension writes (`<ISO timestamp>-<mode>.json`) and only regular files: a `.json` you put in that directory yourself, or a symlink, is never deleted. The sidecar is written atomically (temp file, then rename — never through a pre-existing symlink). A temp file a crashed writer left behind (`<sidecar>.json.<pid>.<12 hex>.tmp`) is removed once it is an hour old — that exact generated shape only, regular files only. **Newest means newest *believable*:** history, rerun, resume and pruning order by transcript modification time, but a file dated in the **future** (more than a few seconds ahead of the clock — anyone who can write the directory can set a timestamp) sorts *after* every real one, so a planted file can't be picked by a bare `rerun`, and a flood of them can't make your real transcripts look old: pruning removes them first and **never** removes the transcript the run just wrote. At most the newest 2,000 transcripts per outputs directory are scanned for records; when there are more, a "not found" message from `rerun` says older runs are not listed. If an outputs directory is a symbolic link it is used as it is, but its target's permissions are **not** changed (a one-time warning tells you to make the real directory private).
 
 ```jsonc
 {
   "version": 1,
   "runId": "run_<16 hex>",          // random, unique
   "fanoutId": "fan_<16 hex>" | null, // shared by every member of one fan-out
-  "origin": "tool" | "command" | null, // who started it (optional on disk; absent = null = unknown)
+  "origin": "tool" | "command" | null, // who started it (optional on disk; absent = null = unknown; a hint, not proof)
   "harness": "claude", "mode": "review",
   "permission": "readonly|edit|danger", "nativePermission": null, "nativeClass": "none|safe|danger|unlisted",
   "model": null,                    // the model the harness actually ran, when known
