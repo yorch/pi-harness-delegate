@@ -109,6 +109,7 @@ export async function runFanoutTool(
           scope: params.scope,
           model: params.model,
           maxBudgetUsd: params.maxBudgetUsd,
+          timeoutSec: params.timeoutSec,
           allowDangerous: params.allowDangerous === true,
           sessionId: params.sessionId,
           pr: params.pr,
@@ -190,6 +191,7 @@ export interface FanoutSpec {
   scope?: string;
   model?: string;
   budget?: number;
+  timeoutSec?: number;
   sessionId?: string;
   pr?: string;
   addDirs?: string[];
@@ -271,6 +273,8 @@ export async function runFanoutConcurrent(
       scope: spec.scope,
       model: spec.model,
       maxBudgetUsd: spec.budget,
+      timeoutSec: spec.timeoutSec,
+      timeoutSecMayRaise: true, // command path only: --timeout= is human-typed
       sessionId: spec.sessionId,
       pr: spec.pr,
       addDirs: spec.addDirs,
@@ -448,6 +452,7 @@ export async function runFanoutCommand(
       scope: resolvedTaskScope.scope,
       model: parsed.model,
       budget: parsed.budget,
+      timeoutSec: parsed.timeoutSec,
       sessionId: parsed.sessionId,
       pr: parsed.pr,
       addDirs: parsed.addDirs,

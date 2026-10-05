@@ -1,4 +1,9 @@
-import type { DelegateTemplate } from './templates.ts';
+import {
+  callTimeoutError,
+  type DelegateTemplate,
+  TEMPLATE_TIMEOUT_MAX_SEC,
+  TEMPLATE_TIMEOUT_MIN_SEC,
+} from './templates.ts';
 
 /**
  * Pure parser for /delegate and alias commands: --key=value flags, with optional
@@ -12,6 +17,8 @@ export interface DelegateCommandArgs {
   model?: string;
   scope?: string;
   budget?: number;
+  /** Per-call harness timeout in seconds (--timeout=<sec>); wins over the template's `timeout:`. */
+  timeoutSec?: number;
   /** Resume an existing delegated session (--resume=<id>). */
   sessionId?: string;
   /** GitHub PR number/URL to review (--pr=). */
@@ -42,7 +49,7 @@ export type ClaudeCommandArgs = DelegateCommandArgs;
  * description, so the hints can't drift from what `parseDelegateCommand` actually parses.
  */
 export const COMMAND_FLAGS_HINT =
-  '[--mode=review|plan|implement|security-audit|docs|general] [--model=…] [--scope=diff|pr|paths] [--pr=<n|url>] [--budget=<usd>] [--verify=<cmd>] [--resume=<id>] [--add-dir=<path>] [--allow-dangerous] <prompt>';
+  '[--mode=review|plan|implement|security-audit|docs|general] [--model=…] [--scope=diff|pr|paths] [--pr=<n|url>] [--budget=<usd>] [--timeout=<sec>] [--verify=<cmd>] [--resume=<id>] [--add-dir=<path>] [--allow-dangerous] <prompt>';
 
 /** Usage line for `/delegate` itself. */
 export function delegateUsage(): string {
@@ -84,6 +91,22 @@ export function normalizeHarnessSpec(spec: string): string | undefined {
   return parts.join(',');
 }
 
+/**
+ * The harness spec a template's `harnesses:` frontmatter contributes when the caller named no
+ * harness (`undefined` when it declares none). Callers only consult this when no harness was given —
+ * an explicit `--harness=`, first-word harness, alias command or tool `harness` param always wins.
+ *
+ * The same on both paths (the `/delegate` command and the `delegate` tool): one name is a normal
+ * single run (fail-fast at capacity); several are a fan-out spec, which each path hands to its
+ * unchanged fan-out runner (`runFanoutCommand` / `runFanoutTool`) — `resolveHarnessList` detection
+ * filtering and unknown/skipped reporting, `waitForSlot: true` through `acquireSlot`,
+ * `fanoutResumeError`, and the path's own danger/addDirs confirm gates resolved against this spec.
+ */
+export function templateHarnessDefault(harnesses: readonly string[] | undefined): string | undefined {
+  if (!harnesses || harnesses.length === 0) return undefined;
+  return normalizeHarnessSpec(harnesses.join(','));
+}
+
 /** The error for a harness spec that normalizes to nothing (`,`, `" , "`) — shared by `/delegate`'s
  *  `--harness=` and the `delegate` tool's `harness` param, so neither silently runs the default. */
 export function emptyHarnessSpecError(raw: string): string {
@@ -105,6 +128,7 @@ const RECOGNIZED_FLAGS = new Set([
   'model',
   'scope',
   'budget',
+  'timeout',
   'resume',
   'pr',
   'verify',
@@ -128,7 +152,8 @@ export function parseDelegateCommand(
   const errors: string[] = [];
   const notices: string[] = [];
   let allowDangerousBare = false;
-  let budgetWithoutValue = false;
+  // `--budget` / `--timeout` given with no `=value` (e.g. the space form `--budget 5`)
+  const valuelessLimits = new Set<string>();
   const rest = raw.replace(
     FLAG_OR_PROSE,
     (
@@ -155,11 +180,11 @@ export function parseDelegateCommand(
       }
       const hasValue = dq !== undefined || sq !== undefined || bare !== undefined;
       if (!hasValue) {
-        // bare boolean flag: only `--allow-dangerous`. A bare `--budget` (e.g. the space form
-        // `--budget 5`) is an explicit cap we can't honor — an error, never silently "no cap".
-        // Any other bare `--word` is prose.
-        if (k === 'budget') {
-          budgetWithoutValue = true;
+        // bare boolean flag: only `--allow-dangerous`. A bare `--budget`/`--timeout` (e.g. the space
+        // form `--budget 5`) is an explicit limit we can't honor — an error, never silently "no
+        // limit". Any other bare `--word` is prose.
+        if (k === 'budget' || k === 'timeout') {
+          valuelessLimits.add(k);
           return m;
         }
         if (k !== 'allow-dangerous') return m;
@@ -188,10 +213,14 @@ export function parseDelegateCommand(
       'unbalanced " or ` in the command — flags around it can\'t be told apart from prompt text; close the quote (or remove it) and try again',
     );
   }
-  if (budgetWithoutValue && flags.budget === undefined) {
-    errors.push(
-      '--budget needs a value: use --budget=<usd> (or wrap the text in backticks if it is part of the prompt)',
-    );
+  for (const [k, unit] of [
+    ['budget', 'usd'],
+    ['timeout', 'sec'],
+  ] as const) {
+    if (valuelessLimits.has(k) && flags[k] === undefined)
+      errors.push(
+        `--${k} needs a value: use --${k}=<${unit}> (or wrap the text in backticks if it is part of the prompt)`,
+      );
   }
 
   let harness = flags.harness !== undefined ? normalizeHarnessSpec(flags.harness) : undefined;
@@ -224,6 +253,16 @@ export function parseDelegateCommand(
     // an explicit spend cap that can't be honored is an error, never silently "no cap"
     if (flags.budget.trim() !== '' && Number.isFinite(budget) && budget > 0) out.budget = budget;
     else errors.push(`--budget must be a positive number of USD (got "${flags.budget}")`);
+  }
+  if (flags.timeout !== undefined) {
+    const v = flags.timeout.trim();
+    const sec = /^\d{1,9}$/.test(v) ? Number(v) : Number.NaN;
+    // an explicit time limit that can't be honored is an error, never silently "the configured one"
+    if (callTimeoutError(sec) === null) out.timeoutSec = sec;
+    else
+      errors.push(
+        `--timeout must be a whole number of seconds from ${TEMPLATE_TIMEOUT_MIN_SEC} to ${TEMPLATE_TIMEOUT_MAX_SEC} (got "${flags.timeout.slice(0, 40)}")`,
+      );
   }
   if (flags.resume) out.sessionId = flags.resume;
   if (flags.pr) out.pr = flags.pr;

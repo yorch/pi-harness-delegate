@@ -30,6 +30,7 @@ import {
   legacyOutputsDir,
   loadConfig,
   resolveModelForHarness,
+  resolveRunTimeoutMs,
   resolveTransport,
 } from './config.ts';
 import {
@@ -43,6 +44,7 @@ import {
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { runHarness } from './runner.ts';
 import {
+  callTimeoutError,
   type DelegateTemplate,
   describeSkippedProjectTemplates,
   loadTemplates,
@@ -70,6 +72,17 @@ export interface DelegateOptions {
   /** Extra directories the harness may access, merged with the template's `addDirs` (relative
    *  paths resolve against the run's cwd). Per-harness limits apply — see each `buildArgs`. */
   addDirs?: string[];
+  /**
+   * Per-call harness timeout in seconds, bounded like a template timeout (an out-of-range value fails
+   * the run). By default it can only **lower** the configured timeout (template > per-harness >
+   * global) — the model-settable `delegate` tool's semantics; see `resolveRunTimeoutMs`.
+   */
+  timeoutSec?: number;
+  /**
+   * The per-call `timeoutSec` was typed by a human (`/delegate --timeout=`), so it may also raise the
+   * configured timeout. Only the command paths set this — never the tool path, never from config.
+   */
+  timeoutSecMayRaise?: boolean;
   /**
    * Host-run verification command override — takes precedence over the template's `verify`
    * frontmatter. Internal engine option only, not exposed on the `delegate` tool's schema — see
@@ -335,6 +348,11 @@ export async function delegate(
     addDirs: opts.addDirs,
     cwd: ctx.cwd,
   });
+  // a per-call timeout we can't honor is an error, never silently "the configured timeout"
+  if (opts.timeoutSec !== undefined) {
+    const timeoutErr = callTimeoutError(opts.timeoutSec);
+    if (timeoutErr) throw new Error(timeoutErr);
+  }
   const config = loadConfig();
   const harnessName = opts.harness ?? config.defaultHarness ?? 'claude';
   const harness = getHarness(harnessName);
@@ -383,8 +401,14 @@ export async function delegate(
           harness.name,
         )
       : undefined);
-  // The mode is a template `name:` — frontmatter, so quoted/escaped like every other echoed value.
-  const warning = permissionWarning && `⚠ template ${quoteValue(mode, 200)}: ${permissionWarning}`;
+  // The mode is a template `name:` — frontmatter, so quoted/escaped like every other echoed value…
+  // …and so is a non-permission frontmatter field that was ignored (an out-of-range `timeout:`, a
+  // rejected `harnesses:` entry) — same channels, one line per problem.
+  const warning =
+    [permissionWarning, ...(template.fieldWarnings ?? [])]
+      .filter(Boolean)
+      .map(w => `⚠ template ${quoteValue(mode, 200)}: ${w}`)
+      .join('\n') || undefined;
   if (warning) {
     if (ctx.hasUI) ctx.ui.notify?.(warning, 'warning');
     else process.stderr.write(`${warning}\n`);
@@ -432,6 +456,15 @@ export async function delegate(
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);
   const maxBudgetUsd =
     opts.maxBudgetUsd ?? template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd;
+  // template `timeout:` > per-harness config > global config; a per-call timeout only lowers that unless
+  // a human typed it — never past the hard cap. See config.ts.
+  const timeoutMs = resolveRunTimeoutMs(
+    config,
+    harnessName,
+    template.timeoutSec,
+    opts.timeoutSec,
+    opts.timeoutSecMayRaise === true,
+  );
 
   // concurrency guard — see concurrency.ts. Single runs (waitForSlot unset) fail fast at capacity,
   // exactly as before; fan-out passes waitForSlot:true to queue instead.
@@ -483,7 +516,7 @@ export async function delegate(
       model,
       maxBudgetUsd,
       signal: opts.signal,
-      timeoutMs: config.harnesses[harnessName]?.timeoutMs ?? config.timeoutMs,
+      timeoutMs,
       resumeSessionId: opts.sessionId,
       addDirs,
       onStream: (t: string) => {
@@ -526,6 +559,7 @@ export async function delegate(
             activityLog: collectActivityLog(activityEvents),
             output: streamedFull,
             warning,
+            timeoutMs,
           }),
         );
       } catch (_e) {
@@ -595,6 +629,7 @@ export async function delegate(
       verify,
       budget,
       warning,
+      timeoutMs,
     }),
   );
   pruneOutputs(outputsDirFor(harnessName), config.maxTranscripts);
@@ -628,6 +663,8 @@ export async function delegate(
       verify,
       budget,
       permissionWarning: permissionWarning ?? null,
+      templateWarnings: template.fieldWarnings ?? [],
+      timeoutMs,
     },
     result,
     activityLog: collectActivityLog(activityEvents),
@@ -718,6 +755,9 @@ export interface DelegateToolParams {
   sessionId?: string;
   pr?: string;
   addDirs?: string[];
+  /** Per-call harness timeout in seconds, bounded — can only lower the configured timeout, never
+   *  raise it (model-settable). See `DelegateOptions.timeoutSec` / `resolveRunTimeoutMs`. */
+  timeoutSec?: number;
 }
 
 /** One `delegate()` call with the tool's live-feed progress reporting (`onUpdate`). Shared by the

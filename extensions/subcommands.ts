@@ -16,34 +16,34 @@ import {
   writeDelegateConfig,
 } from './config.ts';
 import { isProjectTrusted } from './engine.ts';
-import { ALIASES, detectAll, getHarness, HARNESS_NAMES, isKnownHarness } from './harnesses/registry.ts';
+import {
+  ALIASES,
+  detectAll,
+  getHarness,
+  HARNESS_NAMES,
+  isKnownHarness,
+  resolveHarnessName,
+} from './harnesses/registry.ts';
 import { readAllHistory } from './history.ts';
-import { type DelegateTemplate, loadTemplates } from './templates.ts';
-export function formatTemplateRow(t: DelegateTemplate): string {
-  const parts = [
-    t.name,
-    `[${t.permission}]`,
-    t.model ? `model=${t.model}` : '',
-    t.defaultTask ? '↳ default task' : '',
-    t.harness ? `(${t.harness})` : '',
-  ];
-  return `${parts.filter(Boolean).join('  ')}  —  ${t.description}`;
-}
-
+import { collectModes, formatModeRow, formatOmitted } from './modes.ts';
+import { loadTemplates, projectTemplatePresence } from './templates.ts';
+/**
+ * `/delegate list [harness]` — the same read-only discovery data (`collectModes`) the model's
+ * `delegate_modes` tool sees, one row per mode: per-harness tier, source tier, defaults, sanitized
+ * description. Project-local templates only when the project is trusted, as for a run.
+ */
 export async function showModes(ctx: ExtensionContext, harnessFilter?: string): Promise<void> {
-  const all = new Map<string, DelegateTemplate>();
   const trusted = isProjectTrusted(ctx);
-  // collect from all harnesses if no filter
-  if (harnessFilter) {
-    for (const [k, v] of loadTemplates(ctx.cwd, harnessFilter, trusted)) all.set(k, v);
-  } else {
-    for (const h of [...HARNESS_NAMES, 'shared']) {
-      for (const [k, v] of loadTemplates(ctx.cwd, h, trusted)) if (!all.has(k)) all.set(k, v);
-    }
-    // also load without harness param
-    for (const [k, v] of loadTemplates(ctx.cwd, undefined, trusted)) if (!all.has(k)) all.set(k, v);
-  }
-  const rows = [...all.values()].map(formatTemplateRow);
+  const report = collectModes(
+    ctx.cwd,
+    trusted,
+    harnessFilter ? [harnessFilter] : HARNESS_NAMES,
+    resolveHarnessName(loadConfigWithSource().config.defaultHarness),
+  );
+  const rows = report.modes.map(formatModeRow);
+  if (report.omitted > 0) rows.push(`… +${report.omitted} more not shown (${formatOmitted(report)})`);
+  if (!trusted && projectTemplatePresence(ctx.cwd, HARNESS_NAMES).dirs.length > 0)
+    rows.push('(project untrusted — its project-local templates were not loaded; see /delegate status)');
   if (!ctx.hasUI) {
     process.stdout.write(`${rows.join('\n')}\n`);
     return;

@@ -463,6 +463,8 @@ export function buildTranscript(
     budget?: BudgetNote;
     /** A template permission warning (e.g. an unrecognized legacy value failed closed to readonly). */
     warning?: string;
+    /** The harness timeout this run was given (`resolveRunTimeoutMs`), when known. */
+    timeoutMs?: number;
   } & Record<string, unknown>,
 ): string {
   const harness = (opts.harness as string | undefined) ?? 'claude';
@@ -516,6 +518,7 @@ export function buildTranscript(
     `- context: ${context ?? 'n/a'}`,
     `- duration: ${duration ?? 'n/a'}`,
     `- stop reason: ${opts.stopReason ?? 'n/a'}`,
+    ...(typeof opts.timeoutMs === 'number' ? [`- timeout: ${Math.round(opts.timeoutMs / 1000)}s`] : []),
     ...(opts.warning ? [`- warning: ${opts.warning}`] : []),
     ...(opts.budget ? [formatBudgetLine(opts.budget)] : []),
     ...(opts.budget?.message ? ['', opts.budget.message] : []),

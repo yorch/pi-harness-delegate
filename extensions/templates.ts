@@ -3,6 +3,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NormalizedPermission } from './harnesses/types.ts';
+import { INVISIBLE_OR_CONTROL_RE } from './sanitize.ts';
+
+/** Where a loaded template came from: shipped with the package, the user's own dirs, or the project. */
+export type TemplateSource = 'builtin' | 'user' | 'project';
 
 export type PermissionMode = 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk' | 'auto' | 'manual';
 
@@ -46,6 +50,88 @@ export interface DelegateTemplate {
   addDirs?: string[];
   prompt: string;
   harness?: string;
+  /** Which tier this template was loaded from — set by `loadTemplates`, absent from `parseTemplate`. */
+  source?: TemplateSource;
+  /**
+   * Per-run harness timeout in seconds (`timeout: 900`), an integer within
+   * [`TEMPLATE_TIMEOUT_MIN_SEC`, `TEMPLATE_TIMEOUT_MAX_SEC`]. An out-of-range or non-integer value is
+   * ignored (the config timeout applies) and reported in `fieldWarnings`. See `resolveRunTimeoutMs`.
+   */
+  timeoutSec?: number;
+  /**
+   * Default harness(es) for this mode (`harnesses: codex` or `harnesses: claude, codex`), used ONLY
+   * when the caller names no harness. Lowercased; well-formed but unknown names are kept so the
+   * existing fan-out reporting (`resolveHarnessList`) names them. Never widens permission. Several
+   * names make a run with no harness a fan-out on both the `/delegate` command and the `delegate`
+   * tool — see `templateHarnessDefault` (command.ts).
+   */
+  harnesses?: string[];
+  /**
+   * Non-permission frontmatter problems (an invalid `timeout:`, a rejected `harnesses:` entry):
+   * the value was ignored and the default applies. Shown in `/delegate list`, `delegate_modes` and
+   * at run time — never silently dropped.
+   */
+  fieldWarnings?: string[];
+}
+
+/** Bounds for a template's `timeout:` (seconds). A template can never raise a run past the max. */
+export const TEMPLATE_TIMEOUT_MIN_SEC = 10;
+export const TEMPLATE_TIMEOUT_MAX_SEC = 7200;
+
+const HARNESS_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/**
+ * `harnesses:` frontmatter → a deduped, lowercased list. `all` is refused (a template must name
+ * its harnesses — `all` would silently fan out, and multiply spend, to whatever happens to be
+ * installed) and so is anything that isn't a plain harness-shaped word; both are reported as
+ * warnings and dropped. Unknown-but-well-formed names are kept for the run-time reporting.
+ */
+export function parseTemplateHarnesses(raw: string | undefined): { harnesses?: string[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const out: string[] = [];
+  for (const item of parseList(raw) ?? []) {
+    const name = item.toLowerCase();
+    if (name === 'all') {
+      warnings.push('harnesses: "all" ignored — name the harnesses explicitly');
+      continue;
+    }
+    if (!HARNESS_NAME_RE.test(name)) {
+      warnings.push(`harnesses: entry ${quoteValue(item)} ignored — not a harness name`);
+      continue;
+    }
+    if (!out.includes(name)) out.push(name);
+  }
+  return { harnesses: out.length > 0 ? out : undefined, warnings };
+}
+
+/** `timeout:` frontmatter → seconds, or a warning (value ignored) when it isn't a bounded integer. */
+export function parseTemplateTimeout(raw: string | undefined): { timeoutSec?: number; warning?: string } {
+  const v = raw?.trim();
+  if (!v) return {};
+  const n = /^\d{1,9}$/.test(v) ? Number(v) : NaN;
+  if (Number.isInteger(n) && n >= TEMPLATE_TIMEOUT_MIN_SEC && n <= TEMPLATE_TIMEOUT_MAX_SEC) return { timeoutSec: n };
+  return {
+    warning: `timeout: ${quoteValue(v)} ignored — must be a whole number of seconds from ${TEMPLATE_TIMEOUT_MIN_SEC} to ${TEMPLATE_TIMEOUT_MAX_SEC}; the configured timeout applies`,
+  };
+}
+
+/**
+ * A per-call timeout (`delegate` tool `timeoutSec`, `/delegate --timeout=<sec>`) must be a whole
+ * number of seconds within the same bounds as a template's `timeout:`. Unlike a bad frontmatter
+ * value (ignored with a warning — the template author isn't there to ask), a bad per-call value is
+ * an error: the caller asked for a specific limit we can't honor. `null` when valid.
+ */
+export function callTimeoutError(sec: unknown): string | null {
+  if (
+    typeof sec === 'number' &&
+    Number.isInteger(sec) &&
+    sec >= TEMPLATE_TIMEOUT_MIN_SEC &&
+    sec <= TEMPLATE_TIMEOUT_MAX_SEC
+  )
+    return null;
+  const shown =
+    typeof sec === 'number' && Number.isFinite(sec) ? String(sec) : JSON.stringify(String(sec)).slice(0, 40);
+  return `timeout must be a whole number of seconds from ${TEMPLATE_TIMEOUT_MIN_SEC} to ${TEMPLATE_TIMEOUT_MAX_SEC} (got ${shown})`;
 }
 
 /** The legacy keys ignored next to a native `permission:` value — keys already sanitized (`displayKey`). */
@@ -75,18 +161,9 @@ const LEGACY_SANDBOX_TIERS: Record<string, NormalizedPermission> = {
   'danger-full-access': 'danger',
 };
 
-/**
- * Characters `JSON.stringify` leaves raw but a terminal or renderer still acts on: C1 controls
- * (U+009B is the 8-bit CSI), soft hyphen, bidi marks/embeddings/overrides/isolates (Trojan-Source
- * reordering), zero-width and other invisible format characters, the line/paragraph separators,
- * BOM, interlinear annotation controls, and tag characters.
- */
-const INVISIBLE_OR_CONTROL =
-  /[\u0080-\u009F\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u{E0000}-\u{E007F}]/gu;
-
 /** Each match → `\uXXXX` (per UTF-16 code unit), so it is visible and inert. */
 function escapeInvisible(text: string): string {
-  return text.replace(INVISIBLE_OR_CONTROL, ch =>
+  return text.replace(INVISIBLE_OR_CONTROL_RE, ch =>
     Array.from({ length: ch.length }, (_, i) => `\\u${ch.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''),
   );
 }
@@ -94,8 +171,10 @@ function escapeInvisible(text: string): string {
 /**
  * A frontmatter-derived string echoed back in a warning (`/delegate list`, run-time notes): JSON-quoted
  * so C0 controls / ANSI escapes are inert, the characters `JSON.stringify` leaves raw (C1, bidi,
- * zero-width, U+2028/9 — see `INVISIBLE_OR_CONTROL`) escaped as `\uXXXX` too, and capped at `max`
- * chars so a huge value can't flood the line.
+ * zero-width, U+2028/9, tag characters, … — the shared `INVISIBLE_OR_CONTROL_RE` set from
+ * `sanitize.ts`) escaped as `\uXXXX` too, and capped at `max` chars so a huge value can't flood the
+ * line. Escaped rather than stripped (unlike `sanitizeTemplateText`): a warning must show what the
+ * author actually wrote.
  */
 export function quoteValue(value: string, max = 60): string {
   return escapeInvisible(JSON.stringify(value)).slice(0, max);
@@ -369,6 +448,11 @@ export function parseTemplate(text: string): DelegateTemplate | null {
 
   const budget = meta.maxBudgetUsd ? Number(meta.maxBudgetUsd) : NaN;
   const description = meta.description ?? '';
+  const fieldWarnings: string[] = [];
+  const timeout = parseTemplateTimeout(meta.timeout);
+  if (timeout.warning) fieldWarnings.push(timeout.warning);
+  const harnesses = parseTemplateHarnesses(meta.harnesses);
+  fieldWarnings.push(...harnesses.warnings);
 
   return {
     name,
@@ -390,16 +474,19 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     addDirs: parseList(meta.addDirs),
     prompt: m[2].trim(),
     harness: meta.harness || undefined,
+    timeoutSec: timeout.timeoutSec,
+    harnesses: harnesses.harnesses,
+    fieldWarnings: fieldWarnings.length > 0 ? fieldWarnings : undefined,
   };
 }
 
-function loadDir(dir: string, out: Map<string, DelegateTemplate>): void {
+function loadDir(dir: string, out: Map<string, DelegateTemplate>, source: TemplateSource): void {
   if (!existsSync(dir)) return;
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.md')) continue;
     try {
       const t = parseTemplate(readFileSync(join(dir, f), 'utf8'));
-      if (t) out.set(t.name, t);
+      if (t) out.set(t.name, { ...t, source });
     } catch {
       // skip unreadable files
     }
@@ -452,20 +539,20 @@ export function loadTemplates(cwd: string, harnessName?: string, trusted = false
   const out = new Map<string, DelegateTemplate>();
   const harness = harnessName ?? 'claude';
   // legacy root builtins (templates/*.md) lowest — for migration from pi-claude-delegate
-  loadDir(builtinTemplatesDir(), out);
+  loadDir(builtinTemplatesDir(), out, 'builtin');
   // shared canonical bodies
-  loadDir(sharedTemplatesDir(), out);
+  loadDir(sharedTemplatesDir(), out, 'builtin');
   // harness-specific builtins override shared
-  loadDir(builtinHarnessTemplatesDir(harness), out);
+  loadDir(builtinHarnessTemplatesDir(harness), out, 'builtin');
   // user globals: legacy before new so new wins
-  loadDir(legacyUserTemplatesDir(), out);
-  loadDir(userTemplatesDir(), out);
-  loadDir(userTemplatesDir(harness), out);
+  loadDir(legacyUserTemplatesDir(), out, 'user');
+  loadDir(userTemplatesDir(), out, 'user');
+  loadDir(userTemplatesDir(harness), out, 'user');
   // project locals: legacy before new so new wins — only if trusted
   if (trusted) {
-    loadDir(legacyProjectTemplatesDir(cwd), out);
-    loadDir(projectTemplatesDir(cwd), out);
-    loadDir(projectTemplatesDir(cwd, harness), out);
+    loadDir(legacyProjectTemplatesDir(cwd), out, 'project');
+    loadDir(projectTemplatesDir(cwd), out, 'project');
+    loadDir(projectTemplatesDir(cwd, harness), out, 'project');
   }
   return out;
 }

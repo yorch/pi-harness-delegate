@@ -12,6 +12,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DEFAULT_TIMEOUT_MS, type Harness, type Transport } from './harnesses/types.ts';
+import { TEMPLATE_TIMEOUT_MAX_SEC } from './templates.ts';
 
 export interface HarnessConfig {
   model?: string;
@@ -429,6 +430,44 @@ export function writeDelegateConfig(delegateSubtree: unknown): WriteConfigResult
       }
     }
   }
+}
+
+/**
+ * The harness timeout for one run. The **configured** timeout is, most specific first:
+ *
+ * 1. the template's `timeout:` frontmatter;
+ * 2. the **per-harness** config `harnesses.<name>.timeoutMs`;
+ * 3. the **global** config `timeoutMs` (always set, defaults to `DEFAULT_TIMEOUT_MS`).
+ *
+ * A **per-call** timeout then applies on top, and who set it matters:
+ *
+ * - `callMayRaise: true` — a human typed it (`/delegate --timeout=<sec>`): it replaces the configured
+ *   timeout, up or down;
+ * - `callMayRaise: false` (the default) — the model set it (`delegate` tool `timeoutSec`): it can only
+ *   **lower** the configured timeout, never raise it. A tool param is model-settable and the model's
+ *   context is attacker-influenceable, so a raising value would let a prompt-injected model hold every
+ *   `maxConcurrent` slot far past what the user configured. Same "model-settable params only narrow"
+ *   rule as `allowDangerous`/`addDirs`/`verify`.
+ *
+ * Never unbounded: a call or template value (seconds) is clamped to `TEMPLATE_TIMEOUT_MAX_SEC` here
+ * as defense in depth — `parseTemplateTimeout` / `callTimeoutError` already reject out-of-range
+ * values with a clear message — and config values are only ever positive numbers (`loadConfig`).
+ * With neither a call nor a template timeout this is exactly the previous
+ * `harnesses.<name>.timeoutMs ?? timeoutMs`.
+ */
+export function resolveRunTimeoutMs(
+  cfg: DelegateConfig,
+  harnessName: string,
+  templateTimeoutSec?: number,
+  callTimeoutSec?: number,
+  callMayRaise = false,
+): number {
+  const usable = (v: number | undefined): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  const capMs = (sec: number) => Math.min(sec, TEMPLATE_TIMEOUT_MAX_SEC) * 1000;
+  const raw = cfg.harnesses[harnessName]?.timeoutMs;
+  const configured = usable(templateTimeoutSec) ? capMs(templateTimeoutSec) : usable(raw) ? raw : cfg.timeoutMs;
+  if (!usable(callTimeoutSec)) return configured;
+  return callMayRaise ? capMs(callTimeoutSec) : Math.min(capMs(callTimeoutSec), configured);
 }
 
 export function resolveModelForHarness(
