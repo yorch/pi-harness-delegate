@@ -15,7 +15,7 @@ import {
   confirmToolAddDirs,
   safeName,
 } from '../extensions/validate.ts';
-import { renderDialog, unwrap } from './helpers/dialog.ts';
+import { renderDialog, unwrap, withViewport } from './helpers/dialog.ts';
 import { UNSAFE } from './helpers/unsafe.ts';
 
 const FAMILY = '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}';
@@ -188,6 +188,18 @@ test('addDirs confirm: more than 10 directories, or a path over 500 characters, 
   await assert.rejects(() => confirmToolAddDirs(t.ctx, many), /11 directories outside the project/);
   await assert.rejects(() => confirmToolAddDirs(t.ctx, [`/${'d'.repeat(600)}`]), /longer than the 500 characters/);
   assert.equal(t.asked.length, 0);
+});
+
+test('addDirs confirm: ten long directories that cannot all be on screen are refused by the layout, not shown in a taller-than-screen dialog', async () => {
+  const t = confirmCtx();
+  const dirs = Array.from({ length: 10 }, (_, i) => `/outside-${i}/${'d'.repeat(300)}`);
+  await withViewport(80, 40, () =>
+    assert.rejects(() => confirmToolAddDirs(t.ctx, dirs), /refused: the confirmation's key lines/),
+  );
+  assert.equal(t.asked.length, 0);
+  // the same list fits a tall, wide terminal
+  await withViewport(200, 100, () => confirmToolAddDirs(t.ctx, dirs));
+  assert.equal(t.asked.length, 1);
 });
 
 test('addDirs confirm: the last line summarizes what is listed; the dialog says it shows directories, not the task', async () => {
