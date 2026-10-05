@@ -47,6 +47,15 @@ Everything this extension reads or writes under `~/.pi/agent` — `settings.json
 resolves from `PI_CODING_AGENT_DIR` when it's set. Tests point it at a temp dir; you can do the same for a
 throwaway manual session.
 
+### Setting env vars in tests
+
+Use `withEnv({ NAME: value }, fn)` (or `restoreEnv(name, prev)`) from `tests/helpers/env.ts` — never
+`process.env.X = prev`. When `X` was unset, `prev` is `undefined`, and Node and Bun both store that as the
+*string* `"undefined"`. A restored `PI_CODING_AGENT_DIR="undefined"` once sent a straggling run's transcript
+into a relative `undefined/delegate/outputs/...` directory inside the repo. The helper deletes a var that was
+unset and restores it in `finally`, even when `fn` is async or throws. `tests/env-hygiene.test.ts` fails if any
+other test file writes to `process.env` directly.
+
 ## Project layout
 
 ```
