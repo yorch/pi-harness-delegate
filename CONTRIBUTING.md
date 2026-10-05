@@ -74,6 +74,24 @@ dir, never to unset, so a run that outlives its sandbox can't reach your real `~
 - **Never import `tests/helpers/preload.ts` from a test.** Shared constants and helpers live in the side-effect-free
   `tests/helpers/preload-state.ts`.
 
+### Temp directories in tests
+
+Create every temp dir with `makeTempDir(prefix)` from `tests/helpers/tmp.ts` — never `mkdtempSync(join(tmpdir(), …))`
+(`tmpdir()`/`mkdtemp*` anywhere else under `tests/` fails `tests/tmp-hygiene.test.ts`; the preload and the helper are
+the only allow-listed files). A raw `mkdtemp` leaks into `$TMPDIR` whenever its cleanup is forgotten, skipped by a
+throw, or unreachable (a helper that returns only a file *inside* the dir — `acp-runner-test-*` leaked five dirs per run,
+thousands in total). `makeTempDir` records the exact path it hands out:
+
+- A test that owns the dir's lifetime still removes it itself with `removeTempDir(dir)` (usually in `finally`).
+- Whatever is still registered at the end of the run is swept by the preload: from a `bun:test` `afterAll` (bun 1.3.14,
+  the pinned version, never emits `'exit'` at the end of `bun test`), on `'exit'`, and on SIGINT/SIGTERM/SIGHUP. The
+  sweep removes only registered paths (never a glob by prefix, never through a symlink) and never the outer
+  `PI_CODING_AGENT_DIR`. If a registered dir cannot be removed, the run fails loudly (non-zero exit).
+- A child `bun test` a test spawns runs the same preload, so it sweeps its own dirs too, including when it is
+  killed by SIGINT/SIGTERM (`tests/preload.test.ts`); only a SIGKILLed child can leave its own pinned dir behind.
+
+`tempRoot()` is the one way to name the temp root (e.g. to assert a path is under it).
+
 ### Setting env vars in tests
 
 Use `withEnv({ NAME: value }, fn)` (or `restoreEnv(name, prev)`) from `tests/helpers/env.ts` — never
