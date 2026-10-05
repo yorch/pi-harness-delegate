@@ -1,6 +1,9 @@
-import { chmodSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
+import { ensurePrivateDir } from './private-dir.ts';
+import { isRecentForPrune, pruneOrder } from './recency.ts';
+import { sanitizeTemplateText } from './sanitize.ts';
 
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
@@ -56,6 +59,12 @@ export function parseTranscriptMeta(head: string): {
   const hfm = /^-\s*harness:\s*(\w+)/m.exec(head);
   if (hfm) harness = hfm[1];
   return { mode, cost, sessionId, harness };
+}
+
+/** Whether a transcript header says the run errored (`isError: true|false`); `null` when it doesn't say. */
+export function parseTranscriptIsError(head: string): boolean | null {
+  const m = /\bisError: (true|false)\b/.exec(head);
+  return m ? m[1] === 'true' : null;
 }
 
 /** One history entry's harness + cost, for spend aggregation. */
@@ -283,11 +292,31 @@ export function orderFanoutResults<T extends { harness: string }>(order: readonl
  * Groups per-harness metrics/output and rolls up total spend via `aggregateSpend`/`formatSpend`.
  * Header-free — callers wrap this body with their own `## <label> (...)` header.
  */
-export function buildFanoutReport(opts: { runs: FanoutRunSummary[]; skipped: string[]; unknown: string[] }): string {
+export function buildFanoutReport(opts: {
+  runs: FanoutRunSummary[];
+  skipped: string[];
+  unknown: string[];
+  /** Members of a resumed fan-out that recorded no session id — skipped, and said so. */
+  noSession?: string[];
+  /** Members of a resumed fan-out whose run record could not be read. */
+  unreadable?: string[];
+}): string {
   const lines: string[] = [];
-  if (opts.unknown.length > 0) lines.push(`_unknown harness(es), skipped: ${opts.unknown.join(', ')}_`);
-  if (opts.skipped.length > 0) lines.push(`_not installed, skipped: ${opts.skipped.join(', ')}_`);
-  if (opts.unknown.length > 0 || opts.skipped.length > 0) lines.push('');
+  // names may be typed, model-set or read from a run record: shown one-line with escapes/invisibles stripped
+  const names = (xs: readonly string[]) => xs.map(x => sanitizeTemplateText(x, 40)).join(', ');
+  if (opts.unknown.length > 0) lines.push(`_unknown harness(es), skipped: ${names(opts.unknown)}_`);
+  if (opts.skipped.length > 0) lines.push(`_not installed, skipped: ${names(opts.skipped)}_`);
+  if (opts.noSession && opts.noSession.length > 0)
+    lines.push(`_no recorded session id, skipped: ${names(opts.noSession)}_`);
+  if (opts.unreadable && opts.unreadable.length > 0)
+    lines.push(`_unreadable run record, not resumed: ${names(opts.unreadable)}_`);
+  if (
+    opts.unknown.length > 0 ||
+    opts.skipped.length > 0 ||
+    (opts.noSession?.length ?? 0) > 0 ||
+    (opts.unreadable?.length ?? 0) > 0
+  )
+    lines.push('');
 
   const spend = aggregateSpend(opts.runs.map(r => ({ harness: r.harness, cost: r.cost })));
   lines.push(`**Total spend:** ${formatSpend(spend.total)}`, '');
@@ -317,20 +346,15 @@ export function buildClaudeReportContent(opts: {
   return buildReportContent({ harness: 'claude', ...opts });
 }
 
-/** Delete oldest transcript files beyond `maxCount` (0 = keep everything). */
 /**
  * Write one transcript to `dir` (created if needed) and return its path. Transcripts hold the
  * delegated prompt, repo diffs, and the harness's full output — owner-only: the directory is
  * `0700` and each file `0600` (chmod'd explicitly too, since `mkdirSync`'s `mode` only applies to
- * directories it creates and is subject to the umask).
+ * directories it creates and is subject to the umask). A symlinked directory is used as it is, its target's
+ * permissions untouched (`ensurePrivateDir`).
  */
 export function writeTranscript(dir: string, mode: string, text: string): string {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    // best-effort — e.g. a dir owned by someone else; the file mode below still applies
-  }
+  ensurePrivateDir(dir);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const file = join(dir, `${stamp}-${safeSegmentName(mode)}.md`);
   writeFileSync(file, text, { encoding: 'utf8', mode: 0o600 });
@@ -342,26 +366,85 @@ export function writeTranscript(dir: string, mode: string, text: string): string
   return file;
 }
 
-export function pruneOutputs(dir: string, maxCount: number): void {
-  if (maxCount <= 0) return;
+/**
+ * Delete the oldest transcript files (and their sidecars) beyond `maxCount` (0 = keep every transcript), and
+ * stale crash-orphaned sidecar temp files. `keep` names transcripts that must survive this call.
+ */
+export function pruneOutputs(
+  dir: string,
+  maxCount: number,
+  /** Transcript file names (basenames) that must survive this call — the one just written. */
+  keep: readonly string[] = [],
+  now: number = Date.now(),
+): void {
   let files: string[];
   try {
     files = readdirSync(dir);
   } catch {
     return;
   }
+  // Crash-orphaned atomic-write temp files (`<sidecar>.json.<pid>.<12 hex>.tmp`, see writeRunRecord) are
+  // garbage once an hour old. Only that exact generated shape, only regular files (lstat — a link is
+  // never followed). Independent of `maxCount`: "keep every transcript" does not mean "keep the litter".
+  for (const f of files) {
+    if (!SIDECAR_TMP_NAME_RE.test(f)) continue;
+    try {
+      const st = lstatSync(join(dir, f));
+      if (st.isFile() && now - st.mtimeMs > SIDECAR_TMP_MAX_AGE_MS) rmSync(join(dir, f));
+    } catch {
+      // best-effort
+    }
+  }
+  if (maxCount <= 0) return;
+  // Newest first, a future mtime clamped to now (`pruneOrder`): a clock stepped back must not make the newest
+  // REAL transcripts look "last" and delete them — and never demote-and-delete. Protected from deletion: the
+  // transcript this run just wrote (`keep`) and anything modified within PRUNE_PROTECT_MS of now — a concurrent
+  // run's just-written file (a small maxTranscripts must not let two runs prune each other's). Protected files
+  // count toward `maxCount`, so older ones still go.
   const byMtime = files
     .filter(f => f.endsWith('.md'))
-    .map(f => ({ f, mtime: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
-    .sort((a, b) => b.mtime - a.mtime);
-  for (const { f } of byMtime.slice(maxCount)) {
+    .map(f => ({ f, mtimeMs: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
+    .sort((a, b) => pruneOrder({ mtimeMs: a.mtimeMs, name: a.f }, { mtimeMs: b.mtimeMs, name: b.f }, now));
+  const kept = new Set<string>(
+    byMtime.filter(({ f, mtimeMs }) => keep.includes(f) || isRecentForPrune(mtimeMs, now)).map(({ f }) => f),
+  );
+  for (const { f } of byMtime) {
+    if (kept.size >= Math.max(maxCount, keep.length)) break;
+    kept.add(f);
+  }
+  for (const { f } of byMtime) {
+    if (kept.has(f)) continue;
     try {
       rmSync(join(dir, f));
     } catch {
       // best-effort
     }
   }
+  // Run-record sidecars (`<transcript>.json`, see run-record.ts) go with their transcript. Only a file
+  // that is a regular file (lstat — a symlink is never followed or touched), whose name has exactly
+  // the shape the runner generates (`<ISO stamp>-<mode>.json`), and whose transcript is not among the
+  // kept ones (pruned just now, or an orphan) is removed. Every other `.json` — notes a user dropped
+  // in the directory, anything not written by `writeTranscript`+`writeRunRecord` — is left alone.
+  // The transcript is always written before its sidecar, so a live run never looks orphaned.
+  const keptBase = new Set([...kept].map(f => f.replace(/\.md$/, '')));
+  for (const f of files) {
+    if (!SIDECAR_NAME_RE.test(f) || keptBase.has(f.replace(/\.json$/, ''))) continue;
+    try {
+      if (!lstatSync(join(dir, f)).isFile()) continue;
+      rmSync(join(dir, f));
+    } catch {
+      // best-effort
+    }
+  }
 }
+
+/** A temp file `writeRunRecord` crashed before renaming: `<ISO stamp>-<mode>.json.<pid>.<12 hex>.tmp`. */
+export const SIDECAR_TMP_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-.+\.json\.\d+\.[0-9a-f]{12}\.tmp$/;
+/** How old such a temp file must be before it is removed. */
+export const SIDECAR_TMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** The name `writeTranscript` + `recordPathFor` give a sidecar: `2026-10-05T12-00-00-123Z-<mode>.json`. */
+export const SIDECAR_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-.+\.json$/;
 
 /** Human-readable one-liner for a tool call (uses Claude's `description` when present). */
 export function formatToolUse(name: string, input: Record<string, unknown>): string {

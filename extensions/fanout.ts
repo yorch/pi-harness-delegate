@@ -10,6 +10,7 @@ import type { OverlayHandle } from '@earendil-works/pi-tui';
 import { buildFanoutReport, type FanoutRunSummary, formatToolUse, orderFanoutResults } from './activity.ts';
 import { fanoutResumeError, type parseDelegateCommand, resolveDefaults, resolveHarnessList } from './command.ts';
 import { type DelegateConfig, loadConfig } from './config.ts';
+import { effectiveRunLines } from './effective.ts';
 import {
   type DelegateToolParams,
   delegate,
@@ -27,12 +28,13 @@ import {
   isTemplateDanger,
   resolveHarnessName,
 } from './harnesses/registry.ts';
-import type { ActivityEvent } from './harnesses/types.ts';
+import type { ActivityEvent, TierCeiling } from './harnesses/types.ts';
 import { NotifyBatcher } from './notify.ts';
 import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-multi.ts';
+import { newFanoutId } from './run-record.ts';
 import { loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { confirmDangerousCommand, validateDelegateInputs } from './validate.ts';
+import { confirmDangerousCommand, groupTaskScopes, validateDelegateInputs } from './validate.ts';
 /** How long the fan-out overlay lingers on the finished board after the last run resolves, so a
  *  user who looked away still catches the final state instead of it clearing instantly. */
 export const FANOUT_LINGER_MS = 3000;
@@ -56,6 +58,24 @@ export async function closeWhenMounted(getClose: () => (() => void) | null, capM
   });
 }
 
+/** Per-member sessions for a fan-out resume (`planFanoutResume`) — each harness continues its own session. */
+export interface FanoutResumeSessions {
+  sessions: Record<string, string>;
+  noSession: string[];
+  /** Members whose run record could not be read — listed in the report, never silently dropped. */
+  unreadable?: string[];
+  /** Per harness, the template tier the human was shown (`planFanoutResume`) — the run may not exceed it. */
+  tierCeiling?: Record<string, TierCeiling>;
+}
+
+/** The recorded session of harness `h` in a fan-out resume. A harness with no mapping FAILS (throws) —
+ *  it must never fall through to a fresh session that the report would call "resumed". */
+function resumeSessionFor(resume: FanoutResumeSessions, h: string): string {
+  if (!Object.hasOwn(resume.sessions, h))
+    throw new Error(`no recorded session for ${h} in this fan-out — not starting a fresh one`);
+  return resume.sessions[h];
+}
+
 /** `delegate({harness:"all"|"a,b"})` — resolve the requested harnesses to detected installs, run the
  *  existing `delegate()` engine concurrently across all of them (bounded by `maxConcurrent` via
  *  `acquireSlot({wait:true})` — see concurrency.ts), and mechanically synthesize one comparison
@@ -67,6 +87,7 @@ export async function runFanoutTool(
   params: DelegateToolParams,
   signal: AbortSignal | undefined,
   onUpdate: ((u: ToolProgressUpdate) => void) | undefined,
+  resume?: FanoutResumeSessions,
 ): Promise<{ content: { type: 'text'; text: string }[]; details: Record<string, unknown>; usage?: Usage }> {
   const resumeErr = fanoutResumeError(params.harness, params.sessionId);
   if (resumeErr) throw new Error(resumeErr);
@@ -91,6 +112,7 @@ export async function runFanoutTool(
   }
 
   const mode = params.mode ?? config.defaultMode;
+  const fanoutId = newFanoutId();
 
   type TaskResult = FanoutRunSummary & {
     usage?: import('./harnesses/types.ts').StreamedUsage | null;
@@ -98,6 +120,7 @@ export async function runFanoutTool(
   const tasks = resolved.map(async (h): Promise<TaskResult> => {
     onUpdate?.({ content: [{ type: 'text', text: `[${h}] queued…` }], details: { progress: 0.5 } });
     try {
+      const sessionId = resume ? resumeSessionFor(resume, h) : params.sessionId;
       const run = await runDelegateForTool(
         pi,
         ctx,
@@ -111,11 +134,14 @@ export async function runFanoutTool(
           maxBudgetUsd: params.maxBudgetUsd,
           timeoutSec: params.timeoutSec,
           allowDangerous: params.allowDangerous === true,
-          sessionId: params.sessionId,
+          sessionId,
           pr: params.pr,
           addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
           waitForSlot: true,
+          fanoutId,
+          origin: 'tool',
+          tierCeiling: resume?.tierCeiling ? (resume.tierCeiling[h] ?? 'unavailable') : undefined,
           onAcquired: () =>
             onUpdate?.({ content: [{ type: 'text', text: `[${h}] running…` }], details: { progress: 0.5 } }),
         },
@@ -162,7 +188,13 @@ export async function runFanoutTool(
     }
   }
 
-  const report = buildFanoutReport({ runs, skipped, unknown });
+  const report = buildFanoutReport({
+    runs,
+    skipped,
+    unknown,
+    noSession: resume?.noSession,
+    unreadable: resume?.unreadable,
+  });
   const okCount = runs.filter(r => r.ok).length;
   const head = `## delegate all — ${mode} (${okCount}/${runs.length} ok)`;
   const usage = mapClaudeUsage({
@@ -174,7 +206,7 @@ export async function runFanoutTool(
   });
   return {
     content: [{ type: 'text', text: `${head}\n\n${report}` }],
-    details: { fanout: true, harness: 'all', mode, harnesses: resolved, skipped, unknown, runs },
+    details: { fanout: true, fanoutId, harness: 'all', mode, harnesses: resolved, skipped, unknown, runs },
     usage,
   };
 }
@@ -192,6 +224,9 @@ export interface FanoutSpec {
   model?: string;
   budget?: number;
   timeoutSec?: number;
+  /** The timeout / budget came from a stored run record: they may only narrow what is configured. */
+  storedTimeout?: boolean;
+  storedBudget?: boolean;
   sessionId?: string;
   pr?: string;
   addDirs?: string[];
@@ -199,6 +234,8 @@ export interface FanoutSpec {
   isDanger: boolean;
   /** Only ever true after `confirmDangerousCommand` approved this invocation's --allow-dangerous. */
   allowDangerous?: boolean;
+  /** The widest template tier a human was shown for this harness (rerun / resume) — see `DelegateOptions.tierCeiling`. */
+  tierCeiling?: TierCeiling;
 }
 export interface FanoutOutcome {
   harnessName: string;
@@ -218,6 +255,7 @@ export async function runFanoutConcurrent(
   ctx: ExtensionContext,
   mode: string | undefined,
   specs: FanoutSpec[],
+  fanoutId?: string,
 ): Promise<FanoutOutcome[]> {
   const ac = new AbortController();
   let cancelledAll = false;
@@ -274,7 +312,8 @@ export async function runFanoutConcurrent(
       model: spec.model,
       maxBudgetUsd: spec.budget,
       timeoutSec: spec.timeoutSec,
-      timeoutSecMayRaise: true, // command path only: --timeout= is human-typed
+      timeoutSecMayRaise: spec.storedTimeout !== true, // command path only: --timeout= is human-typed; a stored (rerun) value never raises
+      maxBudgetNarrowOnly: spec.storedBudget === true,
       sessionId: spec.sessionId,
       pr: spec.pr,
       addDirs: spec.addDirs,
@@ -282,6 +321,9 @@ export async function runFanoutConcurrent(
       allowDangerous: spec.allowDangerous === true, // never from config — only a confirmed --allow-dangerous
       signal: ac.signal,
       waitForSlot: true,
+      fanoutId,
+      origin: 'command',
+      tierCeiling: spec.tierCeiling,
       onAcquired: () => setRow({ status: 'running', startedAt: Date.now() }),
       onStream: t => {
         liveTail = (liveTail + t).slice(-200);
@@ -385,6 +427,7 @@ export async function runFanoutCommand(
   ui: RunUiState,
   ctx: ExtensionContext,
   parsed: ReturnType<typeof parseDelegateCommand>,
+  resume?: FanoutResumeSessions,
 ): Promise<void> {
   const harnessSpec = parsed.harness as string;
   const modeForReport = parsed.mode ?? loadConfig().defaultMode;
@@ -446,6 +489,12 @@ export async function runFanoutCommand(
     // the template delegate() will actually run for this harness (default mode when none given),
     // judged by the engine's own danger gate — so the banner can't disagree with the engine
     const isDanger = isTemplateDanger(h, templates.get(modeForReport));
+    if (resume && !Object.hasOwn(resume.sessions, h)) {
+      const message = `no recorded session for ${h} in this fan-out — not starting a fresh one`;
+      immediateFailures.push({ harness: h, ok: false, cost: null, error: message });
+      batcher.failure(`${h}: ${message}`);
+      continue;
+    }
     specs.push({
       harnessName: h,
       task: resolvedTaskScope.task,
@@ -453,11 +502,14 @@ export async function runFanoutCommand(
       model: parsed.model,
       budget: parsed.budget,
       timeoutSec: parsed.timeoutSec,
-      sessionId: parsed.sessionId,
+      storedTimeout: parsed.storedTimeout,
+      storedBudget: parsed.storedBudget,
+      sessionId: resume ? resume.sessions[h] : parsed.sessionId, // presence checked above
       pr: parsed.pr,
       addDirs: parsed.addDirs,
       verify: parsed.verify,
       isDanger,
+      tierCeiling: parsed.tierCeiling ? (parsed.tierCeiling[h] ?? 'unavailable') : undefined,
     });
   }
 
@@ -465,10 +517,32 @@ export async function runFanoutCommand(
   // harness, and never a run before it's approved. A decline (or no UI) runs nothing.
   if (parsed.allowDangerous && specs.length > 0) {
     try {
+      const groups = groupTaskScopes(specs.map(s => ({ name: s.harnessName, task: s.task, scope: s.scope })));
       await confirmDangerousCommand(ctx, {
+        ...parsed,
+        // each member's EFFECTIVE task / scope (a template default fills in what was not typed)
+        task: groups[0].task,
+        scope: groups[0].scope,
+        taskGroups: groups,
         harnesses: specs.map(s => s.harnessName),
         mode: modeForReport,
-        task: specs[0].task,
+        sessionId: resume ? undefined : parsed.sessionId,
+        sessions: resume ? resume.sessions : undefined,
+        effective: effectiveRunLines(
+          ctx,
+          loadConfig(),
+          specs.map(s => s.harnessName),
+          modeForReport,
+          {
+            model: parsed.model,
+            budgetUsd: parsed.budget,
+            budgetNarrowOnly: parsed.storedBudget,
+            timeoutSec: parsed.timeoutSec,
+            timeoutMayRaise: parsed.storedTimeout !== true,
+            verify: parsed.verify,
+            allowDangerous: true, // this IS the danger confirmation: every member runs at the danger tier (verify runs)
+          },
+        ),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -482,7 +556,8 @@ export async function runFanoutCommand(
     }
   }
 
-  const outcomes = specs.length > 0 ? await runFanoutConcurrent(pi, ui, ctx, parsed.mode, specs) : [];
+  const fanoutId = newFanoutId();
+  const outcomes = specs.length > 0 ? await runFanoutConcurrent(pi, ui, ctx, parsed.mode, specs, fanoutId) : [];
   const completed: FanoutRunSummary[] = outcomes.map(outcome => {
     if (outcome.cancelled || !outcome.result) {
       const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
@@ -507,12 +582,21 @@ export async function runFanoutCommand(
 
   const runs = orderFanoutResults(resolved, [...immediateFailures, ...completed]);
   const okCount = runs.filter(r => r.ok).length;
-  const report = buildFanoutReport({ runs, skipped, unknown });
+  const report = buildFanoutReport({
+    runs,
+    skipped,
+    unknown,
+    noSession: resume?.noSession,
+    unreadable: resume?.unreadable,
+  });
   injectReport(ctx, {
     harness: 'all',
     mode: modeForReport,
     metrics: `${okCount}/${runs.length} ok`,
-    body: report,
+    body:
+      specs.length > 0
+        ? `${report}\n\n_fan-out id: ${fanoutId} — resume every member: /delegate --resume=${fanoutId} <prompt>_`
+        : report,
   });
   batcher.flush();
 }

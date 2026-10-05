@@ -423,6 +423,7 @@ test('formatModeRow: shows warnings ahead of the description', () => {
     hasDefaultTask: false,
     hasDefaultScope: false,
     hasVerify: true,
+    usesVariables: false,
     needsHarness: false,
     warnings: ['bad timeout'],
   });

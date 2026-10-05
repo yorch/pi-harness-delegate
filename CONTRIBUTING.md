@@ -99,6 +99,16 @@ As a runtime backstop, the preload's `afterEach` fails any test that leaves an e
 later tests aren't affected. It catches what a static scan can't, but
 it's not a proof: a test that coerces and cleans up within its own body slips past it.
 
+### Tests of confirmation dialogs
+
+Measure what is on screen with pi's own component, never by counting `\n` or assuming a width:
+`tests/helpers/dialog.ts` (`renderDialog(title, message, {columns, rows})` renders the real
+`ExtensionSelectorComponent`, whose last `rows` rows are what a terminal shows; `unwrap`/`textOf` join the
+`  ┆ ` continuation rows back for `includes`/`match` checks). `tests/helpers/screen.ts` (`screenOf`) models what a terminal shows in pi's regular layout (document tail + footer) and in its fullscreen layout (the real `VStack` dock, which clips the dialog's bottom) with the status/footer rows at their worst: assert Yes/No and every critical row on those screens, at 40x24, 50x30, 60x24, 80x24 and larger. The layout reads `process.stdout.columns`/`rows` (as they are; unknown = 80x24, under 40 columns refused):
+`withSandbox` pins 80x40 for a test, `testAt80x40` (tests/helpers/viewport.ts) does the same for a whole file, `withViewport(cols, rows, fn)` (tests/helpers/viewport.ts) sets another, and
+the pure APIs take a `viewport` argument. A new confirmation call site needs a fully-populated case in
+`tests/confirm-call-sites.test.ts`.
+
 ### Tests that spawn processes
 
 Wait on conditions, not clocks: `tests/helpers/wait.ts` (`waitFor`, `readPid`, `waitForProcessExit`,
@@ -143,7 +153,14 @@ extensions/            # the pi extension
   index.ts             # entry: tool + /delegate command registration, single-run overlay
   engine.ts            # delegate() — the shared single-run engine — and its helpers
   fanout.ts            # fan-out (tool + /delegate all/comma-list), multi-run overlay driver
-  history.ts           # /delegate history
+  history.ts           # /delegate history (+ history-filter.ts: pure filter parsing/applying)
+  run-record.ts        # run record sidecar (<transcript>.json): schema, tolerant parser, writer
+  rerun.ts             # /delegate rerun: record selection + the pure rerun planner
+  recency.ts           # the "newest" ordering for choosing a run (future-dated files last) and the clamped prune ordering; private-dir.ts: ensurePrivateDir
+  sanitize.ts          # display escaping, the stored-text reject list
+  confirm-layout.ts    # confirmation bodies laid out for the real terminal (free text first, critical lines last, own wrapping, row budget)
+  effective.ts         # what a run will actually apply (template/config resolved), for confirmations
+  fanout-resume.ts     # resume a whole fan-out by its fan-out id
   subcommands.ts       # /delegate list | status | config | config init
   harnesses/           # harness abstraction (claude, codex, opencode, amp, devin) + registry
   runner.ts            # stdout transport: generic runHarness spawn+readline loop

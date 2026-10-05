@@ -148,6 +148,8 @@ export interface ModeInfo {
   hasDefaultScope: boolean;
   /** A host-run check command is configured (its text is never shown). */
   hasVerify: boolean;
+  /** The template body positions `{{task}}`/`{{scope}}`/… placeholders (boolean only — never the body). */
+  usesVariables: boolean;
   /** Where a run that names no harness goes: the `harnesses:` of the copy `templateForHarnessDefault`
    *  picks (sanitized names) — the same copy the `delegate` tool and `/delegate` use. */
   defaultHarnesses?: string[];
@@ -183,6 +185,7 @@ function copyDifferences(a: DelegateTemplate, b: DelegateTemplate): string[] {
   if (a.timeoutSec !== b.timeoutSec) out.push('timeout');
   if (!same(a.harnesses, b.harnesses)) out.push('harnesses');
   if (Boolean(a.verify) !== Boolean(b.verify)) out.push('host check');
+  if (Boolean(a.usesVariables) !== Boolean(b.usesVariables)) out.push('variables');
   if (Boolean(a.defaultTask) !== Boolean(b.defaultTask)) out.push('default task');
   if (Boolean(a.defaultScope) !== Boolean(b.defaultScope)) out.push('default scope');
   if (
@@ -261,6 +264,7 @@ export function collectModes(
           hasDefaultTask: Boolean(t.defaultTask),
           hasDefaultScope: Boolean(t.defaultScope),
           hasVerify: Boolean(t.verify),
+          usesVariables: Boolean(t.usesVariables),
           defaultHarnesses: defaults?.harnesses?.map(n => sanitizeTemplateText(n, MODE_TEXT_LIMITS.name)),
           needsHarness: !defaults,
           timeoutSec: t.timeoutSec,
@@ -314,6 +318,7 @@ export function formatModeRow(m: ModeInfo): string {
     m.defaultHarnesses ? `harnesses=${m.defaultHarnesses.join(',')}` : '',
     m.timeoutSec !== undefined ? `timeout=${m.timeoutSec}s` : '',
     m.hasVerify ? '✓ verify' : '',
+    m.usesVariables ? '✓ variables' : '',
     m.variesByHarness ? `≠ per harness: ${m.differsIn.join(', ')} (shown: ${m.availability[0]?.harness})` : '',
   ];
   const warn = m.warnings.length > 0 ? `⚠ ${m.warnings.join('; ')} · ` : '';
@@ -363,6 +368,7 @@ export function formatModesForModel(
       );
     else if (m.needsHarness)
       extras.push(`default harness when none given: none — not available on ${ctx.defaultHarness}, pass harness`);
+    if (m.usesVariables) extras.push('uses template variables: yes');
     if (m.timeoutSec !== undefined) extras.push(`timeout: ${m.timeoutSec}s`);
     if (m.model) extras.push(`model: ${JSON.stringify(m.model)}`);
     lines.push(`  ${extras.join(' · ')}`);

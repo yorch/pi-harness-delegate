@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { templateHarnessDefault } from '../extensions/command.ts';
 import { parseTemplate, parseTemplateHarnesses } from '../extensions/templates.ts';
+import { unwrap } from './helpers/dialog.ts';
 import {
   CLAUDE_RESULT,
   CODEX_RESULT_LINES,
@@ -99,7 +100,7 @@ test('/delegate: a template fan-out keeps the --allow-dangerous gate — one con
         const declined = uiCtx(cwd, false);
         await commands.get('delegate')?.handler('fan --allow-dangerous do it', declined.ctx);
         assert.equal(declined.asked.length, 1);
-        assert.match(declined.asked[0], /all 2 harnesses \(claude, codex\)/);
+        assert.match(declined.asked[0], /\[claude, codex\]\/\w+/);
         assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'), 'a decline runs nothing');
 
         const errs: string[] = [];
@@ -201,7 +202,7 @@ test('delegate tool: the allowDangerous confirm names every template harness; de
           /declined/,
         );
         assert.equal(declined.asked.length, 1);
-        assert.match(declined.asked[0], /run claude,codex fan with DANGER/);
+        assert.match(unwrap(declined.asked[0]), /\[claude, codex\]\/fan/);
         await assert.rejects(
           () => tools.get('delegate')?.execute('t', params, undefined, undefined, headless(cwd)) ?? Promise.resolve(),
           /no interactive UI to confirm it with/,
@@ -480,7 +481,7 @@ test('harness-partition fan-out default keeps the single allowDangerous confirm 
             /declined/,
           );
           assert.equal(declined.asked.length, 1);
-          assert.match(declined.asked[0], /run codex,claude pfan with DANGER/);
+          assert.match(unwrap(declined.asked[0]), /\[codex, claude\]\/pfan/);
           assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
         });
       });

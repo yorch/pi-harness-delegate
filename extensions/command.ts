@@ -1,6 +1,8 @@
+import type { TierCeiling } from './harnesses/types.ts';
 import {
   callTimeoutError,
   type DelegateTemplate,
+  quoteValue,
   TEMPLATE_TIMEOUT_MAX_SEC,
   TEMPLATE_TIMEOUT_MIN_SEC,
 } from './templates.ts';
@@ -33,6 +35,19 @@ export interface DelegateCommandArgs {
    * — never inherited from config, never applied headless. Absent unless explicitly true.
    */
   allowDangerous?: boolean;
+  /**
+   * Internal — set only by the rerun planner, never parsed from text: the `timeoutSec` / `budget`
+   * came from a stored run record (untrusted data), so each may only NARROW what is configured — the
+   * same rule as a model-set tool param. A human-typed `--timeout=`/`--budget=` on the rerun line
+   * replaces the stored value and is not marked.
+   */
+  storedTimeout?: boolean;
+  storedBudget?: boolean;
+  /**
+   * Internal — set only by the rerun / fan-out-resume planners: per harness, the widest template tier the
+   * human was shown when confirming. The engine refuses a template that is wider when the run starts.
+   */
+  tierCeiling?: Record<string, TierCeiling>;
   /** Flag values that were given but are unusable (e.g. `--budget=0`) — the handler reports these
    *  and runs nothing, rather than silently dropping the flag. Absent when there are none. */
   errors?: string[];
@@ -110,7 +125,7 @@ export function templateHarnessDefault(harnesses: readonly string[] | undefined)
 /** The error for a harness spec that normalizes to nothing (`,`, `" , "`) — shared by `/delegate`'s
  *  `--harness=` and the `delegate` tool's `harness` param, so neither silently runs the default. */
 export function emptyHarnessSpecError(raw: string): string {
-  return `harness ${JSON.stringify(raw)} names no harness: give a harness name, a comma-separated list, or "all" (omit it for the default harness)`;
+  return `harness ${quoteValue(raw, 120)} names no harness: give a harness name, a comma-separated list, or "all" (omit it for the default harness)`;
 }
 
 /**
@@ -120,6 +135,33 @@ export function emptyHarnessSpecError(raw: string): string {
  * `--budget` token that starts a word is a flag. Every other `--word` stays in the text untouched.
  */
 const FLAG_OR_PROSE = /`[^`]*`|"[^"]*"|(^|\s)--([a-zA-Z][a-zA-Z-]*)(?:=(?:"([^"]*)"|'([^']*)'|(\S*))|(?=\s|$))/g;
+
+/**
+ * Pull standalone bare flags (`--here`, `--fanout`, …: no `=value`) named in `names` out of `raw`,
+ * using the same quote/backtick-aware pass as `parseDelegateCommand`, so one inside a quoted or
+ * backticked span (or a `--verify="… --here …"` value) is left alone. Returns the text without them.
+ * For subcommands (like `rerun`) whose own flags the main parser doesn't know.
+ */
+export function extractBareFlags<N extends string>(raw: string, names: readonly N[]): { rest: string; found: Set<N> } {
+  const found = new Set<N>();
+  const rest = raw.replace(
+    FLAG_OR_PROSE,
+    (
+      m: string,
+      lead: string | undefined,
+      k: string | undefined,
+      dq: string | undefined,
+      sq: string | undefined,
+      bare: string | undefined,
+    ) => {
+      if (k === undefined || dq !== undefined || sq !== undefined || bare !== undefined) return m;
+      if (!(names as readonly string[]).includes(k)) return m;
+      found.add(k as N);
+      return lead ?? '';
+    },
+  );
+  return { rest, found };
+}
 
 /** Every flag `parseDelegateCommand` acts on — used to notice one stranded inside quoted prose. */
 const RECOGNIZED_FLAGS = new Set([
@@ -295,7 +337,7 @@ export function isFanoutSpec(harness: string | undefined): boolean {
  */
 export function fanoutResumeError(harnessSpec: string | undefined, sessionId: string | undefined): string | null {
   if (!sessionId || !isFanoutSpec(harnessSpec)) return null;
-  return `cannot resume session "${sessionId}" across a fan-out (harness "${harnessSpec}") — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=${sessionId} …)`;
+  return `cannot resume session ${quoteValue(sessionId, 200)} across a fan-out (harness ${quoteValue(harnessSpec ?? '', 200)}) — a session id belongs to one harness; resume it with that single harness instead (e.g. /delegate --harness=<name> --resume=<session id> …); to resume every member of a past fan-out, pass its fan-out id instead (--resume=fan_…, shown in the fan-out report)`;
 }
 
 export type HarnessFilterResolution =

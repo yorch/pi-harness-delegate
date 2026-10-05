@@ -178,7 +178,7 @@ test('confirmDangerousCommand: fails closed with no UI (or no confirm dialog)', 
   for (const ctx of [{ hasUI: false }, { hasUI: true, ui: {} }]) {
     await assert.rejects(
       () => confirmDangerousCommand(ctx as never, { harnesses: ['claude'], mode: 'implement', task: 't' }),
-      /--allow-dangerous for claude implement needs interactive confirmation.*headless/,
+      /--allow-dangerous for claude\/implement needs interactive confirmation.*headless/,
     );
   }
 });
@@ -199,9 +199,9 @@ test('confirmDangerousCommand: one prompt naming every harness, the mode, and fu
     /declined — nothing was run/,
   );
   assert.equal(asked.length, 1);
-  assert.match(asked[0], /all 2 harnesses \(claude, codex\)/);
-  assert.match(asked[0], /"yolo"/);
-  assert.match(asked[0], /DANGER permission — full, unrestricted/);
+  assert.match(asked[0], /\[claude, codex\]\/\w+/);
+  assert.match(asked[0], /\/yolo,/);
+  assert.match(asked[0].replace(/\n {2}┆ /g, ''), /unrestricted: no sandbox or approvals/);
   assert.match(asked[0], /wipe it/);
   await confirmDangerousCommand({ hasUI: true, ui: { confirm: async () => true } } as never, {
     harnesses: ['claude'],

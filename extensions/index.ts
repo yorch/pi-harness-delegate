@@ -28,6 +28,7 @@ import {
   aliasUsage,
   delegateUsage,
   emptyHarnessSpecError,
+  extractBareFlags,
   isFanoutSpec,
   normalizeHarnessSpec,
   parseDelegateCommand,
@@ -36,9 +37,11 @@ import {
   templateHarnessDefault,
 } from './command.ts';
 import { type DelegateConfig, loadConfig } from './config.ts';
+import { effectiveRunLines, resolveRunTargets } from './effective.ts';
 import {
   type DelegateToolParams,
   delegate,
+  effectiveTemplateTier,
   formatCost,
   injectReport,
   isProjectTrusted,
@@ -48,6 +51,7 @@ import {
   takePendingReport,
 } from './engine.ts';
 import { closeWhenMounted, type RunUiState, runFanoutCommand, runFanoutTool } from './fanout.ts';
+import { type FanoutResumePlan, formatFanoutResumePlan, listCapped, planFanoutResume } from './fanout-resume.ts';
 import {
   ALIASES,
   getHarness,
@@ -56,9 +60,10 @@ import {
   isTemplateDanger,
   resolveHarnessName,
 } from './harnesses/registry.ts';
-import type { ActivityEvent } from './harnesses/types.ts';
+import type { ActivityEvent, NormalizedPermission, TierCeiling } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
-import { showHistory } from './history.ts';
+import { currentHistoryView, showHistory } from './history.ts';
+import { HISTORY_FLAGS_HINT, parseHistoryArgs } from './history-filter.ts';
 import {
   collectModes,
   formatModesForModel,
@@ -68,10 +73,20 @@ import {
   templateViews,
 } from './modes.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
+import { planRerun, readAllRecordsDetailed, selectRecord } from './rerun.ts';
+import { isFanoutId, isRunId } from './run-record.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
-import { callTimeoutError, type DelegateTemplate, loadTemplates } from './templates.ts';
+import { callTimeoutError, type DelegateTemplate, loadAllTemplates, loadTemplates, quoteValue } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { confirmDangerousCommand, confirmDangerousToolCall, confirmToolAddDirs } from './validate.ts';
+import {
+  confirmDangerousCommand,
+  confirmDangerousToolCall,
+  confirmToolAddDirs,
+  safeName,
+  steeringFromCommand,
+  steeringFromTool,
+  steeringRefusal,
+} from './validate.ts';
 
 /** Tool-result `details` for the `delegate` tool (and its partial progress updates). */
 type DelegateToolDetails = Record<string, unknown>;
@@ -85,6 +100,7 @@ const DELEGATE_TOOL_GUIDELINES: readonly string[] = [
   'mode selects the template and its permission level: review/plan/security-audit are readonly; implement/docs/general are edit. Custom template names also work. Some templates verify their own work (e.g. running tests) automatically after the harness finishes — that is not something you configure here.',
   'harness: "all" or a comma list (e.g. "codex,opencode") fans the same task out to each detected harness and returns one synthesized comparison report — costs multiply, so only use it when the user actually wants a multi-harness comparison.',
   'sessionId resumes a previous delegated session instead of starting fresh — pass the exact session id from a previous run\'s details (letters, digits, . _ : - only). It cannot be combined with a fan-out harness ("all" or a comma list) — a session belongs to one harness.',
+  "resumeFanout continues a past fan-out: pass its fan-out id (fan_…, printed in that fan-out's report/details) and every member resumes its own recorded session on its own harness. Do not combine it with harness or sessionId; it cannot resume anything the user's run records do not name, and the allowDangerous / addDirs confirmations apply as usual.",
   'pr must be a PR number, an http(s) pull-request URL (https://<host>/<owner>/<repo>/pull/<n>), or owner/repo#123.',
   'addDirs inside the working directory are accepted as-is; any entry outside it asks the human to confirm interactively and is refused in a non-interactive session.',
   'Do not set allowDangerous unless the user explicitly asks for unrestricted access (danger permission). Setting it always asks the human to confirm interactively; in a non-interactive session it is refused outright.',
@@ -149,6 +165,12 @@ const DELEGATE_TOOL_PARAMS = Type.Object({
       description: 'Resume an existing delegated session (pass its session id from a previous run details).',
     }),
   ),
+  resumeFanout: Type.Optional(
+    Type.String({
+      description:
+        "Resume a past fan-out: its fan-out id (fan_…, from that fan-out's report or details). Every member continues its own recorded session on its own harness. Cannot be combined with harness or sessionId. Only sessions the user's own run records name can be resumed, and the usual allowDangerous / addDirs confirmations still apply.",
+    }),
+  ),
   allowDangerous: Type.Optional(
     Type.Boolean({
       description:
@@ -193,6 +215,25 @@ export default function (pi: ExtensionAPI) {
       mode || config.defaultMode,
     );
 
+  /** Today's tier of `mode` on `harness` — the engine's own classification of the template as it loads NOW
+   *  (project-local templates only when pi's trust store trusts the project) — or `null` when it does not resolve. */
+  const todaysModeTier =
+    (ctx: ExtensionContext) =>
+    (harness: string, mode: string): NormalizedPermission | null => {
+      const t = loadTemplates(ctx.cwd, harness, isProjectTrusted(ctx)).get(mode);
+      return t ? effectiveTemplateTier(harness, t) : null;
+    };
+
+  /** Ask a person to approve a fan-out resume plan. A UI session only: with nobody to ask, `false`. */
+  const confirmResumePlan = async (ctx: ExtensionContext, text: string): Promise<boolean> => {
+    if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') return false;
+    try {
+      return await ctx.ui.confirm('Resume this recorded fan-out?', text);
+    } catch {
+      return false;
+    }
+  };
+
   // ── Tools ────────────────────────────────────────────────────────────────
 
   /**
@@ -226,9 +267,65 @@ export default function (pi: ExtensionAPI) {
       // "a,b"` (detection filtering, waitForSlot queueing, fanoutResumeError). Resolved *before* the
       // confirm gates, so the allowDangerous confirm names every harness that will run and the
       // addDirs confirm (headless: refusal) covers the whole fan-out.
+      // A fan-out resume names its own harnesses (the recorded members) — see fanout-resume.ts.
+      let resumePlan: Extract<FanoutResumePlan, { ok: true }> | undefined;
+      if (rawParams.resumeFanout !== undefined) {
+        if (rawParams.sessionId !== undefined)
+          throw new Error(
+            "resumeFanout and sessionId are mutually exclusive — a fan-out resume uses each member's own recorded session",
+          );
+        if (harness !== undefined)
+          throw new Error('resumeFanout resumes the harnesses recorded for that fan-out — omit harness');
+        if (!isFanoutId(rawParams.resumeFanout))
+          throw new Error(
+            `resumeFanout must be a fan-out id (fan_ + 16 hex), got ${quoteValue(rawParams.resumeFanout.slice(0, 40), 100)}`,
+          );
+        const known = readAllRecordsDetailed();
+        // a model-set `mode` is compared with the recorded tier like the recorded mode itself (it is not a human's choice)
+        const plan = planFanoutResume(
+          rawParams.resumeFanout,
+          known.records.map(l => l.record),
+          ctx.cwd,
+          { modeTier: todaysModeTier(ctx), mode: rawParams.mode, modeTypedByHuman: false },
+          known.skipped,
+        );
+        if (!plan.ok) throw new Error(plan.error);
+        // The model is asking to continue sessions that already hold context and tool history, on every
+        // member, with a prompt of its own: a person always sees the plan and approves it — and with nobody
+        // to ask (headless) it is refused outright.
+        if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function')
+          throw new Error(
+            `resumeFanout ${rawParams.resumeFanout} needs a person to approve it, but there is no interactive UI — refusing (resume it yourself with /delegate --resume=${rawParams.resumeFanout} <prompt>)`,
+          );
+        // every param the model set that steers the run is in the plan; a task / scope too long to show whole is
+        // refused (the model has no way to say "I accept it is not shown in full")
+        const steering = {
+          ...steeringFromTool(rawParams),
+          effective: effectiveRunLines(ctx, config, plan.harnesses, rawParams.mode ?? plan.mode, {
+            model: rawParams.model,
+            budgetUsd: rawParams.maxBudgetUsd,
+            timeoutSec: rawParams.timeoutSec,
+            task: rawParams.task,
+            // the plan is shown before the danger confirm, but is what a danger run would do: show that tier
+            allowDangerous: rawParams.allowDangerous === true,
+          }),
+        };
+        const tooBig = steeringRefusal(steering);
+        if (tooBig) throw new Error(`resumeFanout ${rawParams.resumeFanout} refused: ${tooBig}`);
+        const shown = formatFanoutResumePlan(rawParams.resumeFanout, plan, 'tool', steering);
+        if (!shown.ok) throw new Error(`resumeFanout ${rawParams.resumeFanout} refused: ${shown.reason}`);
+        if (!(await confirmResumePlan(ctx, shown.lines.join('\n'))))
+          throw new Error(`resumeFanout ${rawParams.resumeFanout} was declined by the user — nothing was run`);
+        resumePlan = plan;
+        harness = plan.harnesses.join(',');
+      }
       if (harness === undefined)
         harness = templateHarnessDefault(templateForDefaults(ctx, config, rawParams.mode)?.harnesses);
-      const params: DelegateToolParams = { ...rawParams, harness };
+      const params: DelegateToolParams = {
+        ...rawParams,
+        harness,
+        ...(resumePlan ? { mode: rawParams.mode ?? resumePlan.mode } : {}),
+      };
       // an out-of-range per-call timeout fails the call before any confirm prompt, and once — not
       // once per fan-out row
       if (params.timeoutSec !== undefined) {
@@ -237,12 +334,31 @@ export default function (pi: ExtensionAPI) {
       }
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
-      if (params.allowDangerous === true) await confirmDangerousToolCall(ctx, params);
+      if (params.allowDangerous === true) {
+        // headless: nobody to ask, so fail closed BEFORE probing any binary (detection is only for what the dialog names)
+        const interactive = ctx.hasUI && typeof ctx.ui?.confirm === 'function';
+        const target = interactive ? await resolveRunTargets(config, params.harness, params.mode) : undefined;
+        await confirmDangerousToolCall(
+          ctx,
+          params,
+          target && {
+            harnesses: target.harnesses,
+            mode: target.mode,
+            effective: effectiveRunLines(ctx, config, target.harnesses, target.mode, {
+              model: params.model,
+              budgetUsd: params.maxBudgetUsd,
+              timeoutSec: params.timeoutSec,
+              task: params.task,
+              allowDangerous: true, // this IS the danger confirmation: the run has the danger tier (verify runs)
+            }),
+          },
+        );
+      }
       // Same trust model for model-set addDirs: inside cwd is fine, anything outside needs a human
       // (fail closed without a UI). Covers single, fan-out, and the claude_delegate alias.
       await confirmToolAddDirs(ctx, params.addDirs);
-      if (params.harness && isFanoutSpec(params.harness)) {
-        return runFanoutTool(pi, ctx, config, params, signal, onUpdate);
+      if (params.harness && (resumePlan || isFanoutSpec(params.harness))) {
+        return runFanoutTool(pi, ctx, config, params, signal, onUpdate, resumePlan);
       }
       const { content, details, result } = await runDelegateForTool(
         pi,
@@ -261,6 +377,7 @@ export default function (pi: ExtensionAPI) {
           pr: params.pr,
           addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
+          origin: 'tool',
         },
         signal,
         onUpdate,
@@ -346,7 +463,7 @@ export default function (pi: ExtensionAPI) {
         const requested = params.harness.trim().toLowerCase();
         if (!isKnownHarness(requested))
           throw new Error(
-            `unknown harness ${JSON.stringify(params.harness.slice(0, 40))}. Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
+            `unknown harness ${quoteValue(params.harness.slice(0, 40), 100)}. Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
           );
         filter = resolveHarnessName(requested);
       }
@@ -399,6 +516,9 @@ export default function (pi: ExtensionAPI) {
       model?: string;
       budget?: number;
       timeoutSec?: number;
+      /** Timeout / budget from a stored run record (rerun): may only narrow what is configured. */
+      storedTimeout?: boolean;
+      storedBudget?: boolean;
       sessionId?: string;
       pr?: string;
       addDirs?: string[];
@@ -407,6 +527,8 @@ export default function (pi: ExtensionAPI) {
       isDanger: boolean;
       /** Only ever true after `confirmDangerousCommand` approved this invocation's --allow-dangerous. */
       allowDangerous?: boolean;
+      /** The widest template tier a human was shown (rerun) — see `DelegateOptions.tierCeiling`. */
+      tierCeiling?: TierCeiling;
     },
   ): Promise<{
     result: Awaited<ReturnType<typeof delegate>> | null;
@@ -497,12 +619,15 @@ export default function (pi: ExtensionAPI) {
       model,
       maxBudgetUsd: budget,
       timeoutSec,
-      timeoutSecMayRaise: true, // human-typed --timeout= — the tool path never sets this
+      timeoutSecMayRaise: opts.storedTimeout !== true, // human-typed --timeout= — the tool path never sets this; a stored (rerun) value never raises
+      maxBudgetNarrowOnly: opts.storedBudget === true,
       sessionId,
       pr,
       addDirs,
       verify,
       allowDangerous, // never from config.allowDangerous — only a confirmed --allow-dangerous
+      origin: 'command',
+      tierCeiling: opts.tierCeiling,
       signal: ac.signal,
       onStream: t => {
         liveTail = (liveTail + t).slice(-400);
@@ -562,7 +687,354 @@ export default function (pi: ExtensionAPI) {
     return { result: failed ? null : result, error: runState.error, cancelled };
   };
 
-  const makeHandler = (forcedHarness?: string) => async (args: string, ctx: ExtensionContext) => {
+  /** The shared tail of every run-starting command: default-harness resolution, fan-out dispatch, the
+   *  danger confirm, the single-run overlay and the report. `/delegate <prompt>` and `/delegate rerun`
+   *  both end up here, so a rerun passes through exactly the same gates as a typed command. */
+  const runParsed = async (
+    ctx: ExtensionContext,
+    parsed: ReturnType<typeof parseDelegateCommand>,
+    forcedHarness: string | undefined,
+    trusted: boolean,
+  ): Promise<void> => {
+    // `--resume=<fan-out id>`: resume every member of a past fan-out on its own harness with its own
+    // recorded session. A fan-out id is recognized by its exact format AND a lookup against the run
+    // records (a well-formed id matching no record is an error, never a plain session id). It then
+    // takes the normal fan-out path — detection filtering, slot queueing, the danger confirm.
+    if (parsed.sessionId && isFanoutId(parsed.sessionId)) {
+      const say = (msg: string) => {
+        if (ctx.hasUI) ctx.ui.notify(msg, 'error');
+        else process.stderr.write(`${msg}\n`);
+      };
+      if (forcedHarness || parsed.harness) {
+        say(
+          '--resume=<fan-out id> resumes the harnesses recorded for that fan-out — do not name a harness (and it is not available on the per-harness alias commands)',
+        );
+        return;
+      }
+      const known = readAllRecordsDetailed();
+      const plan = planFanoutResume(
+        parsed.sessionId,
+        known.records.map(l => l.record),
+        ctx.cwd,
+        { modeTier: todaysModeTier(ctx), mode: parsed.mode, modeTypedByHuman: true },
+        known.skipped,
+      );
+      if (!plan.ok) {
+        say(plan.error);
+        return;
+      }
+      // An interactive session always sees the plan (members, session ids, today's tier, the follow-up
+      // task) and must approve it. Headless: the human typed the explicit fan-out id — allowed, the other
+      // gates (agreement, tier check, danger confirm) still apply.
+      if (ctx.hasUI) {
+        const config = loadConfig();
+        const shown = formatFanoutResumePlan(parsed.sessionId, plan, 'command', {
+          ...steeringFromCommand(parsed),
+          effective: effectiveRunLines(ctx, config, plan.harnesses, parsed.mode ?? plan.mode, {
+            model: parsed.model,
+            budgetUsd: parsed.budget,
+            budgetNarrowOnly: parsed.storedBudget,
+            timeoutSec: parsed.timeoutSec,
+            timeoutMayRaise: parsed.storedTimeout !== true,
+            verify: parsed.verify,
+            allowDangerous: parsed.allowDangerous === true,
+          }),
+        });
+        if (!shown.ok) {
+          say(`resume of fan-out ${parsed.sessionId} refused: ${shown.reason}`);
+          return;
+        }
+        if (!(await confirmResumePlan(ctx, shown.lines.join('\n')))) {
+          say(`resume of fan-out ${parsed.sessionId} was declined — nothing was run`);
+          return;
+        }
+      }
+      if (plan.noSession.length > 0)
+        say(
+          `resuming fan-out ${parsed.sessionId}; no recorded session id, skipped: ${plan.noSession.map(safeName).join(', ')}`,
+        );
+      if (plan.otherCwd.length > 0)
+        say(
+          `resuming fan-out ${parsed.sessionId}; recorded in another working directory, not resumed: ${listCapped(plan.otherCwd)}`,
+        );
+      if (plan.unreadable.length > 0)
+        say(
+          `resuming fan-out ${parsed.sessionId}; unreadable run record, not resumed: ${plan.unreadable.map(safeName).join(', ')}`,
+        );
+      parsed.harness = plan.harnesses.join(',');
+      parsed.mode = parsed.mode ?? plan.mode;
+      parsed.tierCeiling = plan.tierCeiling;
+      parsed.sessionId = undefined;
+      await runFanoutCommand(pi, ui, ctx, parsed, {
+        sessions: plan.sessions,
+        noSession: plan.noSession,
+        unreadable: plan.unreadable,
+      });
+      return;
+    }
+
+    // No harness given (and no alias command): the mode's template may name default harness(es).
+    // Several make this a fan-out through the normal path below — same detection filtering,
+    // reporting, slot queueing and single --allow-dangerous confirm as a typed list.
+    if (!parsed.harness) {
+      const config = loadConfig();
+      parsed.harness = templateHarnessDefault(templateForDefaults(ctx, config, parsed.mode)?.harnesses);
+    }
+
+    // fan-out: harness field is `all` or a comma list — resolve to detected harnesses and run
+    // the engine once per harness instead of the single-harness flow below.
+    if (parsed.harness && isFanoutSpec(parsed.harness)) {
+      await runFanoutCommand(pi, ui, ctx, parsed);
+      return;
+    }
+
+    const harnessName = parsed.harness ?? loadConfig().defaultHarness ?? 'claude';
+    const templates = loadTemplates(ctx.cwd, harnessName, trusted);
+    const resolved = resolveDefaults(parsed, templates);
+    // the template delegate() will actually run — the default mode when none was given — so the
+    // danger banner agrees with the engine's own gate (isTemplateDanger, same check)
+    const template = templates.get(parsed.mode || loadConfig().defaultMode);
+    const isDanger = isTemplateDanger(harnessName, template);
+
+    if (!resolved) {
+      if (parsed.mode)
+        ctx.ui.notify?.(
+          `/delegate ${parsed.mode} <what to do> — give a prompt for the "${parsed.mode}" mode`,
+          'warning',
+        );
+      else ctx.ui.notify?.(`Usage: ${forcedHarness ? aliasUsage(forcedHarness) : delegateUsage()}`, 'warning');
+      return;
+    }
+
+    // --allow-dangerous: honored for this invocation only, and only once a human confirms it in an
+    // interactive dialog — headless refuses (fail closed). Escalates a non-danger template too (the
+    // engine's existing allowDangerous semantics), so the same confirm applies either way.
+    let allowDangerous = false;
+    if (parsed.allowDangerous) {
+      try {
+        const config = loadConfig();
+        const mode = parsed.mode ?? config.defaultMode;
+        await confirmDangerousCommand(ctx, {
+          ...parsed,
+          task: resolved.task,
+          scope: resolved.scope,
+          harnesses: [harnessName],
+          mode,
+          effective: effectiveRunLines(ctx, config, [harnessName], mode, {
+            model: parsed.model,
+            budgetUsd: parsed.budget,
+            budgetNarrowOnly: parsed.storedBudget,
+            timeoutSec: parsed.timeoutSec,
+            timeoutMayRaise: parsed.storedTimeout !== true,
+            verify: parsed.verify,
+            allowDangerous: true, // this IS the danger confirmation: the run has the danger tier (verify runs)
+          }),
+        });
+        allowDangerous = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
+        else process.stderr.write(`${msg}\n`);
+        return;
+      }
+    }
+
+    const outcome = await runOneDelegation(ctx, {
+      harnessName,
+      mode: parsed.mode,
+      task: resolved.task,
+      scope: resolved.scope,
+      model: parsed.model,
+      budget: parsed.budget,
+      timeoutSec: parsed.timeoutSec,
+      storedTimeout: parsed.storedTimeout,
+      storedBudget: parsed.storedBudget,
+      sessionId: parsed.sessionId,
+      pr: parsed.pr,
+      addDirs: parsed.addDirs,
+      verify: parsed.verify,
+      template,
+      isDanger: isDanger || allowDangerous,
+      allowDangerous,
+      tierCeiling: parsed.tierCeiling ? (parsed.tierCeiling[harnessName] ?? 'unavailable') : undefined,
+    });
+    if (outcome.cancelled || !outcome.result) {
+      const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          `delegate ${outcome.cancelled ? 'cancelled' : 'failed'}: ${message}`,
+          outcome.cancelled ? 'warning' : 'error',
+        );
+      else process.stderr.write(`${message}\n`);
+      return;
+    }
+    const { content, details, verify } = outcome.result;
+    const summary = summarize(content);
+    const file = (details.file as string) ?? null;
+    const sessionId = (details.sessionId as string) ?? null;
+    const resumeHint = sessionId ? ` · resume: /delegate --resume=${sessionId} <prompt>` : '';
+    const metrics = runMetrics(details);
+    injectReport(ctx, {
+      harness: details.harness as string,
+      mode: details.mode as string,
+      metrics,
+      body: summary.text,
+      file: file ?? undefined,
+      sessionId: sessionId ?? undefined,
+      verify,
+    });
+    if (ctx.hasUI) {
+      ctx.ui.setStatus('delegate', undefined);
+      ctx.ui.notify(`${details.harness} ${details.mode} done — ${metrics}${resumeHint} · transcript: ${file}`, 'info');
+    } else process.stdout.write(`${summary.text}\n`);
+  };
+
+  /** `/delegate rerun [n|runId] [--here] [--fanout] [--resume] [overrides…]` — plan a rerun from a run
+   *  record (rerun.ts re-validates everything stored) and hand it to the normal command tail.
+   *
+   *  The record is untrusted stored data, so: only a record with a transcript next to it, in its own
+   *  harness's directory, is selectable (newest by transcript mtime — the history order); a UI session
+   *  is ALWAYS shown the plan and asked to confirm before anything runs (decline = nothing runs); a
+   *  headless session needs an EXPLICIT run id (a bare `rerun`/`rerun n` is refused — nobody could look
+   *  at what it would run); stored addDirs outside the project go through the model-set addDirs gate;
+   *  a stored timeout/budget can only narrow what is configured. */
+  const handleRerun = async (
+    ctx: ExtensionContext,
+    rest: string,
+    forcedHarness: string | undefined,
+    /** The alias command the human typed (`omp` pins `amp`) — what error messages call it. */
+    commandName: string | undefined = forcedHarness,
+  ): Promise<void> => {
+    const say = (msg: string, level: 'error' | 'warning' | 'info') => {
+      if (ctx.hasUI) ctx.ui.notify?.(msg, level);
+      else process.stderr.write(`${msg}\n`);
+    };
+    const usage = `Usage: /delegate rerun [n|run_<id>] [--here] [--fanout] [--resume] [--long-task] [--trust-origin] [--harness=…] [--mode=…] [--model=…] [--budget=<usd>] [--timeout=<sec>] [--scope=…] [--pr=…] [--add-dir=…] [--verify=<cmd>] [--allow-dangerous]`;
+    const { rest: afterFlags, found } = extractBareFlags(rest, [
+      'here',
+      'fanout',
+      'resume',
+      'long-task',
+      'trust-origin',
+    ] as const);
+    const words = afterFlags.trim().split(/\s+/).filter(Boolean);
+    const selector = words[0] && (/^\d+$/.test(words[0]) || isRunId(words[0])) ? words.shift() : undefined;
+    if (!ctx.hasUI && !(selector !== undefined && isRunId(selector))) {
+      say(
+        `rerun: with no interactive session to confirm it, a rerun needs an explicit run id (run_…) — a bare \`rerun\` or \`rerun <n>\` would run something nobody could look at first. Find the id with /delegate history\n${usage}`,
+        'error',
+      );
+      return;
+    }
+    const trusted = isProjectTrusted(ctx);
+    const allModes = new Set<string>();
+    // every mode name visible for any harness — the shared root and the per-harness partitions alike
+    for (const k of loadAllTemplates(ctx.cwd, trusted).keys()) allModes.add(k);
+    for (const h of HARNESS_NAMES) for (const k of loadTemplates(ctx.cwd, h, trusted).keys()) allModes.add(k);
+    const overrides = parseDelegateCommand(
+      words.join(' '),
+      allModes,
+      new Set([...HARNESS_NAMES, ...Object.keys(ALIASES)]),
+    );
+    // An alias command (/claude, /codex, …) pins ITS harness: it reruns only a record of that harness, and
+    // whatever the human types does not retarget it. The pinned harness is NOT an override (it must not count
+    // as a typed choice — see planRerun's tier check): it is left unset and the record's own harness (which
+    // must equal it) is used.
+    if (forcedHarness) {
+      if (found.has('fanout')) {
+        say(
+          `rerun: --fanout reruns several harnesses, but /${commandName} pins its own — use /delegate rerun --fanout`,
+          'error',
+        );
+        return;
+      }
+      if (overrides.harness !== undefined && overrides.harness !== forcedHarness) {
+        say(
+          `rerun: /${commandName} pins the ${forcedHarness} harness (it was given ${quoteValue(overrides.harness, 80)}) — use /delegate rerun --harness=… to target another`,
+          'error',
+        );
+        return;
+      }
+      overrides.harness = undefined;
+    }
+    if (overrides.errors?.length) {
+      say(`${overrides.errors.join('; ')}\n${usage}`, 'error');
+      return;
+    }
+    // a bare number indexes the listing the user last saw (the TUI list is numbered the same way; else the
+    // full history); no selector means the newest run that has a record
+    const picked = selectRecord(
+      selector,
+      selector !== undefined && !isRunId(selector) ? currentHistoryView() : [],
+      forcedHarness,
+    );
+    if (!picked.ok) {
+      say(`rerun: ${picked.error}\n${usage}`, 'error');
+      return;
+    }
+    const record = picked.record;
+    if (forcedHarness && record.harness !== forcedHarness) {
+      say(
+        `rerun: that run used ${record.harness}, but /${commandName} reruns only ${forcedHarness} runs — use /delegate rerun ${record.runId} (or /${record.harness} rerun ${record.runId})`,
+        'error',
+      );
+      return;
+    }
+    const everything = readAllRecordsDetailed();
+    const plan = planRerun(
+      record,
+      overrides,
+      {
+        here: found.has('here'),
+        fanout: found.has('fanout'),
+        resumeOwn: found.has('resume'),
+        longTask: found.has('long-task'),
+        trustOrigin: found.has('trust-origin'),
+      },
+      {
+        cwd: ctx.cwd,
+        hasUI: ctx.hasUI,
+        isKnownHarness,
+        // today's template, classified by the engine's own rules — see effectiveTemplateTier
+        modeTier: todaysModeTier(ctx),
+        effective: (harnesses, mode, call) => effectiveRunLines(ctx, loadConfig(), harnesses, mode, call),
+        siblings: record.fanoutId
+          ? everything.records.map(l => l.record).filter(r => r.fanoutId === record.fanoutId)
+          : [],
+      },
+    );
+    if (plan.errors.length > 0 || !plan.args) {
+      say(`rerun: ${plan.errors.join('; ')}`, 'error');
+      return;
+    }
+    if (plan.notices.length > 0) say(plan.notices.join('\n'), 'info');
+    // An interactive session always sees exactly what is about to run — decline (or a throwing dialog) = nothing runs.
+    if (ctx.hasUI) {
+      let ok = false;
+      try {
+        ok = await ctx.ui.confirm('Re-run this recorded delegation?', plan.summary.join('\n'));
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        say('rerun: declined — nothing was run', 'warning');
+        return;
+      }
+    }
+    // Stored addDirs are model-origin data: inside the project is fine, outside needs its own human yes
+    // (fail closed with no UI). Dirs typed on the rerun line replace them and are human-trusted.
+    try {
+      await confirmToolAddDirs(ctx, plan.storedAddDirs, 'record');
+    } catch (err) {
+      say(`rerun: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      return;
+    }
+    // exactly the typed-command path from here on — danger confirm, fan-out, overlay and report included
+    if (forcedHarness) plan.args.harness = forcedHarness;
+    await runParsed(ctx, plan.args, forcedHarness, trusted);
+  };
+
+  const makeHandler = (forcedHarness?: string, commandName?: string) => async (args: string, ctx: ExtensionContext) => {
     const sub = args.trim();
     const subLower = sub.toLowerCase();
     // status / health / doctor — harness health check
@@ -627,11 +1099,24 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (sub === 'history' || sub === 'logs' || subLower.startsWith('history ') || subLower.startsWith('logs ')) {
-      const h = filterHarness(
-        subLower.startsWith('history ') || subLower.startsWith('logs ') ? sub.split(/\s+/)[1] : undefined,
-      );
-      if (h === 'unknown') return;
-      await showHistory(ctx, h);
+      // filters: optional harness word/--harness=, --failed|--ok, --since=, --limit=, --mode= (pure, history-filter.ts)
+      const { filter, errors } = parseHistoryArgs(sub.replace(/^\S+\s*/, ''), Date.now(), word => {
+        const lower = word.toLowerCase();
+        return isKnownHarness(lower) ? resolveHarnessName(lower) : null;
+      });
+      if (errors.length > 0) {
+        const msg = `${errors.join('; ')}\nUsage: /delegate history ${HISTORY_FLAGS_HINT}\nHarnesses: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`;
+        if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
+        else ctx.ui.notify?.(msg, 'warning');
+        return;
+      }
+      if (forcedHarness) filter.harness = forcedHarness;
+      await showHistory(ctx, filter);
+      return;
+    }
+
+    if (sub === 'rerun' || subLower.startsWith('rerun ')) {
+      await handleRerun(ctx, sub.replace(/^\S+\s*/, ''), forcedHarness, commandName);
       return;
     }
 
@@ -660,108 +1145,11 @@ export default function (pi: ExtensionAPI) {
       else process.stderr.write(`${msg}\n`);
     }
 
-    // No harness given (and no alias command): the mode's template may name default harness(es).
-    // Several make this a fan-out through the normal path below — same detection filtering,
-    // reporting, slot queueing and single --allow-dangerous confirm as a typed list.
-    if (!parsed.harness) {
-      const config = loadConfig();
-      parsed.harness = templateHarnessDefault(templateForDefaults(ctx, config, parsed.mode)?.harnesses);
-    }
-
-    // fan-out: harness field is `all` or a comma list — resolve to detected harnesses and run
-    // the engine once per harness instead of the single-harness flow below.
-    if (parsed.harness && isFanoutSpec(parsed.harness)) {
-      await runFanoutCommand(pi, ui, ctx, parsed);
-      return;
-    }
-
-    const harnessName = parsed.harness ?? loadConfig().defaultHarness ?? 'claude';
-    const templates = loadTemplates(ctx.cwd, harnessName, trusted);
-    const resolved = resolveDefaults(parsed, templates);
-    // the template delegate() will actually run — the default mode when none was given — so the
-    // danger banner agrees with the engine's own gate (isTemplateDanger, same check)
-    const template = templates.get(parsed.mode || loadConfig().defaultMode);
-    const isDanger = isTemplateDanger(harnessName, template);
-
-    if (!resolved) {
-      if (parsed.mode)
-        ctx.ui.notify?.(
-          `/delegate ${parsed.mode} <what to do> — give a prompt for the "${parsed.mode}" mode`,
-          'warning',
-        );
-      else ctx.ui.notify?.(`Usage: ${forcedHarness ? aliasUsage(forcedHarness) : delegateUsage()}`, 'warning');
-      return;
-    }
-
-    // --allow-dangerous: honored for this invocation only, and only once a human confirms it in an
-    // interactive dialog — headless refuses (fail closed). Escalates a non-danger template too (the
-    // engine's existing allowDangerous semantics), so the same confirm applies either way.
-    let allowDangerous = false;
-    if (parsed.allowDangerous) {
-      try {
-        await confirmDangerousCommand(ctx, {
-          harnesses: [harnessName],
-          mode: parsed.mode ?? loadConfig().defaultMode,
-          task: resolved.task,
-        });
-        allowDangerous = true;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (ctx.hasUI) ctx.ui.notify(msg, 'warning');
-        else process.stderr.write(`${msg}\n`);
-        return;
-      }
-    }
-
-    const outcome = await runOneDelegation(ctx, {
-      harnessName,
-      mode: parsed.mode,
-      task: resolved.task,
-      scope: resolved.scope,
-      model: parsed.model,
-      budget: parsed.budget,
-      timeoutSec: parsed.timeoutSec,
-      sessionId: parsed.sessionId,
-      pr: parsed.pr,
-      addDirs: parsed.addDirs,
-      verify: parsed.verify,
-      template,
-      isDanger: isDanger || allowDangerous,
-      allowDangerous,
-    });
-    if (outcome.cancelled || !outcome.result) {
-      const message = outcome.error ? outcome.error.message : outcome.cancelled ? 'cancelled' : 'delegation failed';
-      if (ctx.hasUI)
-        ctx.ui.notify(
-          `delegate ${outcome.cancelled ? 'cancelled' : 'failed'}: ${message}`,
-          outcome.cancelled ? 'warning' : 'error',
-        );
-      else process.stderr.write(`${message}\n`);
-      return;
-    }
-    const { content, details, verify } = outcome.result;
-    const summary = summarize(content);
-    const file = (details.file as string) ?? null;
-    const sessionId = (details.sessionId as string) ?? null;
-    const resumeHint = sessionId ? ` · resume: /delegate --resume=${sessionId} <prompt>` : '';
-    const metrics = runMetrics(details);
-    injectReport(ctx, {
-      harness: details.harness as string,
-      mode: details.mode as string,
-      metrics,
-      body: summary.text,
-      file: file ?? undefined,
-      sessionId: sessionId ?? undefined,
-      verify,
-    });
-    if (ctx.hasUI) {
-      ctx.ui.setStatus('delegate', undefined);
-      ctx.ui.notify(`${details.harness} ${details.mode} done — ${metrics}${resumeHint} · transcript: ${file}`, 'info');
-    } else process.stdout.write(`${summary.text}\n`);
+    await runParsed(ctx, parsed, forcedHarness, trusted);
   };
 
   pi.registerCommand('delegate', {
-    description: `Delegate a task to any harness. Usage: ${delegateUsage()} — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless.`,
+    description: `Delegate a task to any harness. Usage: ${delegateUsage()} — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless. /delegate history ${HISTORY_FLAGS_HINT} lists past runs; /delegate rerun [n|run_<id>] repeats one.`,
     handler: makeHandler(),
   });
   // alias commands: same flag set as /delegate (one source — COMMAND_FLAGS_HINT), harness fixed
@@ -776,7 +1164,7 @@ export default function (pi: ExtensionAPI) {
   for (const [command, harness, note] of aliasCommands) {
     pi.registerCommand(command, {
       description: `Alias for /delegate --harness=${harness}${note}. Usage: ${aliasUsage(command)}`,
-      handler: makeHandler(harness),
+      handler: makeHandler(harness, command),
     });
   }
 

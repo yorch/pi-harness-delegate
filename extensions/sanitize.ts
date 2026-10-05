@@ -83,3 +83,71 @@ export function sanitizeIdentifier(text: string, max: number): { text: string; e
     .join('');
   return { text: capText(ascii, max), escaped };
 }
+
+// ── Display escaping and the stored-text reject list ───────────────────────────────────────────
+
+/** `\uXXXX` per UTF-16 unit — the one escape notation every confirmation uses. */
+export function unitEscape(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) out += `\\u${text.charCodeAt(i).toString(16).padStart(4, '0')}`;
+  return out;
+}
+
+// Everything `INVISIBLE_OR_CONTROL_RE` hides, plus unassigned code points (`\p{Cn}`, they render as
+// nothing or as a box) and lone surrogates (`\p{Cs}`).
+// (and the Mongolian free variation selectors U+180B-180D / U+180F, which are combining marks, not format characters)
+const DISPLAY_ESCAPE_RE = new RegExp(
+  `(?:${INVISIBLE_OR_CONTROL_RE.source}|[\\p{Cn}\\p{Cs}\\u180b-\\u180d\\u180f])`,
+  'gu',
+);
+const COMBINING_EXTRA_RE = new RegExp(`(\\p{M}{${MAX_COMBINING_RUN}})(\\p{M}+)`, 'gu');
+
+/**
+ * `text` made safe to put in front of a human **without changing what it says**: every control,
+ * format (zero-width, joiners, variation selectors, bidi, tag), separator, private-use, unassigned
+ * and lone-surrogate character is written out as `\uXXXX`, and combining marks beyond
+ * `MAX_COMBINING_RUN` in a row are written out too, so nothing can hide in what a confirmation shows.
+ * Newlines and tabs stay as they are (free text is multi-line). Nothing is stripped or collapsed.
+ */
+export function escapeForDisplay(text: string): string {
+  return text
+    .replace(DISPLAY_ESCAPE_RE, ch => (ch === '\n' || ch === '\t' ? ch : unitEscape(ch)))
+    .replace(COMBINING_EXTRA_RE, (_m, keep: string, extra: string) => keep + unitEscape(extra));
+}
+
+// What a stored (untrusted) task/scope/value may NOT contain — it is refused rather than run. These are
+// the characters that act on a terminal or reorder/spoof what is displayed: C0 controls other than
+// newline/tab (NUL, ESC, CR, …), DEL, C1 controls (incl. U+0085), line/paragraph separators, bidi marks,
+// embeddings, overrides and isolates, Unicode tag characters ("ASCII smuggling") and lone surrogates.
+// Zero-width joiners (ZWJ emoji sequences), variation selectors and the other format characters are
+// NOT refused: they are legitimate in real text and `escapeForDisplay` makes them visible.
+const FORBIDDEN_CHARS =
+  '\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069\\u{e0000}-\\u{e007f}\\p{Cs}';
+const FORBIDDEN_RE = new RegExp(`[${FORBIDDEN_CHARS}]`, 'u');
+const FORBIDDEN_NO_WS_RE = new RegExp(`[${FORBIDDEN_CHARS}\\n\\t]`, 'u');
+
+/**
+ * The first character of `text` that may not be run, as `U+XXXX`, or `null` when there is none.
+ * `allowNewlines` (free text: task, scope) also admits `\n` and `\t`; single-line values (model, pr,
+ * session id, directory names) do not.
+ */
+export function forbiddenCharacter(text: string, allowNewlines: boolean): string | null {
+  const m = (allowNewlines ? FORBIDDEN_RE : FORBIDDEN_NO_WS_RE).exec(text);
+  return m ? `U+${(m[0].codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}` : null;
+}
+
+/** Characters (code points) in `text` — what the limits above count. */
+export function charCount(text: string): number {
+  return Array.from(text).length;
+}
+
+/**
+ * A short value (a name) for a confirmation: JSON-quoted with every invisible character escaped, up to
+ * `max` characters; anything longer says how much is not shown instead of cutting silently.
+ */
+export function quoteCapped(value: string, max: number): string {
+  const chars = Array.from(value);
+  const shown = chars.length > max ? chars.slice(0, max).join('') : value;
+  const q = escapeForDisplay(JSON.stringify(shown));
+  return chars.length > max ? `${q} (${chars.length - max} more characters not shown)` : q;
+}

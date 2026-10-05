@@ -2,6 +2,17 @@
 
 export type NormalizedPermission = 'readonly' | 'edit' | 'danger';
 
+/** Wider = higher. The one ordering every "must not be wider than" comparison uses. */
+export const TIER_RANK: Record<NormalizedPermission, number> = { readonly: 0, edit: 1, danger: 2 };
+
+/**
+ * The widest template tier a run may resolve to: the tier a human was SHOWN when confirming (rerun /
+ * fan-out resume). `'unavailable'` = the mode did not resolve at confirm time, so nothing may run under it.
+ * `delegate()` checks it against the template it actually loads — a template swapped after the
+ * confirmation cannot run at a tier the human did not see.
+ */
+export type TierCeiling = NormalizedPermission | 'unavailable';
+
 export interface StreamedUsage {
   inputTokens: number;
   outputTokens: number;
