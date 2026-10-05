@@ -23,15 +23,17 @@
  * therefore still runs every other file pinned. (The preload can't tell which files a run will load: inside it,
  * `process.argv` names only the first test file, not the command line.)
  *
- * The pinned dir is removed when the process ends: on 'exit' (end of `bun test`, pass or fail) and on
- * SIGINT/SIGTERM/SIGHUP, which otherwise kill bun without running 'exit' handlers. The signal is
+ * The pinned dir is removed when the process ends: from a `bun:test` `afterAll` (end of `bun test`, pass
+ * or fail — bun 1.3.14, the pinned version, never emits 'exit' there), on 'exit' (bun 1.4.x, and any
+ * `process.exit()`), and on SIGINT/SIGTERM/SIGHUP, which otherwise kill bun without running either. The signal is
  * re-raised after cleanup, so Ctrl-C still stops the run with the conventional 128+n status — unless
  * something else also listens for that signal (then the signal doesn't end the run, so the dir is left
- * for the 'exit' handler; see `registerPinnedDirCleanup`).
+ * for the end-of-run cleanup; see `registerPinnedDirCleanup`).
  *
  * Runtime backstop for the `process.env.X = prev` restore bug (`tests/env-hygiene.test.ts` is the
- * primary, static guard): after every test, any env var whose value is exactly `"undefined"` or `"null"`
- * — what assigning `undefined`/`null` to `process.env` stores — fails that test and is removed, so the
+ * primary, static guard): after every test, any env var whose value is exactly `"undefined"` or `"null"`,
+ * or not a string at all — what assigning `undefined`/`null` to `process.env` stores (the strings on node
+ * and bun 1.4.x, the raw values on bun 1.3.14; see `isCoercedEnvValue`) — fails that test and is removed, so the
  * failure lands on the first offending test instead of cascading. A var that already held such a value
  * in the outer env is ignored only while it still holds that same value (compared by value, not name),
  * and is put back to it. It is a backstop, not a proof: a test that coerces and cleans up within
@@ -40,16 +42,27 @@
  * Every env write here goes through `restoreEnv` (tests/helpers/env.ts), so this file needs no
  * exemption from `tests/env-hygiene.test.ts`.
  */
+
+// `bun:test`, not `node:test`: under bun 1.3.14 (the pinned version CI runs) a throw from a `node:test`
+// hook registered in a preload doesn't fail the test it ran after. A `bun:test` hook registered in a preload applies to every test file, `node:test`
+// ones included, on 1.3.14 and 1.4.x alike. See ./bun-test.d.ts.
+import { afterAll, afterEach } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach } from 'node:test';
 import { restoreEnv } from './env.ts';
-import { coercedEnvVars, markPreloaded, PRELOAD_AGENT_DIR_PREFIX, registerPinnedDirCleanup } from './preload-state.ts';
+import {
+  coercedEnvVars,
+  markPreloaded,
+  PRELOAD_AGENT_DIR_PREFIX,
+  registerPinnedDirCleanup,
+  showEnvValue,
+} from './preload-state.ts';
 
 const outerAgentDir = process.env.PI_CODING_AGENT_DIR;
 const pinnedAgentDir = mkdtempSync(join(tmpdir(), PRELOAD_AGENT_DIR_PREFIX));
-registerPinnedDirCleanup(pinnedAgentDir);
+const removePinned = registerPinnedDirCleanup(pinnedAgentDir);
+afterAll(removePinned); // once, after the last file: bun 1.3.14 never emits 'exit' at the end of `bun test`
 restoreEnv('PI_CODING_AGENT_DIR', pinnedAgentDir);
 markPreloaded({ pinnedAgentDir, outerAgentDir });
 
@@ -58,7 +71,7 @@ const outerEnv: NodeJS.ProcessEnv = { ...process.env };
 afterEach(() => {
   const bad = coercedEnvVars({ ...process.env }, outerEnv);
   if (bad.length === 0) return;
-  const shown = bad.map(name => `${name}=${JSON.stringify(process.env[name])}`).join(', ');
+  const shown = bad.map(name => `${name}=${showEnvValue(process.env[name])}`).join(', ');
   for (const name of bad) restoreEnv(name, outerEnv[name]); // back to the outer value, or unset
   throw new Error(
     `env backstop (tests/helpers/preload.ts): this test left ${shown} in process.env — almost certainly ` +

@@ -12,9 +12,11 @@ import {
   CLEANUP_SIGNALS,
   type CleanupProcess,
   coercedEnvVars,
+  isCoercedEnvValue,
   PRELOAD_AGENT_DIR_PREFIX,
   preloadState,
   registerPinnedDirCleanup,
+  showEnvValue,
 } from './helpers/preload-state.ts';
 import { waitFor } from './helpers/wait.ts';
 
@@ -259,7 +261,7 @@ test('preload: with a second SIGINT listener, SIGINT leaves the pinned dir for t
     assert.equal(signal, null, run.output());
     assert.equal(code, 0, run.output());
     assert.match(run.output(), /AFTER_SIGINT_EXISTS=true/, 'the dir must survive a SIGINT the run handles itself');
-    assert.equal(existsSync(pinned), false, 'removed by the exit handler once the run ends');
+    assert.equal(existsSync(pinned), false, 'removed by the end-of-run cleanup once the run ends');
   } finally {
     run.child.kill('SIGKILL');
     run.cleanup();
@@ -280,7 +282,8 @@ test('env backstop: an outer "null" var is ignored only while unchanged — coer
     const out = run.output();
     assert.notEqual(code, 0, out);
     assert.match(out, /FIRST_SEES="null"/, 'an unchanged outer value is not flagged');
-    assert.match(out, /this test left ZZ_BACKSTOP_OUTER="undefined"/);
+    // node / bun 1.4.x coerce to the string "undefined"; bun 1.3.14 keeps a raw undefined (shown bare).
+    assert.match(out, /this test left ZZ_BACKSTOP_OUTER=(?:"undefined"|undefined) in process\.env/);
     assert.match(out, /\(fail\) coerces/);
     assert.match(out, /^\s*2 pass$/m, out);
     assert.match(out, /^\s*1 fail$/m, out);
@@ -377,11 +380,37 @@ test("preload cleanup: 'exit' removes the dir without re-raising anything", () =
   assert.deepEqual(killed, []);
 });
 
+test('preload cleanup: returns the idempotent cleanup for the end-of-run hook (bun 1.3.14 never emits exit)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'preload-cleanup-returned-'));
+  const { proc, killed, emit } = fakeProcess();
+  const cleanup = registerPinnedDirCleanup(dir, proc);
+  assert.equal(existsSync(dir), true, 'registering removes nothing');
+  cleanup(); // what the preload's bun:test afterAll calls
+  assert.equal(existsSync(dir), false);
+  emit('exit', 0); // a later 'exit' (bun 1.4.x) is a no-op
+  cleanup();
+  assert.deepEqual(killed, []);
+});
+
 test('env backstop: coercedEnvVars finds exactly the "undefined"/"null" values, minus unchanged outer ones', () => {
   const env = { A: 'undefined', B: 'null', C: 'x', D: '', E: 'Undefined', F: 'null ', G: 'undefined', H: 'undefined' };
   assert.deepEqual(coercedEnvVars(env), ['A', 'B', 'G', 'H']);
   // G held the same value outside (ignored); H was "null" outside and is now "undefined" (still caught)
   assert.deepEqual(coercedEnvVars(env, { G: 'undefined', H: 'null' }), ['A', 'B', 'H']);
+  // bun 1.3.14 stores the raw value instead of coercing: present-but-undefined / null keys count too —
+  // including a raw undefined where the outer env had no such key at all (presence is compared).
+  const raw = { I: undefined, J: null as unknown as string, K: 'ok' };
+  assert.deepEqual(coercedEnvVars(raw), ['I', 'J']);
+  assert.deepEqual(coercedEnvVars(raw, {}), ['I', 'J']);
+  assert.deepEqual(coercedEnvVars({ L: undefined }, { L: 'null' }), ['L'], '"null" outside, raw undefined now');
+});
+
+test('env backstop: isCoercedEnvValue / showEnvValue cover both coercion shapes', () => {
+  for (const v of ['undefined', 'null', undefined, null, 0]) assert.equal(isCoercedEnvValue(v), true, String(v));
+  for (const v of ['', 'x', 'Undefined', 'null ']) assert.equal(isCoercedEnvValue(v), false, v);
+  assert.equal(showEnvValue('undefined'), '"undefined"');
+  assert.equal(showEnvValue(undefined), 'undefined');
+  assert.equal(showEnvValue(null), 'null');
 });
 
 test('env backstop: a test that coerces undefined into process.env fails, and the next test starts clean', {
@@ -391,18 +420,23 @@ test('env backstop: a test that coerces undefined into process.env fails, and th
   // bug the backstop exists for (Reflect.set: same coercion as `process.env.X = prev`).
   const body = [
     "test('coerces', () => { const prev = undefined; Reflect.set(process.env, 'ZZ_BACKSTOP_PROBE', prev); });",
-    "test('next', () => { console.log('NEXT_SEES=' + JSON.stringify(process.env.ZZ_BACKSTOP_PROBE)); });",
+    "test('next', () => { console.log('NEXT_HAS=' + ('ZZ_BACKSTOP_PROBE' in process.env)); });",
   ].join('\n');
   const run = startChildBunTest(body, childEnv({}, ['PI_DELEGATE_LIVE', 'ZZ_BACKSTOP_PROBE']));
   try {
     const { code } = await run.exited;
     const out = run.output();
     assert.notEqual(code, 0, out);
-    assert.match(out, /env backstop \(tests\/helpers\/preload\.ts\): this test left ZZ_BACKSTOP_PROBE="undefined"/);
+    // node / bun 1.4.x coerce to the string "undefined"; bun 1.3.14 keeps a raw undefined (shown bare).
+    assert.match(
+      out,
+      /env backstop \(tests\/helpers\/preload\.ts\): this test left ZZ_BACKSTOP_PROBE=(?:"undefined"|undefined) in /,
+    );
     assert.match(out, /\(fail\) coerces/);
     assert.match(out, /^\s*1 pass$/m, 'only the offending test fails');
     assert.match(out, /^\s*1 fail$/m);
-    assert.match(out, /NEXT_SEES=undefined/, 'the backstop removes the coerced var so the failure does not cascade');
+    // `in`, not the value: on bun 1.3.14 a coerced key reads as undefined yet is still present.
+    assert.match(out, /NEXT_HAS=false/, 'the backstop removes the coerced var so the failure does not cascade');
   } finally {
     run.cleanup();
   }

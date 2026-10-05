@@ -50,15 +50,32 @@ export function removePinnedDir(dir: string): void {
 export const COERCED_ENV_VALUES: ReadonlySet<string> = new Set(['undefined', 'null']);
 
 /**
- * Names of env vars whose value is exactly `"undefined"`/`"null"` — except those still holding the very
+ * Whether `value` is what assigning `undefined`/`null` to `process.env` leaves behind. That differs by
+ * runtime: node and bun 1.4.x coerce to the strings `"undefined"`/`"null"`; bun 1.3.14 (the version
+ * `package.json` pins and CI runs) stores the raw non-string `undefined`/`null` — the key stays in
+ * `process.env` (`'X' in process.env` is true) but reads as `undefined`/`null` and is dropped from a
+ * spawned child's env. Both shapes count: a real env value is always a string.
+ */
+export function isCoercedEnvValue(value: unknown): boolean {
+  return typeof value !== 'string' || COERCED_ENV_VALUES.has(value);
+}
+
+/**
+ * Names of env vars holding a coerced value (`isCoercedEnvValue`) — except those still holding the very
  * same value they had in `baseline` (the outer env), so a var that was already `"null"` outside is
- * ignored only while unchanged: a test coercing it to `"undefined"` is still caught. Compared by value,
- * never by name alone.
+ * ignored only while unchanged: a test coercing it to `"undefined"` (or, on bun 1.3.14, to a raw
+ * `undefined`) is still caught. Compared by value, never by name alone; presence counts too, so a key
+ * absent from `baseline` never "matches" a present-but-`undefined` one.
  */
 export function coercedEnvVars(env: NodeJS.ProcessEnv, baseline: NodeJS.ProcessEnv = {}): string[] {
   return Object.keys(env)
-    .filter(name => COERCED_ENV_VALUES.has(env[name] as string) && env[name] !== baseline[name])
+    .filter(name => isCoercedEnvValue(env[name]) && !(Object.hasOwn(baseline, name) && env[name] === baseline[name]))
     .sort();
+}
+
+/** How the backstop shows a coerced value: quoted when it's a string, bare when it's a raw non-string. */
+export function showEnvValue(value: unknown): string {
+  return typeof value === 'string' ? JSON.stringify(value) : String(value);
 }
 
 /** The signals the preload cleans up on before re-raising (each would otherwise kill the process
@@ -99,8 +116,12 @@ function realProcess(): CleanupProcess {
  * while `PI_CODING_AGENT_DIR` still points at it. So then the signal handler does nothing, and the
  * `'exit'` handler cleans up whenever the process does end (or a leftover dir stays under
  * `os.tmpdir()` if that listener kills it by a signal — harmless).
+ *
+ * Returns the (idempotent) cleanup itself, for an end-of-run hook: bun 1.3.14 (the version `package.json`
+ * pins, so the one CI runs) never emits `'exit'` (nor `'beforeExit'`) at the end of `bun test`, so the
+ * preload also runs this from a `bun:test` `afterAll`. bun 1.4.x emits `'exit'` as node does.
  */
-export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = realProcess()): void {
+export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = realProcess()): () => void {
   let done = false;
   const cleanup = () => {
     if (done) return;
@@ -120,4 +141,5 @@ export function registerPinnedDirCleanup(dir: string, proc: CleanupProcess = rea
   // 'exit' handlers must be synchronous — rmSync is.
   proc.on('exit', cleanup);
   for (const sig of CLEANUP_SIGNALS) proc.on(sig, onSignal);
+  return cleanup;
 }
