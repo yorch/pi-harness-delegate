@@ -520,6 +520,15 @@ export async function runFanoutCommand(
         harnesses: specs.map(s => s.harnessName),
         mode: modeForReport,
         task: specs[0].task,
+        scope: specs[0].scope,
+        model: parsed.model,
+        budget: parsed.budget,
+        timeoutSec: parsed.timeoutSec,
+        sessionId: resume ? undefined : parsed.sessionId,
+        sessions: resume ? resume.sessions : undefined,
+        pr: parsed.pr,
+        addDirs: parsed.addDirs,
+        verify: parsed.verify,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

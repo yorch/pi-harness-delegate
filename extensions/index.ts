@@ -77,7 +77,13 @@ import { isFanoutId, isRunId } from './run-record.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
 import { callTimeoutError, type DelegateTemplate, loadAllTemplates, loadTemplates, quoteValue } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { confirmDangerousCommand, confirmDangerousToolCall, confirmToolAddDirs, safeName } from './validate.ts';
+import {
+  confirmDangerousCommand,
+  confirmDangerousToolCall,
+  confirmToolAddDirs,
+  safeName,
+  steeringRefusal,
+} from './validate.ts';
 
 /** Tool-result `details` for the `delegate` tool (and its partial progress updates). */
 type DelegateToolDetails = Record<string, unknown>;
@@ -288,8 +294,23 @@ export default function (pi: ExtensionAPI) {
           throw new Error(
             `resumeFanout ${rawParams.resumeFanout} needs a person to approve it, but there is no interactive UI — refusing (resume it yourself with /delegate --resume=${rawParams.resumeFanout} <prompt>)`,
           );
+        // every param the model set that steers the run is in the plan; a task / scope too long to show whole is
+        // refused (the model has no way to say "I accept it is not shown in full")
+        const steering = {
+          scope: rawParams.scope,
+          model: rawParams.model,
+          pr: rawParams.pr,
+          budgetUsd: rawParams.maxBudgetUsd,
+          timeoutSec: rawParams.timeoutSec,
+          addDirs: rawParams.addDirs,
+        };
+        const tooBig = steeringRefusal({ ...steering, task: rawParams.task });
+        if (tooBig) throw new Error(`resumeFanout ${rawParams.resumeFanout} refused: ${tooBig}`);
         if (
-          !(await confirmResumePlan(ctx, formatFanoutResumePlan(rawParams.resumeFanout, plan, rawParams.task, 'tool')))
+          !(await confirmResumePlan(
+            ctx,
+            formatFanoutResumePlan(rawParams.resumeFanout, plan, rawParams.task, 'tool', steering),
+          ))
         )
           throw new Error(`resumeFanout ${rawParams.resumeFanout} was declined by the user — nothing was run`);
         resumePlan = plan;
@@ -685,7 +706,18 @@ export default function (pi: ExtensionAPI) {
       // gates (agreement, tier check, danger confirm) still apply.
       if (
         ctx.hasUI &&
-        !(await confirmResumePlan(ctx, formatFanoutResumePlan(parsed.sessionId, plan, parsed.task, 'command')))
+        !(await confirmResumePlan(
+          ctx,
+          formatFanoutResumePlan(parsed.sessionId, plan, parsed.task, 'command', {
+            scope: parsed.scope,
+            model: parsed.model,
+            pr: parsed.pr,
+            budgetUsd: parsed.budget,
+            timeoutSec: parsed.timeoutSec,
+            addDirs: parsed.addDirs,
+            verify: parsed.verify,
+          }),
+        ))
       ) {
         say(`resume of fan-out ${parsed.sessionId} was declined — nothing was run`);
         return;
@@ -693,6 +725,10 @@ export default function (pi: ExtensionAPI) {
       if (plan.noSession.length > 0)
         say(
           `resuming fan-out ${parsed.sessionId}; no recorded session id, skipped: ${plan.noSession.map(safeName).join(', ')}`,
+        );
+      if (plan.otherCwd.length > 0)
+        say(
+          `resuming fan-out ${parsed.sessionId}; recorded in another working directory, not resumed: ${plan.otherCwd.join(', ')}`,
         );
       if (plan.unreadable.length > 0)
         say(
@@ -753,6 +789,14 @@ export default function (pi: ExtensionAPI) {
           harnesses: [harnessName],
           mode: parsed.mode ?? loadConfig().defaultMode,
           task: resolved.task,
+          scope: resolved.scope,
+          model: parsed.model,
+          budget: parsed.budget,
+          timeoutSec: parsed.timeoutSec,
+          sessionId: parsed.sessionId,
+          pr: parsed.pr,
+          addDirs: parsed.addDirs,
+          verify: parsed.verify,
         });
         allowDangerous = true;
       } catch (err) {
@@ -822,7 +866,13 @@ export default function (pi: ExtensionAPI) {
    *  headless session needs an EXPLICIT run id (a bare `rerun`/`rerun n` is refused — nobody could look
    *  at what it would run); stored addDirs outside the project go through the model-set addDirs gate;
    *  a stored timeout/budget can only narrow what is configured. */
-  const handleRerun = async (ctx: ExtensionContext, rest: string, forcedHarness: string | undefined): Promise<void> => {
+  const handleRerun = async (
+    ctx: ExtensionContext,
+    rest: string,
+    forcedHarness: string | undefined,
+    /** The alias command the human typed (`omp` pins `amp`) — what error messages call it. */
+    commandName: string | undefined = forcedHarness,
+  ): Promise<void> => {
     const say = (msg: string, level: 'error' | 'warning' | 'info') => {
       if (ctx.hasUI) ctx.ui.notify?.(msg, level);
       else process.stderr.write(`${msg}\n`);
@@ -861,14 +911,14 @@ export default function (pi: ExtensionAPI) {
     if (forcedHarness) {
       if (found.has('fanout')) {
         say(
-          `rerun: --fanout reruns several harnesses, but /${forcedHarness} pins its own — use /delegate rerun --fanout`,
+          `rerun: --fanout reruns several harnesses, but /${commandName} pins its own — use /delegate rerun --fanout`,
           'error',
         );
         return;
       }
       if (overrides.harness !== undefined && overrides.harness !== forcedHarness) {
         say(
-          `rerun: /${forcedHarness} pins the ${forcedHarness} harness (it was given ${quoteValue(overrides.harness, 80)}) — use /delegate rerun --harness=… to target another`,
+          `rerun: /${commandName} pins the ${forcedHarness} harness (it was given ${quoteValue(overrides.harness, 80)}) — use /delegate rerun --harness=… to target another`,
           'error',
         );
         return;
@@ -893,7 +943,7 @@ export default function (pi: ExtensionAPI) {
     const record = picked.record;
     if (forcedHarness && record.harness !== forcedHarness) {
       say(
-        `rerun: that run used ${record.harness}, but /${forcedHarness} reruns only ${forcedHarness} runs — use /delegate rerun ${record.runId} (or /${record.harness} rerun ${record.runId})`,
+        `rerun: that run used ${record.harness}, but /${commandName} reruns only ${forcedHarness} runs — use /delegate rerun ${record.runId} (or /${record.harness} rerun ${record.runId})`,
         'error',
       );
       return;
@@ -951,7 +1001,7 @@ export default function (pi: ExtensionAPI) {
     await runParsed(ctx, plan.args, forcedHarness, trusted);
   };
 
-  const makeHandler = (forcedHarness?: string) => async (args: string, ctx: ExtensionContext) => {
+  const makeHandler = (forcedHarness?: string, commandName?: string) => async (args: string, ctx: ExtensionContext) => {
     const sub = args.trim();
     const subLower = sub.toLowerCase();
     // status / health / doctor — harness health check
@@ -1033,7 +1083,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (sub === 'rerun' || subLower.startsWith('rerun ')) {
-      await handleRerun(ctx, sub.replace(/^\S+\s*/, ''), forcedHarness);
+      await handleRerun(ctx, sub.replace(/^\S+\s*/, ''), forcedHarness, commandName);
       return;
     }
 
@@ -1081,7 +1131,7 @@ export default function (pi: ExtensionAPI) {
   for (const [command, harness, note] of aliasCommands) {
     pi.registerCommand(command, {
       description: `Alias for /delegate --harness=${harness}${note}. Usage: ${aliasUsage(command)}`,
-      handler: makeHandler(harness),
+      handler: makeHandler(harness, command),
     });
   }
 

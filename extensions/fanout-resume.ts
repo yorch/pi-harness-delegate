@@ -27,9 +27,8 @@ import { ALIASES, HARNESS_NAMES } from './harnesses/registry.ts';
 import { type NormalizedPermission, TIER_RANK, type TierCeiling } from './harnesses/types.ts';
 import type { RunRecord, SkippedRecord } from './run-record.ts';
 import { displayText } from './run-record.ts';
-import { renderTextBlock, TASK_LIMITS } from './sanitize.ts';
 import { quoteFull, quoteValue } from './templates.ts';
-import { safeName, sessionIdError } from './validate.ts';
+import { type RunSteering, safeName, sessionIdError, steeringFieldLines, steeringTextBlocks } from './validate.ts';
 
 export type FanoutResumePlan =
   | {
@@ -40,6 +39,8 @@ export type FanoutResumePlan =
       sessions: Record<string, string>;
       /** Members of the fan-out with no recorded session id (reported, never silently dropped). */
       noSession: string[];
+      /** Members of the fan-out recorded in another working directory — reported, never silently excluded. */
+      otherCwd: string[];
       /** Members whose run record exists but could not be read (reported, never silently dropped). */
       unreadable: string[];
       /** The mode the resume runs: the fan-out's recorded one unless `opts.mode` named another. */
@@ -113,6 +114,9 @@ export function planFanoutResume(
           : `unknown fan-out id ${fanoutId} — no run record belongs to it`,
     };
   const members = all.filter(r => resolve(r.cwd) === resolve(cwd));
+  const otherCwd = all
+    .filter(r => resolve(r.cwd) !== resolve(cwd))
+    .map(r => `${safeName(canonicalHarness(r.harness) ?? r.harness)} (in ${quoteValue(r.cwd, 100)})`);
   if (members.length === 0)
     return {
       ok: false,
@@ -176,7 +180,9 @@ export function planFanoutResume(
     };
   // Today's tier per member, from the mode that will actually run.
   const mode = env.mode ?? recordedMode;
-  const checkTier = !(env.mode !== undefined && env.modeTypedByHuman === true);
+  // a human-typed mode that DIFFERS from the recorded one is their choice and skips the comparison; a typed mode
+  // equal to the recorded one is no choice at all, so the check still applies
+  const checkTier = !(env.mode !== undefined && env.modeTypedByHuman === true && env.mode !== recordedMode);
   const resumed: ResumeMember[] = [];
   const tierCeiling: Record<string, TierCeiling> = {};
   for (const h of harnesses) {
@@ -197,7 +203,7 @@ export function planFanoutResume(
       nowTier,
     });
   }
-  return { ok: true, harnesses, sessions, noSession, unreadable: lost, mode, members: resumed, tierCeiling };
+  return { ok: true, harnesses, sessions, noSession, otherCwd, unreadable: lost, mode, members: resumed, tierCeiling };
 }
 
 const ORIGIN_WORDS = {
@@ -216,6 +222,7 @@ export function formatFanoutResumePlan(
   plan: Extract<FanoutResumePlan, { ok: true }>,
   task: string | undefined,
   source: 'command' | 'tool',
+  extras: Omit<RunSteering, 'task' | 'harnesses' | 'mode' | 'sessions' | 'sessionId'> = {},
 ): string {
   const lines = [
     `Resume fan-out ${fanoutId}: every member continues its own recorded session on its own harness.`,
@@ -228,6 +235,8 @@ export function formatFanoutResumePlan(
   ];
   if (plan.noSession.length > 0)
     lines.push(`not resumed (no recorded session id): ${plan.noSession.map(safeName).join(', ')}`);
+  if (plan.otherCwd.length > 0)
+    lines.push(`not resumed (recorded in another working directory): ${plan.otherCwd.join(', ')}`);
   if (plan.unreadable.length > 0)
     lines.push(`not resumed (unreadable run record): ${plan.unreadable.map(safeName).join(', ')}`);
   if (source === 'tool')
@@ -238,10 +247,10 @@ export function formatFanoutResumePlan(
     lines.push(
       'WARNING: at least one member was NOT recorded as started by a /delegate command (the record says the tool, or nothing).',
     );
-  lines.push(
-    task === undefined || task === ''
-      ? "follow-up task: (the mode's default)"
-      : renderTextBlock('follow-up task', task, TASK_LIMITS),
-  );
+  lines.push(...steeringFieldLines(extras));
+  if (task === undefined || task === '') {
+    lines.push("follow-up task: (the mode's default)");
+    if (extras.scope !== undefined) lines.push(...steeringTextBlocks({ scope: extras.scope }));
+  } else lines.push(...steeringTextBlocks({ scope: extras.scope, task }, 'follow-up task'));
   return lines.join('\n');
 }

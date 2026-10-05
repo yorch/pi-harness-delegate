@@ -29,9 +29,9 @@ import {
   readRecordsIn,
   type SkippedRecord,
 } from './run-record.ts';
-import { charCount, forbiddenCharacter, renderTextBlock, SCOPE_LIMITS, TASK_LIMITS } from './sanitize.ts';
+import { forbiddenCharacter, SCOPE_LIMITS, TASK_LIMITS, textTooLongReason } from './sanitize.ts';
 import { callTimeoutError, quoteFull, quoteValue } from './templates.ts';
-import { validateDelegateInputs } from './validate.ts';
+import { steeringTextBlocks, validateDelegateInputs } from './validate.ts';
 
 /**
  * Every usable record on disk — all harness partitions plus the legacy dir — newest transcript first
@@ -214,6 +214,11 @@ export function planRerun(
   const summary: string[] = [];
   const fail = (msg: string): RerunPlan => ({ errors: [...errors, msg], notices, summary, storedAddDirs: [] });
   const input = record.input;
+  // Only members recorded in the SAME working directory as the selected run belong to this rerun (a session and
+  // a template belong to the directory they ran in) — the others are listed, never silently dropped.
+  const sameDir = (r: RunRecord): boolean => resolve(r.cwd) === resolve(record.cwd);
+  const siblings = env.siblings.filter(sameDir);
+  const otherDir = env.siblings.filter(r => !sameDir(r));
 
   if (overrides.errors?.length) return { errors: overrides.errors, notices, summary, storedAddDirs: [] };
   if (overrides.task) return fail('rerun takes no new prompt — use /delegate <prompt> to start a different run');
@@ -238,13 +243,19 @@ export function planRerun(
       '--fanout --resume is not supported — resume a whole fan-out with /delegate --resume=<fan_…id> <prompt>',
     );
 
-  const harness = overrides.harness ?? record.harness;
-  const fanoutSpec = flags.fanout || (overrides.harness?.includes(',') ?? false) || overrides.harness === 'all';
+  // A typed --harness is normalized and de-duplicated first: `claude,claude` IS the record's single `claude`,
+  // not a different choice (and not a one-member fan-out).
+  const typedHarnesses =
+    overrides.harness === undefined ? undefined : [...new Set(overrides.harness.split(',').filter(Boolean))];
+  const typedHarness = typedHarnesses === undefined ? undefined : typedHarnesses.join(',');
+  const harness = typedHarness ?? record.harness;
+  const fanoutSpec =
+    flags.fanout || (typedHarnesses !== undefined && typedHarnesses.length > 1) || typedHarness === 'all';
   let harnessSpec = harness;
   if (flags.fanout) {
     if (!record.fanoutId) return fail('--fanout: this run was not part of a fan-out');
-    if (overrides.harness === undefined) {
-      const members = [...new Set([record, ...env.siblings].map(r => r.harness))];
+    if (typedHarness === undefined) {
+      const members = [...new Set([record, ...siblings].map(r => r.harness))];
       harnessSpec = members.join(',');
     }
   }
@@ -255,7 +266,7 @@ export function planRerun(
 
   // Who started the run(s) being repeated: shown in the plan; a record that was not started by a
   // /delegate command (tool call, or unknown) needs `--trust-origin` when there is no person to look at the plan.
-  const started = flags.fanout ? [record, ...env.siblings.filter(r => r.runId !== record.runId)] : [record];
+  const started = flags.fanout ? [record, ...siblings.filter(r => r.runId !== record.runId)] : [record];
   const origins = [...new Set(started.map(r => r.origin ?? 'unknown'))];
   const notCommand = started.some(r => r.origin !== 'command');
   if (notCommand && !env.hasUI && !flags.trustOrigin)
@@ -272,14 +283,14 @@ export function planRerun(
   // Today's template, per harness. The tier is compared with what the recorded run had — a mode that
   // has since been widened (readonly -> edit, edit -> danger) is never silently re-run at the wider tier.
   const recordedTier = (h: string): NormalizedPermission =>
-    (h === record.harness ? record : env.siblings.find(r => r.harness === h))?.permission ?? record.permission;
+    (h === record.harness ? record : siblings.find(r => r.harness === h))?.permission ?? record.permission;
   const targets = harnessNames.filter(h => h !== 'all');
   const tiers: string[] = [];
   const ceiling: Record<string, TierCeiling> = {};
-  // typing the SAME value the record already has is not a choice — it skips nothing
+  // typing the SAME value the record already has (once normalized) is not a choice — it skips nothing
   const typedTarget =
     (overrides.mode !== undefined && overrides.mode !== record.mode) ||
-    (overrides.harness !== undefined && overrides.harness !== record.harness);
+    (typedHarness !== undefined && typedHarness !== record.harness);
   for (const h of targets) {
     const now = env.modeTier(h, mode);
     if (now === null) {
@@ -343,17 +354,18 @@ export function planRerun(
         `a stored addDirs entry contains a control or direction-changing character (${bad}) — refusing to rerun it`,
       );
   }
-  // A value a confirmation cannot show whole is not run on the strength of a partial view.
-  const taskLen = charCount(task);
-  const scopeLen = scope === undefined ? 0 : charCount(scope);
+  // A value a confirmation cannot show whole (too many characters OR too many lines — a dialog taller than
+  // the screen scrolls its top away) is not run on the strength of a partial view.
   if (!flags.longTask) {
-    if (taskLen > TASK_LIMITS.full)
+    const taskWhy = textTooLongReason(task, TASK_LIMITS);
+    if (taskWhy)
       return fail(
-        `the stored task is ${taskLen} characters — more than the ${TASK_LIMITS.full} a confirmation shows whole. Pass --long-task to repeat it anyway (the confirmation then shows its first ${TASK_LIMITS.head} and last ${TASK_LIMITS.tail} characters and says how many were not shown)`,
+        `the stored task is ${taskWhy}. Pass --long-task to repeat it anyway (the confirmation then shows only its head and tail, and says how many lines and characters were not shown)`,
       );
-    if (storedScope && scopeLen > SCOPE_LIMITS.full)
+    const scopeWhy = storedScope && scope !== undefined ? textTooLongReason(scope, SCOPE_LIMITS) : null;
+    if (scopeWhy)
       return fail(
-        `the stored scope is ${scopeLen} characters — more than the ${SCOPE_LIMITS.full} a confirmation shows whole. Pass --long-task to repeat it anyway (the confirmation then shows its first ${SCOPE_LIMITS.head} and last ${SCOPE_LIMITS.tail} characters and says how many were not shown)`,
+        `the stored scope is ${scopeWhy}. Pass --long-task to repeat it anyway (the confirmation then shows only its head and tail, and says how many lines and characters were not shown)`,
       );
   }
   if (budget !== undefined && !(typeof budget === 'number' && Number.isFinite(budget) && budget > 0))
@@ -382,6 +394,13 @@ export function planRerun(
     notices.push(
       `this run was one member of fan-out ${record.fanoutId} — rerunning just it (--fanout reruns every member)`,
     );
+  if (flags.fanout && otherDir.length > 0)
+    notices.push(
+      `fan-out members recorded in another working directory, not rerun: ${otherDir
+        .slice(0, 8)
+        .map(r => `${quoteValue(r.harness, 40)} (in ${quoteValue(r.cwd, 100)})`)
+        .join(', ')}${otherDir.length > 8 ? `, … (${otherDir.length - 8} more)` : ''}`,
+    );
   if (sessionId === undefined && record.sessionId)
     notices.push('starting a fresh session (pass --resume to continue the recorded one)');
 
@@ -397,8 +416,6 @@ export function planRerun(
     summary.push(
       'WARNING: this was NOT typed by you as a /delegate command — the record says it was started by something else (or does not say). Check the task below before approving.',
     );
-  summary.push(renderTextBlock('task', task, TASK_LIMITS));
-  if (scope !== undefined) summary.push(renderTextBlock('scope', scope, SCOPE_LIMITS));
   if (pr !== undefined) summary.push(`pr: ${quoteFull(pr)}`);
   if (addDirs !== undefined)
     summary.push(
@@ -411,6 +428,8 @@ export function planRerun(
     summary.push(`timeout: ${timeoutSec}s${storedTimeout ? ' (stored; can only lower the configured timeout)' : ''}`);
   summary.push(sessionId === undefined ? 'session: fresh' : `session: resumes ${quoteFull(sessionId)}`);
   summary.push(`directory: ${quoteFull(env.cwd)}`);
+  // the multi-line blocks, then their size summaries — LAST, the part of a bottom-anchored dialog that is always on screen
+  summary.push(...steeringTextBlocks({ task, scope }, 'task'));
 
   const args: DelegateCommandArgs = { task, harness: harnessSpec, mode };
   if (scope !== undefined) args.scope = scope;

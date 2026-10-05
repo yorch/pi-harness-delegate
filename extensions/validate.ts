@@ -12,7 +12,16 @@
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { quoteCapped, renderTextBlock, TASK_LIMITS } from './sanitize.ts';
+import type { DelegateOptions } from './engine.ts';
+import {
+  describeTextSummary,
+  escapeForDisplay,
+  quoteCapped,
+  renderTextBlock,
+  SCOPE_LIMITS,
+  TASK_LIMITS,
+  textTooLongReason,
+} from './sanitize.ts';
 import { quoteFull, quoteValue } from './templates.ts';
 
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -93,27 +102,195 @@ export function validateDelegateInputs(inputs: ValidatableInputs): void {
 
 type ConfirmCtx = Pick<ExtensionContext, 'hasUI'> & { ui?: { confirm?: ExtensionContext['ui']['confirm'] } };
 
+/** The longest single value (a session id, model, PR reference, directory) a confirmation shows; more is refused on a model-set path. */
+export const MAX_CONFIRM_FIELD_CHARS = 500;
+/** The most extra directories a single confirmation lists. */
+export const MAX_CONFIRM_DIRS = 10;
+
+/**
+ * Everything on a run that steers what it does — what a danger confirmation (and a fan-out resume plan)
+ * must show, because approving it approves all of it. Callers pass what they have; absent = not set.
+ */
+export interface RunSteering {
+  /** The harness(es) that will run (a fan-out lists them all). */
+  harnesses?: string[];
+  mode?: string;
+  task?: string;
+  scope?: string;
+  model?: string;
+  sessionId?: string;
+  /** harness -> its own session id (a fan-out resume). */
+  sessions?: Record<string, string>;
+  pr?: string;
+  budgetUsd?: number;
+  timeoutSec?: number;
+  /** Every entry, those inside the working directory too — they are all handed to the harness. */
+  addDirs?: string[];
+  /** A host-run verify command (human-typed only — never on the tool path). */
+  verify?: string;
+}
+
+/**
+ * Which `DelegateOptions` keys a danger / resume confirmation shows (`shown`) and which it deliberately
+ * does not (`hidden`, with the reason). `Record<keyof DelegateOptions, …>` makes adding an option to the
+ * engine a compile error until someone decides — a steering option nobody displays is how a confirmation
+ * ends up approving less than what runs (tests/confirm-steering.test.ts also checks the tool's schema).
+ */
+export const STEERING_DISPLAY: Record<keyof DelegateOptions, 'shown' | 'hidden'> = {
+  harness: 'shown',
+  task: 'shown',
+  mode: 'shown',
+  scope: 'shown',
+  model: 'shown',
+  maxBudgetUsd: 'shown',
+  allowDangerous: 'hidden', // the very thing being confirmed
+  sessionId: 'shown',
+  pr: 'shown',
+  addDirs: 'shown',
+  timeoutSec: 'shown',
+  timeoutSecMayRaise: 'hidden', // set by the command path only; the shown timeout is the typed value
+  maxBudgetNarrowOnly: 'hidden', // narrows a shown budget, never widens
+  verify: 'shown',
+  onStream: 'hidden', // callbacks / plumbing, not run steering
+  onActivity: 'hidden',
+  signal: 'hidden',
+  waitForSlot: 'hidden',
+  onAcquired: 'hidden',
+  fanoutId: 'hidden', // bookkeeping
+  origin: 'hidden', // bookkeeping
+  tierCeiling: 'hidden', // can only narrow what a run may resolve to
+};
+
+/** The tool's own parameters, likewise: shown in the danger / resume confirmation or deliberately not. */
+export const TOOL_PARAM_DISPLAY: Record<string, 'shown' | 'hidden'> = {
+  harness: 'shown',
+  task: 'shown',
+  mode: 'shown',
+  scope: 'shown',
+  model: 'shown',
+  maxBudgetUsd: 'shown',
+  timeoutSec: 'shown',
+  sessionId: 'shown',
+  resumeFanout: 'shown', // the resume plan names the fan-out and every member's session
+  allowDangerous: 'hidden', // the very thing being confirmed
+  pr: 'shown',
+  addDirs: 'shown',
+};
+
+const money = (n: number): string => `$${n}`;
+
+/** The one-line-per-fact part of a steering display (everything but the multi-line task / scope blocks). */
+export function steeringFieldLines(s: RunSteering): string[] {
+  const out: string[] = [];
+  if (s.model !== undefined) out.push(`model: ${quoteFull(s.model)}`);
+  if (s.sessionId !== undefined) out.push(`session: resumes ${quoteFull(s.sessionId)}`);
+  if (s.sessions && Object.keys(s.sessions).length > 0)
+    out.push(...Object.entries(s.sessions).map(([h, id]) => `session (${safeName(h)}): resumes ${quoteFull(id)}`));
+  if (s.pr !== undefined) out.push(`pr: ${quoteFull(s.pr)}`);
+  if (s.budgetUsd !== undefined) out.push(`budget: ${money(s.budgetUsd)}`);
+  if (s.timeoutSec !== undefined) out.push(`timeout: ${s.timeoutSec}s`);
+  if (s.addDirs !== undefined && s.addDirs.length > 0)
+    out.push(`addDirs (${s.addDirs.length}): ${s.addDirs.map(quoteFull).join(', ')}`);
+  if (s.verify !== undefined) out.push(`verify (runs on this machine after the harness exits): ${quoteFull(s.verify)}`);
+  return out;
+}
+
+/**
+ * The scope and task blocks followed by their one-line summaries — the summaries LAST, because a
+ * dialog is bottom-anchored and the last lines are the ones always on screen.
+ */
+export function steeringTextBlocks(s: RunSteering, taskLabel = 'Task'): string[] {
+  const out: string[] = [];
+  if (s.scope !== undefined) out.push(renderTextBlock('Scope', s.scope, SCOPE_LIMITS));
+  if (s.task !== undefined) out.push(renderTextBlock(taskLabel, s.task, TASK_LIMITS));
+  const summary: string[] = [];
+  if (s.scope !== undefined) summary.push(describeTextSummary('scope', s.scope));
+  if (s.task !== undefined) summary.push(describeTextSummary(taskLabel.toLowerCase(), s.task));
+  if (summary.length > 0) out.push(summary.join('\n'));
+  return out;
+}
+
+/**
+ * Why a MODEL-SET run cannot be put in front of a person (null = it can): a task / scope too tall or
+ * long to show whole, or a field / directory list too big to list. The model has no `--long-task`: a
+ * value that cannot be reviewed in full is simply not run behind a confirmation.
+ */
+export function steeringRefusal(s: RunSteering): string | null {
+  const tooLong = (label: string, reason: string): string =>
+    `the ${label} is ${reason} — too long for a person to review in the confirmation, so it is refused. Shorten it`;
+  if (s.task !== undefined) {
+    const r = textTooLongReason(s.task, TASK_LIMITS);
+    if (r) return tooLong('task', r);
+  }
+  if (s.scope !== undefined) {
+    const r = textTooLongReason(s.scope, SCOPE_LIMITS);
+    if (r) return tooLong('scope', r);
+  }
+  for (const [label, v] of [
+    ['model', s.model],
+    ['sessionId', s.sessionId],
+    ['pr', s.pr],
+    ['verify', s.verify],
+  ] as const)
+    if (v !== undefined && Array.from(v).length > MAX_CONFIRM_FIELD_CHARS)
+      return `the ${label} is longer than the ${MAX_CONFIRM_FIELD_CHARS} characters a confirmation shows — refused`;
+  if (s.addDirs !== undefined) {
+    if (s.addDirs.length > MAX_CONFIRM_DIRS)
+      return `${s.addDirs.length} addDirs entries — more than the ${MAX_CONFIRM_DIRS} a confirmation lists — refused`;
+    if (s.addDirs.some(d => Array.from(d).length > MAX_CONFIRM_FIELD_CHARS))
+      return `an addDirs entry is longer than the ${MAX_CONFIRM_FIELD_CHARS} characters a confirmation shows — refused`;
+  }
+  return null;
+}
+
 /**
  * The one danger-confirmation primitive shared by the tool and command paths: with a UI, ask via
  * `ctx.ui.confirm` (a decline or a throwing dialog counts as "no"); without one there is nobody to
  * ask, so fail closed. Resolves only on an explicit approval; throws the caller's message otherwise.
+ *
+ * What the human approves is shown whole: every steering field (`steeringFieldLines`), the scope and
+ * task as escaped blocks (head + tail with an explicit "not shown" marker beyond the limits — only a
+ * human-typed value ever reaches that; a model-set one is refused first, `refuseLong`), and the
+ * one-line summaries last.
  */
 async function askDangerConfirmation(
   ctx: ConfirmCtx,
-  opts: { task: string; body: string; noUiError: string; declinedError: string },
+  opts: {
+    steering: RunSteering;
+    body: string;
+    noUiError: string;
+    declinedError: string;
+    /** Refuse (rather than abbreviate) a task / scope / field too big to show whole — the model-set tool path. */
+    refuseLong: boolean;
+  },
 ): Promise<void> {
   if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') throw new Error(opts.noUiError);
-  // The task may be model-set or read from a stored run record, and it is what the human is actually
-  // approving to run unrestricted: shown whole (escaped, never flattened) up to TASK_LIMITS.full
-  // characters, else its head and tail with an explicit "N characters not shown" line.
-  const task = renderTextBlock('Task', opts.task, TASK_LIMITS);
+  if (opts.refuseLong) {
+    const why = steeringRefusal(opts.steering);
+    if (why) throw new Error(`allowDangerous refused: ${why}`);
+  }
+  const text = [opts.body, ...steeringFieldLines(opts.steering), '', ...steeringTextBlocks(opts.steering)].join('\n');
   let ok = false;
   try {
-    ok = await ctx.ui.confirm('Allow dangerous delegation?', `${opts.body}\n\n${task}`);
+    ok = await ctx.ui.confirm('Allow dangerous delegation?', text);
   } catch {
     ok = false;
   }
   if (!ok) throw new Error(opts.declinedError);
+}
+
+/** What the tool's danger confirmation is shown — the tool params that steer a run. */
+export interface ToolDangerSummary {
+  harness?: string;
+  mode?: string;
+  task: string;
+  scope?: string;
+  model?: string;
+  maxBudgetUsd?: number;
+  timeoutSec?: number;
+  sessionId?: string;
+  pr?: string;
+  addDirs?: string[];
 }
 
 /**
@@ -121,16 +298,24 @@ async function askDangerConfirmation(
  * param is model-settable (prompt-injection reachable), and `danger` means an unrestricted
  * harness, so the model alone must never be able to grant it. With a UI, ask via
  * `ctx.ui.confirm`; without one there is nobody to ask, so fail closed with a clear error. The
- * `/delegate` command path uses `confirmDangerousCommand` instead.
+ * confirmation shows every param that steers the run, and a task / scope too long to review is
+ * refused outright. The `/delegate` command path uses `confirmDangerousCommand` instead.
  */
-export async function confirmDangerousToolCall(
-  ctx: ConfirmCtx,
-  summary: { harness?: string; mode?: string; task: string },
-): Promise<void> {
+export async function confirmDangerousToolCall(ctx: ConfirmCtx, summary: ToolDangerSummary): Promise<void> {
   // harness/mode are model-set strings: quoted (escapes, bidi, zero-width all rendered as \uXXXX)
   const target = `${summary.harness === undefined ? 'default harness' : safeName(summary.harness)} ${summary.mode === undefined ? 'default mode' : safeName(summary.mode)}`;
   await askDangerConfirmation(ctx, {
-    task: summary.task,
+    steering: {
+      task: summary.task,
+      scope: summary.scope,
+      model: summary.model,
+      sessionId: summary.sessionId,
+      pr: summary.pr,
+      budgetUsd: summary.maxBudgetUsd,
+      timeoutSec: summary.timeoutSec,
+      addDirs: summary.addDirs,
+    },
+    refuseLong: true,
     body: `The agent wants to run ${target} with DANGER permission (unrestricted: no sandbox, no approval prompts).`,
     noUiError: `allowDangerous requested for ${target}, but there is no interactive UI to confirm it with — refusing (danger permission needs a human's explicit approval; run it from an interactive session)`,
     declinedError: `allowDangerous for ${target} was declined by the user`,
@@ -146,14 +331,39 @@ export async function confirmDangerousToolCall(
  */
 export async function confirmDangerousCommand(
   ctx: ConfirmCtx,
-  summary: { harnesses: string[]; mode: string; task: string },
+  summary: {
+    harnesses: string[];
+    mode: string;
+    task: string;
+    scope?: string;
+    model?: string;
+    budget?: number;
+    timeoutSec?: number;
+    sessionId?: string;
+    sessions?: Record<string, string>;
+    pr?: string;
+    addDirs?: string[];
+    verify?: string;
+  },
 ): Promise<void> {
   const n = summary.harnesses.length;
   const names = summary.harnesses.map(safeName).join(', ');
   const mode = quoteCapped(summary.mode, 200);
   const target = `${names} ${safeName(summary.mode)}`;
   await askDangerConfirmation(ctx, {
-    task: summary.task,
+    steering: {
+      task: summary.task,
+      scope: summary.scope,
+      model: summary.model,
+      budgetUsd: summary.budget,
+      timeoutSec: summary.timeoutSec,
+      sessionId: summary.sessionId,
+      sessions: summary.sessions,
+      pr: summary.pr,
+      addDirs: summary.addDirs,
+      verify: summary.verify,
+    },
+    refuseLong: false,
     body: `--allow-dangerous: run ${mode} on ${n > 1 ? `all ${n} harnesses (${names})` : names} with DANGER permission — full, unrestricted permissions (no sandbox, no approval prompts). Applies to this invocation only.`,
     noUiError: `--allow-dangerous for ${target} needs interactive confirmation, but there is no UI — refusing (a headless /delegate never runs with danger permission)`,
     declinedError: `--allow-dangerous for ${target} was declined — nothing was run`,
@@ -213,7 +423,14 @@ export async function confirmToolAddDirs(
   const outside = addDirsOutsideCwd(ctx.cwd, addDirs);
   if (outside.length === 0) return;
   // directory names are model-set or stored: quoted so escapes / bidi / zero-width can't hide in them,
-  // and shown whole (an entry is at most 4096 characters) — a confirmation never cuts a path
+  // and shown whole — which is why a list too long (or an entry too big) to show whole is refused: a
+  // dialog taller than the screen scrolls its top away
+  const refusal =
+    outside.length > MAX_CONFIRM_DIRS
+      ? `${outside.length} directories outside the project — more than the ${MAX_CONFIRM_DIRS} a confirmation lists`
+      : outside.some(d => Array.from(d).length > MAX_CONFIRM_FIELD_CHARS)
+        ? `a directory path longer than the ${MAX_CONFIRM_FIELD_CHARS} characters a confirmation shows`
+        : null;
   const list = outside.map(d => quoteFull(d)).join(', ');
   const lead =
     source === 'record'
@@ -221,14 +438,17 @@ export async function confirmToolAddDirs(
       : 'The agent wants the delegated harness to access directories';
   if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') {
     throw new Error(
-      `addDirs outside the working directory requested (${list}), but there is no interactive UI to confirm it with — refusing (extra directories outside the project need a human's explicit approval)`,
+      `addDirs outside the working directory requested (${outside.length > MAX_CONFIRM_DIRS ? `${outside.length} entries` : list}), but there is no interactive UI to confirm it with — refusing (extra directories outside the project need a human's explicit approval)`,
     );
   }
+  if (refusal) throw new Error(`addDirs outside the working directory refused: ${refusal}. Give fewer / shorter paths`);
   let ok = false;
   try {
+    // this dialog lists directories only — the task being run is not part of it (the danger / rerun /
+    // resume confirmations show that)
     ok = await ctx.ui.confirm(
       'Allow access outside the project?',
-      `${lead} outside ${quoteFull(ctx.cwd)}:\n\n${outside.map(d => `  ${quoteFull(d)}`).join('\n')}\n\nOn non-readonly runs these may be writable.`,
+      `${lead} outside ${quoteFull(ctx.cwd)}:\n\n${outside.map(d => `  ${quoteFull(d)}`).join('\n')}\n\nOn non-readonly runs these may be writable.\n${outside.length} director${outside.length === 1 ? 'y' : 'ies'} outside the project — first: ${escapeForDisplay(quoteFull(outside[0]))}`,
     );
   } catch {
     ok = false;
