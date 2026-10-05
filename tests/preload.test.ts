@@ -210,6 +210,23 @@ test('preload: a makeTempDir dir a test forgot is swept at the end of the run', 
   }
 });
 
+test('closeTempDirs: makeTempDir refuses once the run is shutting down', { timeout: 60_000 }, async () => {
+  const helper = JSON.stringify(join(import.meta.dirname, 'helpers', 'tmp.ts'));
+  const body = [
+    `import { closeTempDirs, makeTempDir } from ${helper};`,
+    "test('child', () => { closeTempDirs(); try { makeTempDir('late-'); console.log('CREATED'); } catch (e) { console.log('REFUSED ' + e.message); } });",
+  ].join('\n');
+  const run = startChildBunTest(body, childEnv({}, ['PI_DELEGATE_LIVE']));
+  try {
+    const { code } = await run.exited;
+    assert.equal(code, 0, run.output());
+    assert.match(run.output(), /REFUSED makeTempDir\(late-\): the run is shutting down/);
+    assert.doesNotMatch(run.output(), /CREATED/);
+  } finally {
+    run.cleanup();
+  }
+});
+
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   test(`preload: ${sig} mid-run also sweeps makeTempDir dirs`, { timeout: 60_000 }, async () => {
     const run = startChildBunTest(tempDirBody(true), childEnv({}, ['PI_DELEGATE_LIVE']));

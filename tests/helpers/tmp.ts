@@ -37,8 +37,23 @@ export function tempRoot(): string {
   return tmpdir();
 }
 
+const CLOSED_KEY = Symbol.for('pi-harness-delegate.test-temp-dirs-closed');
+
+/**
+ * Refuse further `makeTempDir` calls. The preload calls this right before its final sweep: after a SIGINT/
+ * SIGTERM the process only dies on the next event-loop turn, so a test still in flight could otherwise
+ * create a dir *after* the sweep ran and nothing would ever remove it (seen: a signal mid-run leaked the
+ * dirs the next few tests created).
+ */
+export function closeTempDirs(): void {
+  (globalThis as WithRegistry & { [CLOSED_KEY]?: boolean })[CLOSED_KEY] = true;
+}
+
 /** Create a fresh directory `<tmpdir>/<prefix>XXXXXX` and register it for the end-of-run sweep. */
 export function makeTempDir(prefix: string): string {
+  if ((globalThis as WithRegistry & { [CLOSED_KEY]?: boolean })[CLOSED_KEY]) {
+    throw new Error(`makeTempDir(${prefix}): the run is shutting down (signal or end of run); not creating temp dirs`);
+  }
   const dir = mkdtempSync(join(tmpdir(), prefix));
   registry().add(dir);
   return dir;

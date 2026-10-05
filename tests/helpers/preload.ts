@@ -58,13 +58,14 @@ import {
   registerPinnedDirCleanup,
   showEnvValue,
 } from './preload-state.ts';
-import { sweepTempDirs } from './tmp.ts';
+import { closeTempDirs, sweepTempDirs } from './tmp.ts';
 
 const outerAgentDir = process.env.PI_CODING_AGENT_DIR;
 const pinnedAgentDir = mkdtempSync(join(tmpdir(), PRELOAD_AGENT_DIR_PREFIX));
 // Also sweeps every dir tests registered via `makeTempDir` (tests/helpers/tmp.ts): same once-only cleanup,
 // so the end-of-run hook, 'exit' and the signals all remove them.
 const removePinned = registerPinnedDirCleanup(pinnedAgentDir, undefined, () => {
+  closeTempDirs(); // nothing new may be created once the sweep has run (see closeTempDirs)
   stuckTempDirs = sweepTempDirs();
 });
 let stuckTempDirs: string[] = [];
