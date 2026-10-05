@@ -48,6 +48,7 @@ import {
   loadTemplates,
   nativeOverrideWarning,
   projectTemplatePresence,
+  quoteValue,
   resolveNativePermission,
 } from './templates.ts';
 import { validateDelegateInputs } from './validate.ts';
@@ -382,7 +383,8 @@ export async function delegate(
           harness.name,
         )
       : undefined);
-  const warning = permissionWarning && `⚠ template "${mode}": ${permissionWarning}`;
+  // The mode is a template `name:` — frontmatter, so quoted/escaped like every other echoed value.
+  const warning = permissionWarning && `⚠ template ${quoteValue(mode, 200)}: ${permissionWarning}`;
   if (warning) {
     if (ctx.hasUI) ctx.ui.notify?.(warning, 'warning');
     else process.stderr.write(`${warning}\n`);
@@ -405,10 +407,10 @@ export async function delegate(
     if (opts.allowDangerous !== true) {
       const why =
         nativeClass === 'unlisted'
-          ? ` (native permission "${nativePerm}" is not a known readonly/edit mode for ${harnessName}, so it is treated as danger)`
+          ? ` (native permission ${quoteValue(String(nativePerm), 200)} is not a known readonly/edit mode for ${harnessName}, so it is treated as danger)`
           : '';
       throw new Error(
-        `template "${mode}" requires danger permission${why} — never a default: pass allowDangerous:true on the delegate tool, or --allow-dangerous on /delegate (both ask you to confirm interactively)`,
+        `template ${quoteValue(mode, 200)} requires danger permission${why} — never a default: pass allowDangerous:true on the delegate tool, or --allow-dangerous on /delegate (both ask you to confirm interactively)`,
       );
     }
     permission = 'danger';

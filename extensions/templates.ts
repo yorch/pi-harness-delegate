@@ -76,11 +76,29 @@ const LEGACY_SANDBOX_TIERS: Record<string, NormalizedPermission> = {
 };
 
 /**
- * A frontmatter value echoed back in a warning (`/delegate list`, run-time notes): JSON-quoted so
- * control characters / ANSI escapes are inert, and capped so a huge value can't flood the line.
+ * Characters `JSON.stringify` leaves raw but a terminal or renderer still acts on: C1 controls
+ * (U+009B is the 8-bit CSI), soft hyphen, bidi marks/embeddings/overrides/isolates (Trojan-Source
+ * reordering), zero-width and other invisible format characters, the line/paragraph separators,
+ * BOM, interlinear annotation controls, and tag characters.
  */
-function quoteValue(value: string): string {
-  return JSON.stringify(value).slice(0, 60);
+const INVISIBLE_OR_CONTROL =
+  /[\u0080-\u009F\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u{E0000}-\u{E007F}]/gu;
+
+/** Each match → `\uXXXX` (per UTF-16 code unit), so it is visible and inert. */
+function escapeInvisible(text: string): string {
+  return text.replace(INVISIBLE_OR_CONTROL, ch =>
+    Array.from({ length: ch.length }, (_, i) => `\\u${ch.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''),
+  );
+}
+
+/**
+ * A frontmatter-derived string echoed back in a warning (`/delegate list`, run-time notes): JSON-quoted
+ * so C0 controls / ANSI escapes are inert, the characters `JSON.stringify` leaves raw (C1, bidi,
+ * zero-width, U+2028/9 — see `INVISIBLE_OR_CONTROL`) escaped as `\uXXXX` too, and capped at `max`
+ * chars so a huge value can't flood the line.
+ */
+export function quoteValue(value: string, max = 60): string {
+  return escapeInvisible(JSON.stringify(value)).slice(0, max);
 }
 
 interface LegacyPermission {
@@ -205,18 +223,29 @@ export function normalizePermission(
     const all = raws.map(normalizeTierValue);
     const distinct = new Set(all.map(r => `${r.permission}|${r.nativePermission ?? ''}`));
     if (distinct.size > 1) {
-      const listed = raws.map(quoteValue).join(', ');
-      if (all.some(r => r.nativePermission))
-        return {
-          permission: 'readonly',
-          permissionMode: 'plan',
-          permissionWarning: `conflicting permission: values ${listed} — loaded as readonly (fail closed)`,
-        };
-      const least = all.reduce((a, b) => (TIER_RANK[b.permission] < TIER_RANK[a.permission] ? b : a));
-      return {
-        ...least,
-        permissionWarning: `conflicting permission: values ${listed} — using the least permissive, ${least.permission}`,
-      };
+      const listed = raws.map(v => quoteValue(v)).join(', ');
+      const least = all.some(r => r.nativePermission)
+        ? undefined
+        : all.reduce((a, b) => (TIER_RANK[b.permission] < TIER_RANK[a.permission] ? b : a));
+      const resolved = least
+        ? {
+            ...least,
+            permissionWarning: `conflicting permission: values ${listed} — using the least permissive, ${least.permission}`,
+          }
+        : {
+            permission: 'readonly' as const,
+            permissionMode: 'plan' as const,
+            permissionWarning: `conflicting permission: values ${listed} — loaded as readonly (fail closed)`,
+          };
+      // Legacy keys are ignored here too — judged against the tier this resolved to, and appended
+      // rather than dropped (no native value survives this branch, so delegate() can't judge them).
+      const [[permissionKey]] = entries(raw, 'permission');
+      const ignored = legacyOverrideWarning(
+        `${permissionKey}: ${resolved.permission}`,
+        resolved.permission,
+        legacyEntries(fallbackMode, sandbox),
+      );
+      return ignored ? { ...resolved, permissionWarning: `${resolved.permissionWarning}; ${ignored}` } : resolved;
     }
   }
   if (raws.length > 0) {
@@ -240,23 +269,18 @@ export function normalizePermission(
 }
 
 /**
- * `<label> overrides <legacy keys> (ignored)` when the ignored legacy keys disagree with `tier` (or
- * hold an unrecognized value); `undefined` when they agree. Keys are echoed as given (already
- * `displayKey`-sanitized), values JSON-quoted and capped.
+ * `<label> overrides <legacy keys> (ignored)` unless every ignored legacy value is recognized and maps
+ * to exactly `tier` — so one that disagrees with `tier`, one that is unrecognized, or ignored keys that
+ * disagree with each other (`sandbox: read-only` + `Sandbox: workspace-write`, even when the least
+ * permissive of them matches `tier`) are all flagged; `undefined` when there are none or they all
+ * agree. Keys are echoed as given (already `displayKey`-sanitized), values quoted via `quoteValue`.
  */
 function legacyOverrideWarning(
   label: string,
   tier: NormalizedPermission,
   legacy: readonly [string, string][],
 ): string | undefined {
-  // Same judgement as a legacy-only template: any unrecognized value, or a least-permissive tier
-  // that differs from the one that actually runs.
-  const classified = legacy.map(([, v]) => classifyLegacyValue(v));
-  const least = classified.reduce<NormalizedPermission | undefined>(
-    (acc, c) => (c && (acc === undefined || TIER_RANK[c.permission] < TIER_RANK[acc]) ? c.permission : acc),
-    undefined,
-  );
-  if (classified.every(Boolean) && least === tier) return undefined;
+  if (legacy.every(([, v]) => classifyLegacyValue(v)?.permission === tier)) return undefined;
   const ignored = legacy.map(([k, v]) => `${k}: ${quoteValue(v)}`).join(', ');
   return `${label} overrides ${ignored} (ignored)`;
 }
