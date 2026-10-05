@@ -21,6 +21,8 @@ import { promisify } from 'node:util';
 import { acpView, runAcpHarness } from '../extensions/acp-runner.ts';
 import { getAllHarnesses } from '../extensions/harnesses/registry.ts';
 import { runHarness } from '../extensions/runner.ts';
+import { withEnv } from './helpers/env.ts';
+import { preloadState } from './helpers/preload-state.ts';
 
 const LIVE = process.env.PI_DELEGATE_LIVE === '1';
 
@@ -46,6 +48,13 @@ if (!LIVE) {
     { cwd: scratchDir },
   );
 
+  // The preload pins PI_CODING_AGENT_DIR to a temp dir for the whole process, live mode included. Real
+  // harness CLIs inherit our env, and `omp` (the `amp` harness) reads PI_CODING_AGENT_DIR as its *own*
+  // agent dir (auth, models), so each live run gets the developer's outer value back — only for the
+  // duration of that run, so every other test file in the same process stays pinned.
+  const preload = preloadState();
+  const outerAgentDir = preload ? preload.outerAgentDir : process.env.PI_CODING_AGENT_DIR;
+
   const PROMPT = 'Read README.md in this directory and reply with exactly the marker value it contains, nothing else.';
 
   // Which metrics each harness is *known* to genuinely report, per its default transport — from
@@ -69,13 +78,15 @@ if (!LIVE) {
       const run = transport === 'acp' ? runAcpHarness : runHarness;
       const runHarnessArg = transport === 'acp' ? acpView(harness) : harness;
 
-      const result = await run({
-        harness: runHarnessArg,
-        prompt: PROMPT,
-        cwd: scratchDir,
-        permission: 'readonly',
-        timeoutMs: 60_000,
-      });
+      const result = await withEnv({ PI_CODING_AGENT_DIR: outerAgentDir }, () =>
+        run({
+          harness: runHarnessArg,
+          prompt: PROMPT,
+          cwd: scratchDir,
+          permission: 'readonly',
+          timeoutMs: 60_000,
+        }),
+      );
 
       assert.equal(result.isError, false, `expected a successful run, got: ${result.result}`);
       assert.ok(result.result.trim().length > 0, 'expected non-empty result text');
