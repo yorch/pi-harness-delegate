@@ -21,16 +21,21 @@ const ANSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u0
  * - `\p{Co}` private-use characters (no standard glyph — free to mean anything to a font or model);
  * - invisible characters outside those categories: variation selectors (U+FE00–FE0F, U+E0100–E01EF),
  *   the combining grapheme joiner U+034F, the Hangul fillers U+115F/U+1160/U+3164/U+FFA0, the Khmer
- *   inherent vowels U+17B4/U+17B5, and the blank Braille pattern U+2800.
+ *   inherent vowels U+17B4/U+17B5, and the blank Braille pattern U+2800;
+ * - the whole U+2060–U+206F and U+E0000–U+E007F (tag) blocks by range, including their unassigned
+ *   code points, which `\p{Cf}` alone would miss.
  *
- * Exported as the shared set so any other echo of template text uses the same one.
+ * The one shared set: `sanitizeTemplateText` strips it (discovery output), `quoteValue` (templates.ts)
+ * escapes it as `\uXXXX` (permission/field warnings). Only the character set is shared — each channel
+ * keeps its own treatment. Never add a second list elsewhere; widen this one.
  */
 // Built from a string so the escapes stay escapes (a formatter would otherwise inline them as literal
 // invisible characters).
 export const INVISIBLE_OR_CONTROL_RE = new RegExp(
   [
     '[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Co}',
-    '\\u034f\\u115f\\u1160\\u17b4\\u17b5\\u2800\\u3164\\ufe00-\\ufe0f\\uffa0\\u{e0100}-\\u{e01ef}]',
+    '\\u034f\\u115f\\u1160\\u17b4\\u17b5\\u2800\\u3164\\ufe00-\\ufe0f\\uffa0\\u{e0100}-\\u{e01ef}',
+    '\\u2060-\\u206f\\u{e0000}-\\u{e007f}]',
   ].join(''),
   'gu',
 );

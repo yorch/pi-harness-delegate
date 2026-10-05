@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NormalizedPermission } from './harnesses/types.ts';
+import { INVISIBLE_OR_CONTROL_RE } from './sanitize.ts';
 
 /** Where a loaded template came from: shipped with the package, the user's own dirs, or the project. */
 export type TemplateSource = 'builtin' | 'user' | 'project';
@@ -160,18 +161,9 @@ const LEGACY_SANDBOX_TIERS: Record<string, NormalizedPermission> = {
   'danger-full-access': 'danger',
 };
 
-/**
- * Characters `JSON.stringify` leaves raw but a terminal or renderer still acts on: C1 controls
- * (U+009B is the 8-bit CSI), soft hyphen, bidi marks/embeddings/overrides/isolates (Trojan-Source
- * reordering), zero-width and other invisible format characters, the line/paragraph separators,
- * BOM, interlinear annotation controls, and tag characters.
- */
-const INVISIBLE_OR_CONTROL =
-  /[\u0080-\u009F\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u{E0000}-\u{E007F}]/gu;
-
 /** Each match → `\uXXXX` (per UTF-16 code unit), so it is visible and inert. */
 function escapeInvisible(text: string): string {
-  return text.replace(INVISIBLE_OR_CONTROL, ch =>
+  return text.replace(INVISIBLE_OR_CONTROL_RE, ch =>
     Array.from({ length: ch.length }, (_, i) => `\\u${ch.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''),
   );
 }
@@ -179,8 +171,10 @@ function escapeInvisible(text: string): string {
 /**
  * A frontmatter-derived string echoed back in a warning (`/delegate list`, run-time notes): JSON-quoted
  * so C0 controls / ANSI escapes are inert, the characters `JSON.stringify` leaves raw (C1, bidi,
- * zero-width, U+2028/9 — see `INVISIBLE_OR_CONTROL`) escaped as `\uXXXX` too, and capped at `max`
- * chars so a huge value can't flood the line.
+ * zero-width, U+2028/9, tag characters, … — the shared `INVISIBLE_OR_CONTROL_RE` set from
+ * `sanitize.ts`) escaped as `\uXXXX` too, and capped at `max` chars so a huge value can't flood the
+ * line. Escaped rather than stripped (unlike `sanitizeTemplateText`): a warning must show what the
+ * author actually wrote.
  */
 export function quoteValue(value: string, max = 60): string {
   return escapeInvisible(JSON.stringify(value)).slice(0, max);

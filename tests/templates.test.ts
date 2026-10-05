@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { HARNESS_NAMES } from '../extensions/harnesses/registry.ts';
+import { sanitizeTemplateText } from '../extensions/sanitize.ts';
 import {
   describeSkippedProjectTemplates,
   displayKey,
@@ -151,6 +152,35 @@ test('quoteValue: C1 controls, bidi, zero-width and line separators are escaped 
   for (const v of HOSTILE_VALUES) assert.doesNotMatch(quoteValue(v), INVISIBLE, JSON.stringify(v));
   assert.equal(quoteValue('z'.repeat(500)).length, 60);
   assert.equal(quoteValue('z'.repeat(500), 200).length, 200);
+});
+
+test('quoteValue escapes every character of the #57 set — the shared sanitize.ts set is a superset', () => {
+  // Every code point (assigned or not) of the ranges quoteValue escaped before the set was shared:
+  // C1, U+00AD, U+061C, U+180E, U+200B–200F, U+2028–202E, U+2060–206F, U+FEFF, U+FFF9–FFFB, tags.
+  const ranges: [number, number][] = [
+    [0x80, 0x9f],
+    [0xad, 0xad],
+    [0x61c, 0x61c],
+    [0x180e, 0x180e],
+    [0x200b, 0x200f],
+    [0x2028, 0x202e],
+    [0x2060, 0x206f],
+    [0xfeff, 0xfeff],
+    [0xfff9, 0xfffb],
+    [0xe0000, 0xe007f],
+  ];
+  const codes = ranges.flatMap(([lo, hi]) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i));
+  assert.ok(codes.includes(0x9b) && codes.includes(0x2065) && codes.includes(0xe0000));
+  for (const cp of codes) {
+    const ch = String.fromCodePoint(cp);
+    const escaped = Array.from({ length: ch.length }, (_, i) => `\\u${ch.charCodeAt(i).toString(16).padStart(4, '0')}`);
+    const label = `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+    assert.equal(quoteValue(`x${ch}y`), `"x${escaped.join('')}y"`, label);
+    // the discovery channel strips the same set (each channel keeps its own treatment)
+    assert.equal(sanitizeTemplateText(`x${ch}y`, 50), 'x y', label);
+  }
+  // …and the characters the shared set added on top: DEL, private use, a variation selector, U+2800
+  assert.equal(quoteValue('x\u007f\ue000\ufe0f\u2800y'), '"x\\u007f\\ue000\\ufe0f\\u2800y"');
 });
 
 test('permission warnings never carry raw C1/bidi/zero-width characters — on any parse-time path', () => {
