@@ -194,21 +194,38 @@ export function quoteValue(value: string, max = 60): string {
 export const TEMPLATE_VARIABLES = ['task', 'scope', 'cwd', 'harness', 'mode'] as const;
 export type TemplateVariable = (typeof TEMPLATE_VARIABLES)[number];
 
-/** `{{ name }}` — identifier-shaped only, so ordinary `{{` in code samples is not mistaken for one. */
-export const TEMPLATE_VARIABLE_RE = /\{\{\s*([A-Za-z_][A-Za-z0-9_.-]{0,63})\s*\}\}/g;
+/**
+ * `{{name}}` — identifier-shaped only, so ordinary `{{` in code samples is not mistaken for one. Spaces
+ * and tabs inside the braces are tolerated (`{{ task }}`); a newline is NOT (`{{task\n}}` is literal text:
+ * `\s` would have matched it, which let a placeholder span lines).
+ */
+export const TEMPLATE_VARIABLE_RE = /\{\{[ \t]*([A-Za-z_][A-Za-z0-9_.-]{0,63})[ \t]*\}\}/g;
+
+/** A placeholder used more than this many times in one body is refused — see `buildPrompt`. */
+export const MAX_PLACEHOLDER_USES = 16;
+/** When a placeholder is repeated, the whole expanded prompt may not exceed this (chars). */
+export const MAX_EXPANDED_PROMPT_CHARS = 2 * 1024 * 1024;
 
 const MAX_UNKNOWN_PLACEHOLDER_WARNINGS = 5;
 
 /** Which supported placeholders `body` uses, and the (distinct) unknown identifier-shaped ones. Pure. */
-export function scanTemplateVariables(body: string): { known: Set<TemplateVariable>; unknown: string[] } {
+export function scanTemplateVariables(body: string): {
+  known: Set<TemplateVariable>;
+  unknown: string[];
+  /** How many times each supported placeholder occurs (absent = 0). */
+  counts: Partial<Record<TemplateVariable, number>>;
+} {
   const known = new Set<TemplateVariable>();
   const unknown: string[] = [];
+  const counts: Partial<Record<TemplateVariable, number>> = {};
   for (const m of body.matchAll(TEMPLATE_VARIABLE_RE)) {
     const name = m[1];
-    if ((TEMPLATE_VARIABLES as readonly string[]).includes(name)) known.add(name as TemplateVariable);
-    else if (!unknown.includes(name)) unknown.push(name);
+    if ((TEMPLATE_VARIABLES as readonly string[]).includes(name)) {
+      known.add(name as TemplateVariable);
+      counts[name as TemplateVariable] = (counts[name as TemplateVariable] ?? 0) + 1;
+    } else if (!unknown.includes(name)) unknown.push(name);
   }
-  return { known, unknown };
+  return { known, unknown, counts };
 }
 
 interface LegacyPermission {
@@ -490,6 +507,11 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     fieldWarnings.push(
       `unknown placeholder {{${quoteValue(name, 70).slice(1, -1)}}} left as literal text (supported: ${TEMPLATE_VARIABLES.map(v => `{{${v}}}`).join(', ')})`,
     );
+  for (const [name, n] of Object.entries(vars.counts))
+    if (n > MAX_PLACEHOLDER_USES)
+      fieldWarnings.push(
+        `{{${name}}} is used ${n} times; more than ${MAX_PLACEHOLDER_USES} makes the run refuse to build its prompt`,
+      );
   if (vars.unknown.length > MAX_UNKNOWN_PLACEHOLDER_WARNINGS)
     fieldWarnings.push(
       `${vars.unknown.length - MAX_UNKNOWN_PLACEHOLDER_WARNINGS} more unknown placeholder(s) not listed`,

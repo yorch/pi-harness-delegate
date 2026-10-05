@@ -213,3 +213,49 @@ test('delegate(): a template with variables reaches the harness with the placeho
     },
   );
 });
+
+test('whitespace inside the braces is spaces/tabs only: {{ task }} substitutes, {{task<newline>}} is literal text', () => {
+  const r = scanTemplateVariables('{{ task }} {{\ttask\t}} {{task\n}} {{\nscope}} {{scope\r}}');
+  assert.deepEqual([...r.known], ['task']);
+  assert.equal(r.counts.task, 2);
+  assert.deepEqual(r.unknown, []);
+  const t = mk('A={{ task }} B={{\ttask}} C={{task\n}} D={{\nscope}}');
+  assert.equal(t.usesVariables, true);
+  const prompt = buildPrompt(t, 'T', null, '/r', 'claude', NONCE);
+  assert.ok(prompt.includes('A=T B=T C={{task\n}} D={{\nscope}}'), prompt);
+  // a body whose only "placeholder" spans a newline uses no variables at all
+  assert.equal(mk('only {{task\n}} here').usesVariables, undefined);
+});
+
+test('the scope preamble is position-neutral: it never says "the task above" (a {{scope}} may come before {{task}})', () => {
+  const t = mk('First the scope:\n{{scope}}\nThen do: {{task}}');
+  for (const scope of [
+    { heading: 'Restrict your work to this scope:', data: 'src/a.ts', kind: 'restriction' as const },
+    { heading: 'Current git diff:', data: '+x\n' },
+  ]) {
+    const prompt = buildPrompt(t, 'T', scope, '/r', 'claude', NONCE);
+    assert.ok(prompt.indexOf('BEGIN') < prompt.indexOf('Then do: T'), 'scope really is before the task');
+    assert.ok(!/task above/.test(prompt), prompt);
+  }
+});
+
+test('repeating a placeholder is bounded: >16 uses is refused, and a repeated {{scope}} cannot build a prompt past 2 MB', () => {
+  const many = mk('{{task}} '.repeat(17));
+  assert.throws(() => buildPrompt(many, 'T', null, '/r', 'claude', NONCE), /uses \{\{task\}\} 17 times \(at most 16/);
+  assert.ok(many.fieldWarnings?.some(w => /\{\{task\}\} is used 17 times/.test(w)));
+  // 16 copies of a 200 KB scope = 3.2 MB: refused with a clear message instead of a giant prompt
+  const amplified = mk('{{scope}}\n'.repeat(16));
+  const big = { heading: 'Current git diff:', data: 'x'.repeat(200_000) };
+  assert.throws(
+    () => buildPrompt(amplified, 'T', big, '/r', 'claude', NONCE),
+    /expanded prompt is \d+ characters \(limit 2097152 when a placeholder is repeated\)/,
+  );
+  // a modest repeat is fine
+  assert.doesNotThrow(() => buildPrompt(amplified, 'T', { heading: 'h', data: 'small' }, '/r', 'claude', NONCE));
+  // a SINGLE use (or none) keeps the old unbounded behaviour: a big diff still goes through once
+  const once = mk('{{scope}}');
+  assert.doesNotThrow(() => buildPrompt(once, 'T', { heading: 'h', data: 'x'.repeat(3_000_000) }, '/r', 'claude'));
+  assert.doesNotThrow(() =>
+    buildPrompt(mk('plain body'), 'T', { heading: 'h', data: 'x'.repeat(3_000_000) }, '/r', 'claude'),
+  );
+});
