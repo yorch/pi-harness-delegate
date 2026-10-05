@@ -146,7 +146,7 @@ extensions/            # the pi extension
   history.ts           # /delegate history (+ history-filter.ts: pure filter parsing/applying)
   run-record.ts        # run record sidecar (<transcript>.json): schema, tolerant parser, writer
   rerun.ts             # /delegate rerun: record selection + the pure rerun planner
-  recency.ts           # the one "newest" ordering (future-dated files last); private-dir.ts: ensurePrivateDir
+  recency.ts           # the "newest" ordering for choosing a run (future-dated files last) and the clamped prune ordering; private-dir.ts: ensurePrivateDir
   sanitize.ts          # display escaping, the stored-text reject list, whole-text confirmation blocks
   fanout-resume.ts     # resume a whole fan-out by its fan-out id
   subcommands.ts       # /delegate list | status | config | config init
