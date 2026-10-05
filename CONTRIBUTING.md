@@ -40,6 +40,9 @@ PI_DELEGATE_LIVE=1 bun test tests/live.test.ts --timeout 90000
 Harnesses whose binary isn't on `PATH` are skipped. An account-side failure (exhausted quota, missing auth)
 is reported as a real failure, on purpose.
 
+Name `tests/live.test.ts` explicitly, as above. An unfiltered `PI_DELEGATE_LIVE=1 bun test` is still safe — every
+other file stays on the pinned agent dir (see below) — but it runs the whole suite and pays for the live runs too.
+
 ### Isolating state: `PI_CODING_AGENT_DIR`
 
 Everything this extension reads or writes under `~/.pi/agent` — `settings.json`, user templates
@@ -49,11 +52,20 @@ throwaway manual session.
 
 As a safety net, `bun test` preloads `tests/helpers/preload.ts` (wired in `bunfig.toml`), which pins
 `PI_CODING_AGENT_DIR` to a fresh `mkdtemp` dir under `os.tmpdir()` for the whole test process — overriding any
-outer value — and removes it on exit. A test that sets its own via `withEnv`/`withSandbox` is restored to that
-pinned dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. The opt-in
-live suite (`PI_DELEGATE_LIVE=1`) skips the pin: spawned harnesses inherit the env, and `omp` (the `amp`
-harness) reads `PI_CODING_AGENT_DIR` as its own agent dir for auth/models. `bunfig.toml` and `tests/` are not
-in `package.json` `files`, so none of this ships.
+outer value — and removes it on exit and on SIGINT/SIGTERM/SIGHUP (re-raised afterwards, so Ctrl-C still stops
+the run with the usual status). A test that sets its own via `withEnv`/`withSandbox` is restored to that pinned
+dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. `bunfig.toml` and
+`tests/` are not in `package.json` `files`, so none of this ships.
+
+- **Run `bun test` from the repo root.** bun reads `bunfig.toml` only from its current directory, so `cd tests &&
+  bun test` runs without the preload. `tests/preload.test.ts` fails loudly in that case (it checks a marker the
+  preload sets and never imports the preload itself). `bun run test` works from anywhere — package scripts run
+  from the package root.
+- **Live mode is pinned too.** `PI_DELEGATE_LIVE=1` doesn't turn the pin off. The live suite hands the outer
+  `PI_CODING_AGENT_DIR` (recorded by the preload, `preloadState().outerAgentDir`) to the real harness CLIs around
+  each of its own runs only — `omp` (the `amp` harness) reads that var as its own agent dir for auth/models.
+- **Never import `tests/helpers/preload.ts` from a test.** Shared constants and helpers live in the side-effect-free
+  `tests/helpers/preload-state.ts`.
 
 ### Setting env vars in tests
 
@@ -61,8 +73,25 @@ Use `withEnv({ NAME: value }, fn)` (or `restoreEnv(name, prev)`) from `tests/hel
 `process.env.X = prev`. When `X` was unset, `prev` is `undefined`, and Node and Bun both store that as the
 *string* `"undefined"`. A restored `PI_CODING_AGENT_DIR="undefined"` once sent a straggling run's transcript
 into a relative `undefined/delegate/outputs/...` directory inside the repo. The helper deletes a var that was
-unset and restores it in `finally`, even when `fn` is async or throws. `tests/env-hygiene.test.ts` fails if any
-other test file writes to `process.env` directly.
+unset and restores it in `finally`, even when `fn` is async or throws (`tests/env.test.ts` covers it).
+
+`tests/env-hygiene.test.ts` fails if any other test file (`.ts`/`.js`/`.mjs`/`.tsx`/… under `tests/`) writes to
+`process.env` or `Bun.env` directly — plain, compound or `++` assignment, `delete`, `Object.assign`/`defineProperty`,
+`Reflect.set`, or aliasing env into a variable (`const e = process.env`, `const { env } = process`). It scans whole
+files with comments and string literals stripped, so mentioning the pattern in a comment or message is fine. To
+hand a child process a modified env, build a copy (`{ ...process.env, X: '1' }`) instead.
+
+As a runtime backstop, the preload's `afterEach` fails any test that leaves an env var whose value is exactly
+`"undefined"` or `"null"` (and removes it so later tests aren't affected). It catches what a static scan can't, but
+it's not a proof: a test that coerces and cleans up within its own body slips past it.
+
+### Tests that spawn processes
+
+Wait on conditions, not clocks: `tests/helpers/wait.ts` (`waitFor`, `readPid`, `waitForProcessExit`,
+`waitForNoProcessWithArg`). Give a spawning test an explicit generous timeout (`test(name, { timeout: 60_000 }, …)`)
+— bun's 5s default is shorter than those helpers' hang guards and than a cold spawn on a loaded machine. After a
+short runner timeout, don't `readPid`: the child may be killed before it writes its pid file; check that no process
+with the (unique) pid-file path in its argv is left instead.
 
 ## Project layout
 
