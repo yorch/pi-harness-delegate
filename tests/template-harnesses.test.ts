@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { templateHarnessDefault } from '../extensions/command.ts';
 import { parseTemplate, parseTemplateHarnesses } from '../extensions/templates.ts';
+import { unwrap } from './helpers/dialog.ts';
 import {
   CLAUDE_RESULT,
   CODEX_RESULT_LINES,
@@ -201,7 +202,7 @@ test('delegate tool: the allowDangerous confirm names every template harness; de
           /declined/,
         );
         assert.equal(declined.asked.length, 1);
-        assert.match(declined.asked[0], /run claude,codex fan with DANGER/);
+        assert.match(unwrap(declined.asked[0]), /run claude,codex fan with DANGER/);
         await assert.rejects(
           () => tools.get('delegate')?.execute('t', params, undefined, undefined, headless(cwd)) ?? Promise.resolve(),
           /no interactive UI to confirm it with/,
@@ -480,7 +481,7 @@ test('harness-partition fan-out default keeps the single allowDangerous confirm 
             /declined/,
           );
           assert.equal(declined.asked.length, 1);
-          assert.match(declined.asked[0], /run codex,claude pfan with DANGER/);
+          assert.match(unwrap(declined.asked[0]), /run codex,claude pfan with DANGER/);
           assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
         });
       });

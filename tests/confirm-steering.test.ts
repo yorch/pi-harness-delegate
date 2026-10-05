@@ -10,6 +10,7 @@ import {
   STEERING_DISPLAY,
   TOOL_PARAM_DISPLAY,
 } from '../extensions/validate.ts';
+import { unwrap } from './helpers/dialog.ts';
 import {
   type CapturedTool,
   CLAUDE_RESULT,
@@ -116,7 +117,7 @@ test('command danger confirm: shows every typed field, the verify command, and e
     addDirs: ['../x'],
     verify: 'rm -rf build && make',
   });
-  const text = t.asked[0];
+  const text = unwrap(t.asked[0]);
   for (const part of [
     'model: "sonnet"',
     'budget: $4',

@@ -23,12 +23,13 @@
  */
 
 import { resolve } from 'node:path';
+import type { ConfirmLayout, Viewport } from './confirm-layout.ts';
 import { ALIASES, HARNESS_NAMES } from './harnesses/registry.ts';
 import { type NormalizedPermission, TIER_RANK, type TierCeiling } from './harnesses/types.ts';
 import type { RunRecord, SkippedRecord } from './run-record.ts';
 import { displayText } from './run-record.ts';
 import { quoteFull, quoteValue } from './templates.ts';
-import { type RunSteering, safeName, sessionIdError, steeringFieldLines, steeringTextBlocks } from './validate.ts';
+import { buildConfirmation, type RunSteering, safeName, sessionIdError } from './validate.ts';
 
 export type FanoutResumePlan =
   | {
@@ -212,19 +213,28 @@ const ORIGIN_WORDS = {
   unknown: 'unknown (a legacy record, or one that does not say)',
 } as const;
 
+/** `items` joined, at most `max` of them, with `(+N more)` for the rest — a list a confirmation or a notice must not let grow. */
+export function listCapped(items: readonly string[], max = 8): string {
+  return items.length <= max ? items.join(', ') : `${items.slice(0, max).join(', ')}, (+${items.length - max} more)`;
+}
+
 /**
  * What a person is shown before a fan-out resume (both the command and the tool path): every member's
  * harness, its session id (<= 128 characters, shown whole, escaped), the tier its mode has today next to
- * the recorded one, who started it, and the follow-up task in full. Pure; every string is escaped.
+ * the recorded one, who started it, and the follow-up task in full. Pure; every string is escaped. Laid out
+ * by `buildConfirmation` — the follow-up task first, then the critical section (members, warnings, every
+ * steering field) and the summary last; a tool-requested resume whose task / scope does not fit is refused
+ * (`ok: false`), a command's is shown head + tail.
  */
 export function formatFanoutResumePlan(
   fanoutId: string,
   plan: Extract<FanoutResumePlan, { ok: true }>,
-  task: string | undefined,
   source: 'command' | 'tool',
-  extras: Omit<RunSteering, 'task' | 'harnesses' | 'mode' | 'sessions' | 'sessionId'> = {},
-): string {
-  const lines = [
+  /** Everything the caller set (`steeringFromCommand` / `steeringFromTool`); `task` is the follow-up. The plan lists its own members, sessions and mode, so those keys of `steering` are not shown twice. */
+  steering: RunSteering,
+  viewport?: Viewport,
+): ConfirmLayout {
+  const headline = [
     `Resume fan-out ${fanoutId}: every member continues its own recorded session on its own harness.`,
     `mode: ${quoteFull(plan.mode)}`,
     'members:',
@@ -234,23 +244,33 @@ export function formatFanoutResumePlan(
     ),
   ];
   if (plan.noSession.length > 0)
-    lines.push(`not resumed (no recorded session id): ${plan.noSession.map(safeName).join(', ')}`);
+    headline.push(`not resumed (no recorded session id): ${listCapped(plan.noSession.map(safeName))}`);
   if (plan.otherCwd.length > 0)
-    lines.push(`not resumed (recorded in another working directory): ${plan.otherCwd.join(', ')}`);
+    headline.push(`not resumed (recorded in another working directory): ${listCapped(plan.otherCwd)}`);
   if (plan.unreadable.length > 0)
-    lines.push(`not resumed (unreadable run record): ${plan.unreadable.map(safeName).join(', ')}`);
+    headline.push(`not resumed (unreadable run record): ${listCapped(plan.unreadable.map(safeName))}`);
   if (source === 'tool')
-    lines.push(
-      'WARNING: this was requested by the delegate tool (the model), not typed by you. Check the follow-up task below before approving.',
+    headline.push(
+      'WARNING: this was requested by the delegate tool (the model), not typed by you. Check the follow-up task above before approving.',
     );
   else if (plan.members.some(m => m.origin !== 'command'))
-    lines.push(
+    headline.push(
       'WARNING: at least one member was NOT recorded as started by a /delegate command (the record says the tool, or nothing).',
     );
-  lines.push(...steeringFieldLines(extras));
-  if (task === undefined || task === '') {
-    lines.push("follow-up task: (the mode's default)");
-    if (extras.scope !== undefined) lines.push(...steeringTextBlocks({ scope: extras.scope }));
-  } else lines.push(...steeringTextBlocks({ scope: extras.scope, task }, 'follow-up task'));
-  return lines.join('\n');
+  const hasTask = steering.task !== undefined && steering.task !== '';
+  if (!hasTask) headline.push("follow-up task: (the mode's default)");
+  return buildConfirmation({
+    headline,
+    steering: {
+      ...steering,
+      task: hasTask ? steering.task : undefined,
+      harnesses: undefined,
+      mode: undefined,
+      sessions: undefined,
+      sessionId: undefined,
+    },
+    taskLabel: 'follow-up task',
+    onOverflow: source === 'tool' ? 'refuse' : 'headtail',
+    viewport,
+  });
 }

@@ -37,6 +37,7 @@ import {
   templateHarnessDefault,
 } from './command.ts';
 import { type DelegateConfig, loadConfig } from './config.ts';
+import { effectiveRunLines, resolveRunTargets } from './effective.ts';
 import {
   type DelegateToolParams,
   delegate,
@@ -50,7 +51,7 @@ import {
   takePendingReport,
 } from './engine.ts';
 import { closeWhenMounted, type RunUiState, runFanoutCommand, runFanoutTool } from './fanout.ts';
-import { type FanoutResumePlan, formatFanoutResumePlan, planFanoutResume } from './fanout-resume.ts';
+import { type FanoutResumePlan, formatFanoutResumePlan, listCapped, planFanoutResume } from './fanout-resume.ts';
 import {
   ALIASES,
   getHarness,
@@ -82,6 +83,8 @@ import {
   confirmDangerousToolCall,
   confirmToolAddDirs,
   safeName,
+  steeringFromCommand,
+  steeringFromTool,
   steeringRefusal,
 } from './validate.ts';
 
@@ -297,21 +300,18 @@ export default function (pi: ExtensionAPI) {
         // every param the model set that steers the run is in the plan; a task / scope too long to show whole is
         // refused (the model has no way to say "I accept it is not shown in full")
         const steering = {
-          scope: rawParams.scope,
-          model: rawParams.model,
-          pr: rawParams.pr,
-          budgetUsd: rawParams.maxBudgetUsd,
-          timeoutSec: rawParams.timeoutSec,
-          addDirs: rawParams.addDirs,
+          ...steeringFromTool(rawParams),
+          effective: effectiveRunLines(ctx, config, plan.harnesses, rawParams.mode ?? plan.mode, {
+            model: rawParams.model,
+            budgetUsd: rawParams.maxBudgetUsd,
+            timeoutSec: rawParams.timeoutSec,
+          }),
         };
-        const tooBig = steeringRefusal({ ...steering, task: rawParams.task });
+        const tooBig = steeringRefusal(steering);
         if (tooBig) throw new Error(`resumeFanout ${rawParams.resumeFanout} refused: ${tooBig}`);
-        if (
-          !(await confirmResumePlan(
-            ctx,
-            formatFanoutResumePlan(rawParams.resumeFanout, plan, rawParams.task, 'tool', steering),
-          ))
-        )
+        const shown = formatFanoutResumePlan(rawParams.resumeFanout, plan, 'tool', steering);
+        if (!shown.ok) throw new Error(`resumeFanout ${rawParams.resumeFanout} refused: ${shown.reason}`);
+        if (!(await confirmResumePlan(ctx, shown.lines.join('\n'))))
           throw new Error(`resumeFanout ${rawParams.resumeFanout} was declined by the user — nothing was run`);
         resumePlan = plan;
         harness = plan.harnesses.join(',');
@@ -331,7 +331,24 @@ export default function (pi: ExtensionAPI) {
       }
       // A model-set allowDangerous is never honored on its own — a human confirms it (or, with no
       // UI to ask, it's refused). Checked once up front, before any fan-out. See validate.ts.
-      if (params.allowDangerous === true) await confirmDangerousToolCall(ctx, params);
+      if (params.allowDangerous === true) {
+        // headless: nobody to ask, so fail closed BEFORE probing any binary (detection is only for what the dialog names)
+        const interactive = ctx.hasUI && typeof ctx.ui?.confirm === 'function';
+        const target = interactive ? await resolveRunTargets(config, params.harness, params.mode) : undefined;
+        await confirmDangerousToolCall(
+          ctx,
+          params,
+          target && {
+            harnesses: target.harnesses,
+            mode: target.mode,
+            effective: effectiveRunLines(ctx, config, target.harnesses, target.mode, {
+              model: params.model,
+              budgetUsd: params.maxBudgetUsd,
+              timeoutSec: params.timeoutSec,
+            }),
+          },
+        );
+      }
       // Same trust model for model-set addDirs: inside cwd is fine, anything outside needs a human
       // (fail closed without a UI). Covers single, fan-out, and the claude_delegate alias.
       await confirmToolAddDirs(ctx, params.addDirs);
@@ -704,23 +721,27 @@ export default function (pi: ExtensionAPI) {
       // An interactive session always sees the plan (members, session ids, today's tier, the follow-up
       // task) and must approve it. Headless: the human typed the explicit fan-out id — allowed, the other
       // gates (agreement, tier check, danger confirm) still apply.
-      if (
-        ctx.hasUI &&
-        !(await confirmResumePlan(
-          ctx,
-          formatFanoutResumePlan(parsed.sessionId, plan, parsed.task, 'command', {
-            scope: parsed.scope,
+      if (ctx.hasUI) {
+        const config = loadConfig();
+        const shown = formatFanoutResumePlan(parsed.sessionId, plan, 'command', {
+          ...steeringFromCommand(parsed),
+          effective: effectiveRunLines(ctx, config, plan.harnesses, parsed.mode ?? plan.mode, {
             model: parsed.model,
-            pr: parsed.pr,
             budgetUsd: parsed.budget,
+            budgetNarrowOnly: parsed.storedBudget,
             timeoutSec: parsed.timeoutSec,
-            addDirs: parsed.addDirs,
+            timeoutMayRaise: parsed.storedTimeout !== true,
             verify: parsed.verify,
           }),
-        ))
-      ) {
-        say(`resume of fan-out ${parsed.sessionId} was declined — nothing was run`);
-        return;
+        });
+        if (!shown.ok) {
+          say(`resume of fan-out ${parsed.sessionId} refused: ${shown.reason}`);
+          return;
+        }
+        if (!(await confirmResumePlan(ctx, shown.lines.join('\n')))) {
+          say(`resume of fan-out ${parsed.sessionId} was declined — nothing was run`);
+          return;
+        }
       }
       if (plan.noSession.length > 0)
         say(
@@ -728,7 +749,7 @@ export default function (pi: ExtensionAPI) {
         );
       if (plan.otherCwd.length > 0)
         say(
-          `resuming fan-out ${parsed.sessionId}; recorded in another working directory, not resumed: ${plan.otherCwd.join(', ')}`,
+          `resuming fan-out ${parsed.sessionId}; recorded in another working directory, not resumed: ${listCapped(plan.otherCwd)}`,
         );
       if (plan.unreadable.length > 0)
         say(
@@ -785,18 +806,22 @@ export default function (pi: ExtensionAPI) {
     let allowDangerous = false;
     if (parsed.allowDangerous) {
       try {
+        const config = loadConfig();
+        const mode = parsed.mode ?? config.defaultMode;
         await confirmDangerousCommand(ctx, {
-          harnesses: [harnessName],
-          mode: parsed.mode ?? loadConfig().defaultMode,
+          ...parsed,
           task: resolved.task,
           scope: resolved.scope,
-          model: parsed.model,
-          budget: parsed.budget,
-          timeoutSec: parsed.timeoutSec,
-          sessionId: parsed.sessionId,
-          pr: parsed.pr,
-          addDirs: parsed.addDirs,
-          verify: parsed.verify,
+          harnesses: [harnessName],
+          mode,
+          effective: effectiveRunLines(ctx, config, [harnessName], mode, {
+            model: parsed.model,
+            budgetUsd: parsed.budget,
+            budgetNarrowOnly: parsed.storedBudget,
+            timeoutSec: parsed.timeoutSec,
+            timeoutMayRaise: parsed.storedTimeout !== true,
+            verify: parsed.verify,
+          }),
         });
         allowDangerous = true;
       } catch (err) {
@@ -965,6 +990,7 @@ export default function (pi: ExtensionAPI) {
         isKnownHarness,
         // today's template, classified by the engine's own rules — see effectiveTemplateTier
         modeTier: todaysModeTier(ctx),
+        effective: (harnesses, mode, call) => effectiveRunLines(ctx, loadConfig(), harnesses, mode, call),
         siblings: record.fanoutId
           ? everything.records.map(l => l.record).filter(r => r.fanoutId === record.fanoutId)
           : [],

@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { withEnv } from './env.ts';
+import { withViewport } from './viewport.ts';
 
 /**
  * Shared scaffolding for tests that drive the real extension (`delegate()`, the registered tools and
@@ -46,7 +47,8 @@ export async function withSandbox<T>(
   write(join(cwd, '.pi', 'delegate', 'templates'), opts.templates);
   write(join(agentDir, 'delegate', 'templates'), opts.userTemplates);
   try {
-    return await withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => fn({ agentDir, cwd }));
+    // every confirmation dialog is laid out for the terminal's size: pin it, so a test never depends on the developer's window
+    return await withViewport(80, 40, () => withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => fn({ agentDir, cwd })));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

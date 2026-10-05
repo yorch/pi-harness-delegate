@@ -10,6 +10,7 @@ import type { OverlayHandle } from '@earendil-works/pi-tui';
 import { buildFanoutReport, type FanoutRunSummary, formatToolUse, orderFanoutResults } from './activity.ts';
 import { fanoutResumeError, type parseDelegateCommand, resolveDefaults, resolveHarnessList } from './command.ts';
 import { type DelegateConfig, loadConfig } from './config.ts';
+import { effectiveRunLines } from './effective.ts';
 import {
   type DelegateToolParams,
   delegate,
@@ -33,7 +34,7 @@ import { formatFanoutChip, multiProgressWindow, type RunRow } from './progress-m
 import { newFanoutId } from './run-record.ts';
 import { loadTemplates } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { confirmDangerousCommand, validateDelegateInputs } from './validate.ts';
+import { confirmDangerousCommand, groupTaskScopes, validateDelegateInputs } from './validate.ts';
 /** How long the fan-out overlay lingers on the finished board after the last run resolves, so a
  *  user who looked away still catches the final state instead of it clearing instantly. */
 export const FANOUT_LINGER_MS = 3000;
@@ -516,19 +517,31 @@ export async function runFanoutCommand(
   // harness, and never a run before it's approved. A decline (or no UI) runs nothing.
   if (parsed.allowDangerous && specs.length > 0) {
     try {
+      const groups = groupTaskScopes(specs.map(s => ({ name: s.harnessName, task: s.task, scope: s.scope })));
       await confirmDangerousCommand(ctx, {
+        ...parsed,
+        // each member's EFFECTIVE task / scope (a template default fills in what was not typed)
+        task: groups[0].task,
+        scope: groups[0].scope,
+        taskGroups: groups,
         harnesses: specs.map(s => s.harnessName),
         mode: modeForReport,
-        task: specs[0].task,
-        scope: specs[0].scope,
-        model: parsed.model,
-        budget: parsed.budget,
-        timeoutSec: parsed.timeoutSec,
         sessionId: resume ? undefined : parsed.sessionId,
         sessions: resume ? resume.sessions : undefined,
-        pr: parsed.pr,
-        addDirs: parsed.addDirs,
-        verify: parsed.verify,
+        effective: effectiveRunLines(
+          ctx,
+          loadConfig(),
+          specs.map(s => s.harnessName),
+          modeForReport,
+          {
+            model: parsed.model,
+            budgetUsd: parsed.budget,
+            budgetNarrowOnly: parsed.storedBudget,
+            timeoutSec: parsed.timeoutSec,
+            timeoutMayRaise: parsed.storedTimeout !== true,
+            verify: parsed.verify,
+          },
+        ),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

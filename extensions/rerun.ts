@@ -15,6 +15,8 @@
 import { resolve } from 'node:path';
 import type { DelegateCommandArgs } from './command.ts';
 import { legacyOutputsDir, outputsDir } from './config.ts';
+import { SCOPE_LIMITS, TASK_LIMITS, textTooLongReason, type Viewport } from './confirm-layout.ts';
+import type { EffectiveCall } from './effective.ts';
 import { HARNESS_NAMES } from './harnesses/registry.ts';
 import { type NormalizedPermission, TIER_RANK, type TierCeiling } from './harnesses/types.ts';
 import type { HistoryEntry } from './history-filter.ts';
@@ -29,9 +31,9 @@ import {
   readRecordsIn,
   type SkippedRecord,
 } from './run-record.ts';
-import { forbiddenCharacter, SCOPE_LIMITS, TASK_LIMITS, textTooLongReason } from './sanitize.ts';
+import { forbiddenCharacter } from './sanitize.ts';
 import { callTimeoutError, quoteFull, quoteValue } from './templates.ts';
-import { steeringTextBlocks, validateDelegateInputs } from './validate.ts';
+import { buildConfirmation, fieldRefusal, validateDelegateInputs } from './validate.ts';
 
 /**
  * Every usable record on disk — all harness partitions plus the legacy dir — newest transcript first
@@ -166,6 +168,10 @@ export interface RerunEnv {
   modeTier: (harness: string, mode: string) => NormalizedPermission | null;
   /** Records sharing the selected one's fan-out id (when it has one), newest first. */
   siblings: readonly RunRecord[];
+  /** The terminal the plan will be shown on (default: the real one). */
+  viewport?: Viewport;
+  /** What the run will actually apply once template / config defaults are resolved, one line per harness (`effectiveRunLines`). */
+  effective?: (harnesses: string[], mode: string, call: EffectiveCall) => string[];
 }
 
 export interface RerunPlan {
@@ -287,10 +293,14 @@ export function planRerun(
   const targets = harnessNames.filter(h => h !== 'all');
   const tiers: string[] = [];
   const ceiling: Record<string, TierCeiling> = {};
-  // typing the SAME value the record already has (once normalized) is not a choice — it skips nothing
-  const typedTarget =
-    (overrides.mode !== undefined && overrides.mode !== record.mode) ||
-    (typedHarness !== undefined && typedHarness !== record.harness);
+  // typing the SAME value the record already has (once normalized) is not a choice — it skips nothing. Judged PER
+  // HARNESS: a typed list (`--harness=claude,codex`) skips the tier check only for a harness that was never a
+  // recorded member of this run / fan-out (a different harness is the human's choice); a member that WAS recorded
+  // keeps the check, exactly as a bare `rerun --fanout` does. A typed mode that differs from the record's is a
+  // choice for every harness.
+  const recordedMembers = new Set([record, ...env.siblings].map(r => r.harness));
+  const typedMode = overrides.mode !== undefined && overrides.mode !== record.mode;
+  const typedChoice = (h: string): boolean => typedMode || (typedHarness !== undefined && !recordedMembers.has(h));
   for (const h of targets) {
     const now = env.modeTier(h, mode);
     if (now === null) {
@@ -304,7 +314,7 @@ export function planRerun(
     ceiling[h] = now;
     const was = recordedTier(h);
     tiers.push(`${h}: ${now}${now === was ? '' : ` (recorded run: ${was})`}`);
-    if (!typedTarget && TIER_RANK[now] > TIER_RANK[was])
+    if (!typedChoice(h) && TIER_RANK[now] > TIER_RANK[was])
       return fail(
         `mode ${quoteValue(mode, 80)} on ${h} now runs at ${now} permission, but the recorded run used ${was} — the template has been widened since, so it is not re-run as a repeat. Start it with the normal command (/delegate ${h} ${displayText(mode, 40)} <prompt>) if you want the wider tier`,
       );
@@ -357,12 +367,12 @@ export function planRerun(
   // A value a confirmation cannot show whole (too many characters OR too many lines — a dialog taller than
   // the screen scrolls its top away) is not run on the strength of a partial view.
   if (!flags.longTask) {
-    const taskWhy = textTooLongReason(task, TASK_LIMITS);
+    const taskWhy = textTooLongReason(task, TASK_LIMITS, env.viewport);
     if (taskWhy)
       return fail(
         `the stored task is ${taskWhy}. Pass --long-task to repeat it anyway (the confirmation then shows only its head and tail, and says how many lines and characters were not shown)`,
       );
-    const scopeWhy = storedScope && scope !== undefined ? textTooLongReason(scope, SCOPE_LIMITS) : null;
+    const scopeWhy = storedScope && scope !== undefined ? textTooLongReason(scope, SCOPE_LIMITS, env.viewport) : null;
     if (scopeWhy)
       return fail(
         `the stored scope is ${scopeWhy}. Pass --long-task to repeat it anyway (the confirmation then shows only its head and tail, and says how many lines and characters were not shown)`,
@@ -404,32 +414,72 @@ export function planRerun(
   if (sessionId === undefined && record.sessionId)
     notices.push('starting a fresh session (pass --resume to continue the recorded one)');
 
-  summary.push(
+  // The stored values are untrusted: the same size limits a model-set run is held to (a confirmation shows each
+  // value whole), so a hand-edited record cannot bury what matters under a wall of directories.
+  const storedFields = fieldRefusal({
+    model: overrides.model === undefined ? model : undefined,
+    pr: overrides.pr === undefined ? pr : undefined,
+    sessionId: flags.resumeOwn ? sessionId : undefined,
+    addDirs: storedAddDirs.length > 0 ? storedAddDirs : undefined,
+  });
+  if (storedFields) return fail(`the stored record is too big to confirm: ${storedFields}`);
+
+  // The plan, laid out for the real terminal (confirm-layout.ts): the task / scope blocks FIRST, then the critical
+  // section — what will run, who started it, the warning, today's tier and every setting — and the size summaries
+  // LAST. A task / scope that does not fit is refused unless the human typed --long-task (then head + tail).
+  const headline = [
     `Re-run ${record.runId}`,
     // every name was checked against the known harnesses (or is `all`) above, so it is plain text
     `harness: ${harnessNames.join(', ')}`,
     `mode: ${quoteFull(mode)} — today's template of that name, not a stored copy`,
     `permission tier now: ${tiers.length > 0 ? tiers.join('; ') : 'resolved per harness at run time'}`,
     `originally started by: ${started.length > 1 ? origins.map(o => describeOrigin(o === 'unknown' ? null : (o as 'tool' | 'command'))).join('; ') : describeOrigin(record.origin)} (as recorded in the sidecar, unverified)`,
-  );
+  ];
   if (notCommand)
-    summary.push(
-      'WARNING: this was NOT typed by you as a /delegate command — the record says it was started by something else (or does not say). Check the task below before approving.',
+    headline.push(
+      'WARNING: this was NOT typed by you as a /delegate command — the record says it was started by something else (or does not say). Check the task above before approving.',
     );
-  if (pr !== undefined) summary.push(`pr: ${quoteFull(pr)}`);
-  if (addDirs !== undefined)
-    summary.push(
-      `addDirs: ${addDirs.map(d => quoteFull(d)).join(', ')}${storedAddDirs.length > 0 ? ' (from the record)' : ''}`,
+  if (sessionId === undefined) headline.push('session: fresh');
+  headline.push(`directory: ${quoteFull(env.cwd)}`);
+  const effectiveHarnesses = targets.filter(h => ceiling[h] !== 'unavailable');
+  const laid = buildConfirmation({
+    headline,
+    steering: {
+      task,
+      scope,
+      model,
+      sessionId,
+      pr,
+      budgetUsd: budget,
+      timeoutSec,
+      addDirs,
+      verify: overrides.verify,
+      typed: { scope: overrides.scope !== undefined },
+      effective: env.effective?.(effectiveHarnesses, mode, {
+        model,
+        budgetUsd: budget,
+        budgetNarrowOnly: storedBudget,
+        timeoutSec,
+        timeoutMayRaise: !storedTimeout,
+        verify: overrides.verify,
+      }),
+      notes: {
+        budgetUsd: storedBudget ? ' (stored; can only lower a configured budget)' : undefined,
+        timeoutSec: storedTimeout ? ' (stored; can only lower the configured timeout)' : undefined,
+        addDirs: storedAddDirs.length > 0 ? ' (from the record)' : undefined,
+      },
+    },
+    taskLabel: 'task',
+    onOverflow: flags.longTask ? 'headtail' : 'refuse',
+    viewport: env.viewport,
+  });
+  if (!laid.ok)
+    return fail(
+      laid.kind === 'blocks'
+        ? `${laid.reason.replace(/ — too long for a person to review in the confirmation, so it is refused\. Shorten it$/, '')}. Pass --long-task to repeat it anyway (the confirmation then shows only its head and tail, and says how many rows, lines and characters were not shown)`
+        : laid.reason,
     );
-  if (model !== undefined) summary.push(`model: ${quoteFull(model)}`);
-  if (budget !== undefined)
-    summary.push(`budget: $${budget}${storedBudget ? ' (stored; can only lower a configured budget)' : ''}`);
-  if (timeoutSec !== undefined)
-    summary.push(`timeout: ${timeoutSec}s${storedTimeout ? ' (stored; can only lower the configured timeout)' : ''}`);
-  summary.push(sessionId === undefined ? 'session: fresh' : `session: resumes ${quoteFull(sessionId)}`);
-  summary.push(`directory: ${quoteFull(env.cwd)}`);
-  // the multi-line blocks, then their size summaries — LAST, the part of a bottom-anchored dialog that is always on screen
-  summary.push(...steeringTextBlocks({ task, scope }, 'task'));
+  summary.push(...laid.lines);
 
   const args: DelegateCommandArgs = { task, harness: harnessSpec, mode };
   if (scope !== undefined) args.scope = scope;
