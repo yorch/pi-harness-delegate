@@ -53,6 +53,10 @@ import {
   projectTemplatePresence,
   quoteValue,
   resolveNativePermission,
+  scanTemplateVariables,
+  TEMPLATE_VARIABLE_RE,
+  TEMPLATE_VARIABLES,
+  type TemplateVariable,
 } from './templates.ts';
 import { validateDelegateInputs } from './validate.ts';
 /** Render a possibly-unknown cost — `null` means the harness didn't report one, not a measured $0. */
@@ -310,22 +314,46 @@ export function buildPrompt(
   harness: string,
   nonce?: string,
 ): string {
+  // The scope section as it appears in the prompt (heading + delimited data), built once so a
+  // `{{scope}}` placeholder and the appended `# Scope` section are the very same, fenced text.
+  let scopeBlock: string | null = null;
+  if (scope) {
+    scopeBlock = scope.heading;
+    if (scope.data) {
+      const fence = scope.kind === 'restriction' ? fenceScope : fenceUntrusted;
+      scopeBlock += `\n${fence(scope.data, nonce)}`;
+    }
+  }
+  // Template variables (templates.ts, TEMPLATE_VARIABLES): ONE pass over the template body with a
+  // function replacer — substituted text is never re-scanned, so a task/scope/cwd containing
+  // `{{scope}}` is inserted verbatim and expands to nothing. `{{scope}}` is only ever the delimited
+  // block above, never raw diff/PR/scope text. Unknown placeholders stay literal.
+  const used = scanTemplateVariables(template.prompt).known;
+  const values: Record<TemplateVariable, () => string> = {
+    task: () => task,
+    scope: () => scopeBlock ?? '(no scope restriction)',
+    cwd: () => quoteValue(cwd, 500),
+    harness: () => harness,
+    mode: () => quoteValue(template.name, 200),
+  };
+  const body =
+    used.size === 0
+      ? template.prompt
+      : template.prompt.replace(TEMPLATE_VARIABLE_RE, (whole, name: string) =>
+          (TEMPLATE_VARIABLES as readonly string[]).includes(name) ? values[name as TemplateVariable]() : whole,
+        );
   let prompt = [
     `You are being delegated a subtask by the pi coding agent.`,
     `Working directory: ${cwd}`,
     `Harness: ${harness}`,
     `Mode: ${template.name}`,
     ``,
-    template.prompt,
+    body,
   ].join('\n');
-  prompt += `\n\n# Task\n${task}`;
-  if (scope) {
-    prompt += `\n\n# Scope\n${scope.heading}`;
-    if (scope.data) {
-      const fence = scope.kind === 'restriction' ? fenceScope : fenceUntrusted;
-      prompt += `\n${fence(scope.data, nonce)}`;
-    }
-  }
+  // Absent a placeholder, the task/scope sections are appended exactly as before — so a scope can
+  // never be silently dropped by a template that only positions {{task}}, and vice versa.
+  if (!used.has('task')) prompt += `\n\n# Task\n${task}`;
+  if (scopeBlock !== null && !used.has('scope')) prompt += `\n\n# Scope\n${scopeBlock}`;
   if (template.skill) prompt += `\n\nUse the "${template.skill}" skill.`;
   return prompt;
 }

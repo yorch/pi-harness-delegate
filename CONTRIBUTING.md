@@ -143,7 +143,10 @@ extensions/            # the pi extension
   index.ts             # entry: tool + /delegate command registration, single-run overlay
   engine.ts            # delegate() — the shared single-run engine — and its helpers
   fanout.ts            # fan-out (tool + /delegate all/comma-list), multi-run overlay driver
-  history.ts           # /delegate history
+  history.ts           # /delegate history (+ history-filter.ts: pure filter parsing/applying)
+  run-record.ts        # run record sidecar (<transcript>.json): schema, tolerant parser, writer
+  rerun.ts             # /delegate rerun: record selection + the pure rerun planner
+  fanout-resume.ts     # resume a whole fan-out by its fan-out id
   subcommands.ts       # /delegate list | status | config | config init
   harnesses/           # harness abstraction (claude, codex, opencode, amp, devin) + registry
   runner.ts            # stdout transport: generic runHarness spawn+readline loop

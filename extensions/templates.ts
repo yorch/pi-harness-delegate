@@ -49,6 +49,11 @@ export interface DelegateTemplate {
   /** Extra directories the harness may access (`addDirs: ../shared, /opt/lib` — comma-separated). */
   addDirs?: string[];
   prompt: string;
+  /**
+   * The body uses at least one supported `{{placeholder}}` (see `TEMPLATE_VARIABLES`) — boolean only,
+   * for discovery. Unknown placeholders are left literal and reported in `fieldWarnings`.
+   */
+  usesVariables?: boolean;
   harness?: string;
   /** Which tier this template was loaded from — set by `loadTemplates`, absent from `parseTemplate`. */
   source?: TemplateSource;
@@ -178,6 +183,32 @@ function escapeInvisible(text: string): string {
  */
 export function quoteValue(value: string, max = 60): string {
   return escapeInvisible(JSON.stringify(value)).slice(0, max);
+}
+
+/**
+ * The placeholders a template body may position: `{{task}}` (the instruction, as typed), `{{scope}}`
+ * (the already-**delimited** scope section — never raw diff/PR/scope text), `{{cwd}}` (quoted),
+ * `{{harness}}`, `{{mode}}`. Nothing else — no env vars, no files. Substituted once, in a single pass,
+ * by `buildPrompt` (engine.ts); substituted text is never re-scanned.
+ */
+export const TEMPLATE_VARIABLES = ['task', 'scope', 'cwd', 'harness', 'mode'] as const;
+export type TemplateVariable = (typeof TEMPLATE_VARIABLES)[number];
+
+/** `{{ name }}` — identifier-shaped only, so ordinary `{{` in code samples is not mistaken for one. */
+export const TEMPLATE_VARIABLE_RE = /\{\{\s*([A-Za-z_][A-Za-z0-9_.-]{0,63})\s*\}\}/g;
+
+const MAX_UNKNOWN_PLACEHOLDER_WARNINGS = 5;
+
+/** Which supported placeholders `body` uses, and the (distinct) unknown identifier-shaped ones. Pure. */
+export function scanTemplateVariables(body: string): { known: Set<TemplateVariable>; unknown: string[] } {
+  const known = new Set<TemplateVariable>();
+  const unknown: string[] = [];
+  for (const m of body.matchAll(TEMPLATE_VARIABLE_RE)) {
+    const name = m[1];
+    if ((TEMPLATE_VARIABLES as readonly string[]).includes(name)) known.add(name as TemplateVariable);
+    else if (!unknown.includes(name)) unknown.push(name);
+  }
+  return { known, unknown };
 }
 
 interface LegacyPermission {
@@ -453,6 +484,16 @@ export function parseTemplate(text: string): DelegateTemplate | null {
   if (timeout.warning) fieldWarnings.push(timeout.warning);
   const harnesses = parseTemplateHarnesses(meta.harnesses);
   fieldWarnings.push(...harnesses.warnings);
+  const body = m[2].trim();
+  const vars = scanTemplateVariables(body);
+  for (const name of vars.unknown.slice(0, MAX_UNKNOWN_PLACEHOLDER_WARNINGS))
+    fieldWarnings.push(
+      `unknown placeholder {{${quoteValue(name, 70).slice(1, -1)}}} left as literal text (supported: ${TEMPLATE_VARIABLES.map(v => `{{${v}}}`).join(', ')})`,
+    );
+  if (vars.unknown.length > MAX_UNKNOWN_PLACEHOLDER_WARNINGS)
+    fieldWarnings.push(
+      `${vars.unknown.length - MAX_UNKNOWN_PLACEHOLDER_WARNINGS} more unknown placeholder(s) not listed`,
+    );
 
   return {
     name,
@@ -472,7 +513,8 @@ export function parseTemplate(text: string): DelegateTemplate | null {
     defaultScope: meta.defaultScope || undefined,
     verify: meta.verify || undefined,
     addDirs: parseList(meta.addDirs),
-    prompt: m[2].trim(),
+    prompt: body,
+    usesVariables: vars.known.size > 0 ? true : undefined,
     harness: meta.harness || undefined,
     timeoutSec: timeout.timeoutSec,
     harnesses: harnesses.harnesses,
