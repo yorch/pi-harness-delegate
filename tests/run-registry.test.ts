@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { withEnv } from './helpers/env.ts';
 
 // `fn` is always an async callback, so this must itself stay async and `await` it (not just
 // `return fn(dir)` from a sync try/finally): every one of these tests' first statement is an
@@ -12,10 +13,7 @@ import { test } from 'node:test';
 // pointing every test at the real ~/.pi/agent instead of an isolated tmp dir.
 function withAgentDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'run-registry-'));
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = dir;
-  return fn(dir).finally(() => {
-    process.env.PI_CODING_AGENT_DIR = prev;
+  return withEnv({ PI_CODING_AGENT_DIR: dir }, () => fn(dir)).finally(() => {
     rmSync(dir, { recursive: true, force: true });
   });
 }

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { withEnv } from './helpers/env.ts';
 
 /**
  * Exercises `delegate()` (the shared engine in index.ts) directly with a fake `pi`/`ctx`, so the
@@ -30,12 +31,9 @@ async function withSandbox<T>(
     JSON.stringify({ delegate: { maxConcurrent: opts.maxConcurrent ?? 1, maxTranscripts: 5, ...opts.settings } }),
   );
   for (const [name, body] of Object.entries(opts.templates ?? {})) writeFileSync(join(tplDir, `${name}.md`), body);
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
-    return await fn({ agentDir, cwd });
+    return await withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => fn({ agentDir, cwd }));
   } finally {
-    process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -391,16 +389,9 @@ async function withFakeBinaries<T>(
     writeFileSync(join(binDir, name), script);
     chmodSync(join(binDir, name), 0o755);
   }
-  const prevPath = process.env.PATH;
-  const prevArgs = process.env.FAKE_ARGS_FILE;
-  process.env.PATH = `${binDir}:${prevPath}`;
-  process.env.FAKE_ARGS_FILE = argsFile;
   try {
-    return await fn(argsFile);
+    return await withEnv({ PATH: `${binDir}:${process.env.PATH}`, FAKE_ARGS_FILE: argsFile }, () => fn(argsFile));
   } finally {
-    process.env.PATH = prevPath;
-    if (prevArgs === undefined) delete process.env.FAKE_ARGS_FILE;
-    else process.env.FAKE_ARGS_FILE = prevArgs;
     rmSync(binDir, { recursive: true, force: true });
   }
 }
@@ -1322,16 +1313,9 @@ rl.on('line', line => {
   );
   writeFileSync(join(binDir, name), `#!/bin/sh\nexec '${process.execPath}' '${agent}' "$@"\n`);
   chmodSync(join(binDir, name), 0o755);
-  const prevPath = process.env.PATH;
-  const prevMode = process.env.FAKE_MODE_FILE;
-  process.env.PATH = `${binDir}:${prevPath}`;
-  process.env.FAKE_MODE_FILE = modeFile;
   try {
-    return await fn(modeFile);
+    return await withEnv({ PATH: `${binDir}:${process.env.PATH}`, FAKE_MODE_FILE: modeFile }, () => fn(modeFile));
   } finally {
-    process.env.PATH = prevPath;
-    if (prevMode === undefined) delete process.env.FAKE_MODE_FILE;
-    else process.env.FAKE_MODE_FILE = prevMode;
     rmSync(binDir, { recursive: true, force: true });
   }
 }
