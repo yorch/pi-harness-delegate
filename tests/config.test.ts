@@ -15,51 +15,50 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { withEnv } from './helpers/env.ts';
 
 test('config: delegate key preferred over claudeDelegate', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cfg-test-'));
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = dir;
   try {
-    // write settings with both keys, delegate should win
-    writeFileSync(
-      join(dir, 'settings.json'),
-      JSON.stringify({
-        delegate: { defaultHarness: 'codex', defaultMode: 'plan', modelAliases: { economy: 'haiku' } },
-        claudeDelegate: { defaultMode: 'review', model: 'sonnet' },
-      }),
-    );
-    const { loadConfig } = await import('../extensions/config.ts');
-    // need to reimport fresh? loadConfig reads file each time
-    const cfg = loadConfig();
-    assert.equal(cfg.defaultHarness, 'codex');
-    assert.equal(cfg.defaultMode, 'plan');
+    await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
+      // write settings with both keys, delegate should win
+      writeFileSync(
+        join(dir, 'settings.json'),
+        JSON.stringify({
+          delegate: { defaultHarness: 'codex', defaultMode: 'plan', modelAliases: { economy: 'haiku' } },
+          claudeDelegate: { defaultMode: 'review', model: 'sonnet' },
+        }),
+      );
+      const { loadConfig } = await import('../extensions/config.ts');
+      // need to reimport fresh? loadConfig reads file each time
+      const cfg = loadConfig();
+      assert.equal(cfg.defaultHarness, 'codex');
+      assert.equal(cfg.defaultMode, 'plan');
+    });
   } finally {
-    process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test('config: legacy claudeDelegate migrates', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cfg-legacy-'));
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = dir;
   try {
-    writeFileSync(
-      join(dir, 'settings.json'),
-      JSON.stringify({
-        claudeDelegate: { defaultMode: 'review', model: 'opus', maxConcurrent: 2 },
-      }),
-    );
-    // dynamic import to get fresh load
-    // use eval to bypass cache? Node will cache, but loadConfig re-reads file
-    const { loadConfig } = await import('../extensions/config.ts');
-    const cfg = loadConfig();
-    assert.equal(cfg.defaultMode, 'review');
-    assert.equal(cfg.harnesses.claude?.model, 'opus');
-    assert.equal(cfg.maxConcurrent, 2);
+    await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
+      writeFileSync(
+        join(dir, 'settings.json'),
+        JSON.stringify({
+          claudeDelegate: { defaultMode: 'review', model: 'opus', maxConcurrent: 2 },
+        }),
+      );
+      // dynamic import to get fresh load
+      // use eval to bypass cache? Node will cache, but loadConfig re-reads file
+      const { loadConfig } = await import('../extensions/config.ts');
+      const cfg = loadConfig();
+      assert.equal(cfg.defaultMode, 'review');
+      assert.equal(cfg.harnesses.claude?.model, 'opus');
+      assert.equal(cfg.maxConcurrent, 2);
+    });
   } finally {
-    process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -74,14 +73,13 @@ test('config: outputsDir partitioned', async () => {
 
 async function loadConfigFromSettings(settings: unknown): Promise<import('../extensions/config.ts').DelegateConfig> {
   const dir = mkdtempSync(join(tmpdir(), 'cfg-transport-'));
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = dir;
   try {
-    writeFileSync(join(dir, 'settings.json'), JSON.stringify(settings));
-    const { loadConfig } = await import('../extensions/config.ts');
-    return loadConfig();
+    return await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
+      writeFileSync(join(dir, 'settings.json'), JSON.stringify(settings));
+      const { loadConfig } = await import('../extensions/config.ts');
+      return loadConfig();
+    });
   } finally {
-    process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -213,13 +211,12 @@ async function withSettingsDir<T>(
   fn: (dir: string) => Promise<T> | T,
 ): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'cfg-source-'));
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = dir;
   try {
-    write?.(dir);
-    return await fn(dir);
+    return await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
+      write?.(dir);
+      return await fn(dir);
+    });
   } finally {
-    process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 }

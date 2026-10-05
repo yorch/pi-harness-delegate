@@ -4,13 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { DelegateConfig } from '../extensions/config.ts';
+import { withEnv } from './helpers/env.ts';
 
 function withAgentDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'concurrency-test-'));
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = dir;
-  return fn(dir).finally(() => {
-    process.env.PI_CODING_AGENT_DIR = prev;
+  return withEnv({ PI_CODING_AGENT_DIR: dir }, () => fn(dir)).finally(() => {
     rmSync(dir, { recursive: true, force: true });
   });
 }

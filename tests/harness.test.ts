@@ -13,6 +13,7 @@ import {
   nativePermissionTier,
   resolveHarnessName,
 } from '../extensions/harnesses/registry.ts';
+import { withEnv } from './helpers/env.ts';
 
 test('claude harness parses stream deltas and result', () => {
   const state = { streamedText: '', activities: [], result: null };
@@ -289,23 +290,21 @@ test('every bundled template classifies the same: no native permission, danger o
   const { isTemplateDanger } = await import('../extensions/harnesses/registry.ts');
   // isolate from the user's own ~/.pi/agent templates and the repo's own .pi
   const agentDir = mkdtempSync(join(tmpdir(), 'bundled-tpl-'));
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
-    for (const name of HARNESS_NAMES) {
-      const templates = loadTemplates(agentDir, name, false);
-      assert.ok(templates.size > 0, name);
-      for (const t of templates.values()) {
-        assert.equal(classifyNativePermission(getHarness(name), t.nativePermission), 'none', `${name}/${t.name}`);
-        assert.equal(isTemplateDanger(name, t), t.permission === 'danger', `${name}/${t.name}`);
+    await withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => {
+      for (const name of HARNESS_NAMES) {
+        const templates = loadTemplates(agentDir, name, false);
+        assert.ok(templates.size > 0, name);
+        for (const t of templates.values()) {
+          assert.equal(classifyNativePermission(getHarness(name), t.nativePermission), 'none', `${name}/${t.name}`);
+          assert.equal(isTemplateDanger(name, t), t.permission === 'danger', `${name}/${t.name}`);
+        }
+        for (const ro of ['review', 'plan', 'security-audit']) {
+          assert.equal(templates.get(ro)?.permission, 'readonly', `${name}/${ro}`);
+        }
       }
-      for (const ro of ['review', 'plan', 'security-audit']) {
-        assert.equal(templates.get(ro)?.permission, 'readonly', `${name}/${ro}`);
-      }
-    }
+    });
   } finally {
-    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(agentDir, { recursive: true, force: true });
   }
 });

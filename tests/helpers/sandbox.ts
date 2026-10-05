@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { withEnv } from './env.ts';
 
 /**
  * Shared scaffolding for tests that drive the real extension (`delegate()`, the registered tools and
@@ -44,13 +45,9 @@ export async function withSandbox<T>(
   };
   write(join(cwd, '.pi', 'delegate', 'templates'), opts.templates);
   write(join(agentDir, 'delegate', 'templates'), opts.userTemplates);
-  const prev = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
-    return await fn({ agentDir, cwd });
+    return await withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => fn({ agentDir, cwd }));
   } finally {
-    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -142,16 +139,9 @@ export async function withFakeBinaries<T>(
     writeFileSync(join(binDir, name), script);
     chmodSync(join(binDir, name), 0o755);
   }
-  const prevPath = process.env.PATH;
-  const prevArgs = process.env.FAKE_ARGS_FILE;
-  process.env.PATH = `${binDir}:${prevPath}`;
-  process.env.FAKE_ARGS_FILE = argsFile;
   try {
-    return await fn(argsFile);
+    return await withEnv({ PATH: `${binDir}:${process.env.PATH}`, FAKE_ARGS_FILE: argsFile }, () => fn(argsFile));
   } finally {
-    process.env.PATH = prevPath;
-    if (prevArgs === undefined) delete process.env.FAKE_ARGS_FILE;
-    else process.env.FAKE_ARGS_FILE = prevArgs;
     rmSync(binDir, { recursive: true, force: true });
   }
 }
@@ -159,13 +149,7 @@ export async function withFakeBinaries<T>(
 /** Restrict PATH to the fake binaries (`dirname(argsFile)`) plus the system dirs, so no real harness
  *  is detected — for fan-out tests whose resolved harness list must not depend on the machine. */
 export async function withOnlyFakes<T>(argsFile: string, fn: () => Promise<T>): Promise<T> {
-  const prev = process.env.PATH;
-  process.env.PATH = `${dirname(argsFile)}:/usr/bin:/bin`;
-  try {
-    return await fn();
-  } finally {
-    process.env.PATH = prev;
-  }
+  return withEnv({ PATH: `${dirname(argsFile)}:/usr/bin:/bin` }, fn);
 }
 
 export function readArgs(file: string): string[] | null {
