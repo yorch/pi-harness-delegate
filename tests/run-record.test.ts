@@ -805,3 +805,24 @@ test('pruneOutputs: a file a minute in the future (clock skew) is protected like
     assert.ok(readdirSync(dir).includes(skewed), readdirSync(dir).join(', '));
   });
 });
+
+test('pruneOutputs: a clock stepped back TEN minutes (past the selection skew allowance) still keeps the newest real transcripts', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    const stamp = (i: number) => `2026-01-01T00-00-${String(i).padStart(2, '0')}-000Z-x`;
+    const touch = (i: number, offsetS: number) => {
+      writeFileSync(join(dir, `${stamp(i)}.md`), '#');
+      utimesSync(join(dir, `${stamp(i)}.md`), now / 1000 + offsetS, now / 1000 + offsetS);
+    };
+    for (let i = 0; i < 5; i++) touch(i, -7 * 86400 + i);
+    for (let i = 10; i < 13; i++) touch(i, 600 + i); // ten minutes "ahead": the demotion for CHOOSING a run applies, not for deleting
+    touch(20, 0);
+    pruneOutputs(dir, 4, [`${stamp(20)}.md`], now);
+    assert.deepEqual(
+      readdirSync(dir).sort(),
+      [10, 11, 12, 20].map(i => `${stamp(i)}.md`),
+    );
+  });
+});
