@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { test } from 'node:test';
 import { pruneOutputs, SIDECAR_TMP_MAX_AGE_MS, writeTranscript } from '../extensions/activity.ts';
 import { outputsDir } from '../extensions/config.ts';
@@ -721,5 +721,69 @@ test('writeRunRecord: bidi controls, U+2028 and zero-width characters are writte
     const back = parseRunRecord(raw);
     assert.ok(back.ok);
     assert.equal(back.ok ? back.record.input.task : null, task, 'the parser reads the exact task back');
+  });
+});
+
+test('pruneOutputs: far-future mtimes carry no ordering information (clamped to now: the name decides, not how far ahead they claim to be)', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    for (const [name, hoursAhead] of [
+      ['2026-01-01T00-00-01-000Z-a.md', 2],
+      ['2026-01-01T00-00-02-000Z-b.md', 1],
+    ] as const) {
+      writeFileSync(join(dir, name), '#');
+      utimesSync(join(dir, name), now / 1000 + hoursAhead * 3600, now / 1000 + hoursAhead * 3600);
+    }
+    pruneOutputs(dir, 1, [], now);
+    assert.deepEqual(
+      readdirSync(dir),
+      ['2026-01-01T00-00-02-000Z-b.md'],
+      'both are "now": the later name is the newer',
+    );
+  });
+});
+
+test('pruneOutputs: a transcript named in `keep` survives even outside the recent-file window and the quota', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    writeFileSync(join(dir, `${'2026-01-01T00-00-01-000Z-x'}.md`), '#'); // old, in keep
+    utimesSync(join(dir, '2026-01-01T00-00-01-000Z-x.md'), now / 1000 - 7200, now / 1000 - 7200);
+    writeFileSync(join(dir, '2026-01-01T00-00-02-000Z-x.md'), '#'); // newer, not in keep
+    utimesSync(join(dir, '2026-01-01T00-00-02-000Z-x.md'), now / 1000 - 3600, now / 1000 - 3600);
+    pruneOutputs(dir, 1, ['2026-01-01T00-00-01-000Z-x.md'], now);
+    assert.deepEqual(readdirSync(dir), ['2026-01-01T00-00-01-000Z-x.md']);
+  });
+});
+
+test('delegate: the transcript it just wrote survives its own prune even when a newer one exists and the clock says it is old', async () => {
+  await withSandbox({ settings: { maxTranscripts: 1 } }, async ({ cwd }) => {
+    const { delegate } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async () => {
+      const dir = outputsDir('claude');
+      mkdirSync(dir, { recursive: true });
+      const real = Date.now;
+      const newer = join(dir, 'zzz-newer.md');
+      writeFileSync(newer, '#');
+      utimesSync(newer, real() / 1000 + 1800, real() / 1000 + 1800);
+      // an hour on, the just-written file is outside every recent-file protection and ranks below zzz-newer
+      Date.now = () => real() + 3600_000;
+      let file: string;
+      try {
+        const run = await delegate(
+          fakePi(async () => ({ code: 0, stdout: '', stderr: '' })),
+          fakeCtx(cwd),
+          { harness: 'claude', mode: 'general', task: 'do it' },
+        );
+        file = run.details.file as string;
+      } finally {
+        Date.now = real;
+      }
+      assert.ok(readdirSync(dir).includes(basename(file)), `the run's own transcript is kept: ${readdirSync(dir)}`);
+      assert.ok(readdirSync(dir).includes(basename(recordPathFor(file))), 'and its sidecar');
+    });
   });
 });
