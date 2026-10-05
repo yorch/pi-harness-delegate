@@ -185,6 +185,12 @@ export function quoteValue(value: string, max = 60): string {
   return escapeInvisible(JSON.stringify(value)).slice(0, max);
 }
 
+/** `quoteValue` without the cut — for a confirmation, which must show a value whole (callers only pass
+ *  values already bounded by validation). */
+export function quoteFull(value: string): string {
+  return escapeInvisible(JSON.stringify(value));
+}
+
 /**
  * The placeholders a template body may position: `{{task}}` (the instruction, as typed), `{{scope}}`
  * (the already-**delimited** scope section — never raw diff/PR/scope text), `{{cwd}}` (quoted),

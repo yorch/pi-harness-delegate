@@ -12,8 +12,8 @@
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { sanitizeTemplateText } from './sanitize.ts';
-import { quoteValue } from './templates.ts';
+import { quoteCapped, renderTextBlock, TASK_LIMITS } from './sanitize.ts';
+import { quoteFull, quoteValue } from './templates.ts';
 
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const PR_NUMBER_RE = /^\d{1,10}$/;
@@ -29,7 +29,7 @@ const PLAIN_NAME_RE = /^[A-Za-z0-9_.,-]{1,200}$/;
 /** A harness / mode name for a prompt or error: shown as is when it is an ordinary identifier, else
  *  quoted with every control / bidi / zero-width character escaped (`\\uXXXX`) — never raw. */
 export function safeName(name: string): string {
-  return PLAIN_NAME_RE.test(name) ? name : quoteValue(name, 200);
+  return PLAIN_NAME_RE.test(name) ? name : quoteCapped(name, 200);
 }
 
 /** Returns an error message, or null when `id` is an acceptable session id. */
@@ -103,11 +103,13 @@ async function askDangerConfirmation(
   opts: { task: string; body: string; noUiError: string; declinedError: string },
 ): Promise<void> {
   if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') throw new Error(opts.noUiError);
-  // the task may be model-set or read from a stored run record: one line, escapes/invisibles stripped
-  const task = sanitizeTemplateText(opts.task, 200);
+  // The task may be model-set or read from a stored run record, and it is what the human is actually
+  // approving to run unrestricted: shown whole (escaped, never flattened) up to TASK_LIMITS.full
+  // characters, else its head and tail with an explicit "N characters not shown" line.
+  const task = renderTextBlock('Task', opts.task, TASK_LIMITS);
   let ok = false;
   try {
-    ok = await ctx.ui.confirm('Allow dangerous delegation?', `${opts.body}\n\nTask: ${task}`);
+    ok = await ctx.ui.confirm('Allow dangerous delegation?', `${opts.body}\n\n${task}`);
   } catch {
     ok = false;
   }
@@ -148,7 +150,7 @@ export async function confirmDangerousCommand(
 ): Promise<void> {
   const n = summary.harnesses.length;
   const names = summary.harnesses.map(safeName).join(', ');
-  const mode = quoteValue(summary.mode, 200);
+  const mode = quoteCapped(summary.mode, 200);
   const target = `${names} ${safeName(summary.mode)}`;
   await askDangerConfirmation(ctx, {
     task: summary.task,
@@ -210,8 +212,9 @@ export async function confirmToolAddDirs(
 ): Promise<void> {
   const outside = addDirsOutsideCwd(ctx.cwd, addDirs);
   if (outside.length === 0) return;
-  // directory names are model-set or stored: quoted so escapes / bidi / zero-width can't hide in them
-  const list = outside.map(d => quoteValue(d, 300)).join(', ');
+  // directory names are model-set or stored: quoted so escapes / bidi / zero-width can't hide in them,
+  // and shown whole (an entry is at most 4096 characters) — a confirmation never cuts a path
+  const list = outside.map(d => quoteFull(d)).join(', ');
   const lead =
     source === 'record'
       ? 'The run record being repeated lists extra directories the delegated harness would access'
@@ -225,7 +228,7 @@ export async function confirmToolAddDirs(
   try {
     ok = await ctx.ui.confirm(
       'Allow access outside the project?',
-      `${lead} outside ${quoteValue(ctx.cwd, 300)}:\n\n${outside.map(d => `  ${quoteValue(d, 300)}`).join('\n')}\n\nOn non-readonly runs these may be writable.`,
+      `${lead} outside ${quoteFull(ctx.cwd)}:\n\n${outside.map(d => `  ${quoteFull(d)}`).join('\n')}\n\nOn non-readonly runs these may be writable.`,
     );
   } catch {
     ok = false;
