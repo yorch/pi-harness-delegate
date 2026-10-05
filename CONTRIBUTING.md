@@ -99,6 +99,16 @@ As a runtime backstop, the preload's `afterEach` fails any test that leaves an e
 later tests aren't affected. It catches what a static scan can't, but
 it's not a proof: a test that coerces and cleans up within its own body slips past it.
 
+### Tests of confirmation dialogs
+
+Measure what is on screen with pi's own component, never by counting `\n` or assuming a width:
+`tests/helpers/dialog.ts` (`renderDialog(title, message, {columns, rows})` renders the real
+`ExtensionSelectorComponent`, whose last `rows` rows are what a terminal shows; `unwrap`/`textOf` join the
+`  ┆ ` continuation rows back for `includes`/`match` checks). The layout reads `process.stdout.columns`/`rows`:
+`withSandbox` pins 80x40 for a test, `withViewport(cols, rows, fn)` (tests/helpers/viewport.ts) sets another, and
+the pure APIs take a `viewport` argument. A new confirmation call site needs a fully-populated case in
+`tests/confirm-call-sites.test.ts`.
+
 ### Tests that spawn processes
 
 Wait on conditions, not clocks: `tests/helpers/wait.ts` (`waitFor`, `readPid`, `waitForProcessExit`,
@@ -147,7 +157,9 @@ extensions/            # the pi extension
   run-record.ts        # run record sidecar (<transcript>.json): schema, tolerant parser, writer
   rerun.ts             # /delegate rerun: record selection + the pure rerun planner
   recency.ts           # the "newest" ordering for choosing a run (future-dated files last) and the clamped prune ordering; private-dir.ts: ensurePrivateDir
-  sanitize.ts          # display escaping, the stored-text reject list, whole-text confirmation blocks
+  sanitize.ts          # display escaping, the stored-text reject list
+  confirm-layout.ts    # confirmation bodies laid out for the real terminal (free text first, critical lines last, own wrapping, row budget)
+  effective.ts         # what a run will actually apply (template/config resolved), for confirmations
   fanout-resume.ts     # resume a whole fan-out by its fan-out id
   subcommands.ts       # /delegate list | status | config | config init
   harnesses/           # harness abstraction (claude, codex, opencode, amp, devin) + registry
