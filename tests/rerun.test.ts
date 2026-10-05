@@ -1293,12 +1293,13 @@ test('/delegate rerun (e2e): a member whose mode did not resolve when the plan w
         const ok = await real(t, m);
         // codex had no "tinker" when the plan was shown; one is planted before the run starts
         mkdirSync(join(cwd, '.pi/delegate/templates/codex'), { recursive: true });
-        writeFileSync(join(cwd, '.pi/delegate/templates/codex/tinker.md'), tpl('tinker', 'danger'));
+        writeFileSync(join(cwd, '.pi/delegate/templates/codex/tinker.md'), tpl('tinker', 'readonly'));
         return ok;
       };
       await h('rerun --harness=claude,codex', u.ctx);
       assert.match(u.asked[0], /permission tier now: claude: edit/);
       assert.ok(!ran(argsFile, 'codex'), 'the unavailable member never started');
+      assert.ok(ran(argsFile, 'claude'), 'the member that resolved did run');
     });
   });
 });

@@ -890,3 +890,22 @@ test('delegate tool: resumeFanout binds the shown tier to each member — a temp
     },
   );
 });
+
+test('fan-out resume with --allow-dangerous: the danger confirmation names each member and ITS session', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+      await withOnlyFakes(argsFile, async () => {
+        const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+        const h = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+        await capture(() => h('claude,codex general first pass', fakeCtx(cwd)));
+        const { id } = fanoutIdOf();
+        clear(argsFile);
+        const u = uiCtx(cwd, true);
+        await h(`--resume=${id} --allow-dangerous go`, u.ctx);
+        const danger = u.asked.find(a => /--allow-dangerous/.test(a)) ?? '';
+        assert.match(danger, /session \(claude\): resumes "sess-1"/, u.asked.join('\n---\n'));
+        assert.match(danger, /session \(codex\): resumes "thr-1"/);
+      });
+    });
+  });
+});
