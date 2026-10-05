@@ -9,17 +9,19 @@ import { outputsDir as getOutputsDir, legacyOutputsDir } from './config.ts';
 import { formatCost } from './engine.ts';
 import { HARNESS_NAMES } from './harnesses/registry.ts';
 import { applyHistoryFilter, describeHistoryFilter, type HistoryEntry, type HistoryFilter } from './history-filter.ts';
-import { displayText, readRunRecord, recordPathFor } from './run-record.ts';
+import { displayText, loadRecordForTranscript, MAX_SIDECARS_SCANNED, newestFirst } from './run-record.ts';
 
 export type { HistoryEntry };
 
-/** One history entry for a transcript: its run-record sidecar when there is one (and it parses), else
- *  the transcript header — so a legacy transcript with no sidecar, or a corrupt sidecar, still lists. */
+/** One history entry for a transcript: its run-record sidecar when there is one (and it is trusted —
+ *  `loadRecordForTranscript`: same-directory harness, matching transcript name, regular files), else
+ *  the transcript header — so a legacy transcript with no sidecar, or an unusable sidecar, still lists
+ *  (the latter carrying `recordProblem`, which the listing reports). */
 function entryFor(file: string, harness: string): HistoryEntry {
   const mtime = statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0;
-  const parsed = readRunRecord(recordPathFor(file));
-  if (parsed.ok) {
-    const r = parsed.record;
+  const loaded = loadRecordForTranscript(file, harness);
+  if (loaded.ok) {
+    const r = loaded.record;
     return {
       file,
       mode: r.mode,
@@ -34,6 +36,7 @@ function entryFor(file: string, harness: string): HistoryEntry {
       hasRecord: true,
     };
   }
+  const recordProblem = loaded.hasSidecar ? loaded.reason : undefined;
   let mode = 'delegate';
   let cost: number | null = null;
   let sessionId: string | null = null;
@@ -60,15 +63,22 @@ function entryFor(file: string, harness: string): HistoryEntry {
     runId: null,
     fanoutId: null,
     hasRecord: false,
+    ...(recordProblem !== undefined ? { recordProblem } : {}),
   };
 }
+
+const byNewest = (a: HistoryEntry, b: HistoryEntry): number =>
+  newestFirst({ mtimeMs: a.mtime, name: a.file }, { mtimeMs: b.mtime, name: b.file });
 
 export function readHistory(dir: string, harness: string): HistoryEntry[] {
   try {
     return readdirSync(dir)
       .filter(f => f.endsWith('.md') && !f.includes('-partial'))
-      .map(f => entryFor(join(dir, f), harness))
-      .sort((a, b) => b.mtime - a.mtime);
+      .map(f => ({ f, mtime: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
+      .sort((a, b) => newestFirst({ mtimeMs: a.mtime, name: a.f }, { mtimeMs: b.mtime, name: b.f }))
+      .slice(0, MAX_SIDECARS_SCANNED) // bounded: never read thousands of sidecars for one listing
+      .map(({ f }) => entryFor(join(dir, f), harness))
+      .sort(byNewest);
   } catch {
     return [];
   }
@@ -82,7 +92,7 @@ export function readAllHistory(): HistoryEntry[] {
   }
   // also legacy dir for migration display (legacy transcripts predate sidecars, but entryFor handles either)
   entries.push(...readHistory(legacyOutputsDir(), 'claude'));
-  return entries.sort((a, b) => b.mtime - a.mtime);
+  return entries.sort(byNewest);
 }
 
 export async function viewTranscript(ctx: ExtensionContext, entry: HistoryEntry): Promise<void> {
@@ -133,8 +143,18 @@ export function currentHistoryView(): HistoryEntry[] {
   return lastView ?? applyHistoryFilter(readAllHistory(), {});
 }
 
+/** One line naming how many run records were ignored and why (sanitized), or '' when none were. */
+export function describeIgnoredRecords(all: readonly HistoryEntry[]): string {
+  const bad = all.filter(e => e.recordProblem !== undefined);
+  if (bad.length === 0) return '';
+  const reasons = [...new Set(bad.map(e => displayText(e.recordProblem ?? '', 100)))].slice(0, 3).join('; ');
+  return `${bad.length} run record(s) ignored (listed from the transcript header, not rerunnable): ${reasons}`;
+}
+
 export async function showHistory(ctx: ExtensionContext, filter: HistoryFilter = {}): Promise<void> {
-  const entries = applyHistoryFilter(readAllHistory(), filter);
+  const everything = readAllHistory();
+  const ignored = describeIgnoredRecords(everything);
+  const entries = applyHistoryFilter(everything, filter);
   lastView = entries;
   const filterLabel = describeHistoryFilter(filter);
   if (entries.length === 0) {
@@ -150,12 +170,15 @@ export async function showHistory(ctx: ExtensionContext, filter: HistoryFilter =
     entries.forEach((e, i) => {
       process.stdout.write(`${i + 1}. ${historyLine(e)}\n`);
     });
+    if (ignored) process.stdout.write(`${ignored}\n`);
     return;
   }
+  if (ignored) ctx.ui.notify?.(ignored, 'warning');
   const entry = await ctx.ui.custom((tui, theme, _kb, done) => {
-    const items: SelectItem[] = entries.map(e => ({
+    const items: SelectItem[] = entries.map((e, i) => ({
       value: e.file,
-      label: `${displayText(e.harness, 24)} ${displayText(e.mode, 64)} · ${e.isError ? 'failed · ' : ''}${formatCost(e.cost)} · ${new Date(e.mtime).toISOString().slice(0, 16)}`,
+      // numbered exactly like the headless listing: `/delegate rerun <n>` indexes this same view
+      label: `${i + 1}. ${displayText(e.harness, 24)} ${displayText(e.mode, 64)} · ${e.isError ? 'failed · ' : ''}${formatCost(e.cost)} · ${new Date(e.mtime).toISOString().slice(0, 16)}`,
       description:
         [e.sessionId ? `session ${displayText(e.sessionId, 8)}…` : '', e.runId ?? ''].filter(Boolean).join(' · ') ||
         undefined,

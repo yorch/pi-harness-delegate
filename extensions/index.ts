@@ -40,6 +40,7 @@ import { type DelegateConfig, loadConfig } from './config.ts';
 import {
   type DelegateToolParams,
   delegate,
+  effectiveTemplateTier,
   formatCost,
   injectReport,
   isProjectTrusted,
@@ -71,12 +72,12 @@ import {
   templateViews,
 } from './modes.ts';
 import { type FeedEntry, progressWindow } from './progress.ts';
-import { planRerun, readAllRecords, selectRecord } from './rerun.ts';
+import { planRerun, readAllRecordsDetailed, selectRecord } from './rerun.ts';
 import { isFanoutId, isRunId } from './run-record.ts';
 import { initConfig, showConfig, showModes, showStatus } from './subcommands.ts';
-import { callTimeoutError, type DelegateTemplate, loadTemplates } from './templates.ts';
+import { callTimeoutError, type DelegateTemplate, loadAllTemplates, loadTemplates, quoteValue } from './templates.ts';
 import { mapClaudeUsage } from './usage.ts';
-import { confirmDangerousCommand, confirmDangerousToolCall, confirmToolAddDirs } from './validate.ts';
+import { confirmDangerousCommand, confirmDangerousToolCall, confirmToolAddDirs, safeName } from './validate.ts';
 
 /** Tool-result `details` for the `delegate` tool (and its partial progress updates). */
 type DelegateToolDetails = Record<string, unknown>;
@@ -249,9 +250,15 @@ export default function (pi: ExtensionAPI) {
           throw new Error('resumeFanout resumes the harnesses recorded for that fan-out — omit harness');
         if (!isFanoutId(rawParams.resumeFanout))
           throw new Error(
-            `resumeFanout must be a fan-out id (fan_ + 16 hex), got ${JSON.stringify(rawParams.resumeFanout.slice(0, 40))}`,
+            `resumeFanout must be a fan-out id (fan_ + 16 hex), got ${quoteValue(rawParams.resumeFanout.slice(0, 40), 100)}`,
           );
-        const plan = planFanoutResume(rawParams.resumeFanout, readAllRecords(), ctx.cwd);
+        const known = readAllRecordsDetailed();
+        const plan = planFanoutResume(
+          rawParams.resumeFanout,
+          known.records.map(l => l.record),
+          ctx.cwd,
+          known.skipped,
+        );
         if (!plan.ok) throw new Error(plan.error);
         resumePlan = plan;
         harness = plan.harnesses.join(',');
@@ -380,7 +387,7 @@ export default function (pi: ExtensionAPI) {
         const requested = params.harness.trim().toLowerCase();
         if (!isKnownHarness(requested))
           throw new Error(
-            `unknown harness ${JSON.stringify(params.harness.slice(0, 40))}. Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
+            `unknown harness ${quoteValue(params.harness.slice(0, 40), 100)}. Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
           );
         filter = resolveHarnessName(requested);
       }
@@ -433,6 +440,9 @@ export default function (pi: ExtensionAPI) {
       model?: string;
       budget?: number;
       timeoutSec?: number;
+      /** Timeout / budget from a stored run record (rerun): may only narrow what is configured. */
+      storedTimeout?: boolean;
+      storedBudget?: boolean;
       sessionId?: string;
       pr?: string;
       addDirs?: string[];
@@ -531,7 +541,8 @@ export default function (pi: ExtensionAPI) {
       model,
       maxBudgetUsd: budget,
       timeoutSec,
-      timeoutSecMayRaise: true, // human-typed --timeout= — the tool path never sets this
+      timeoutSecMayRaise: opts.storedTimeout !== true, // human-typed --timeout= — the tool path never sets this; a stored (rerun) value never raises
+      maxBudgetNarrowOnly: opts.storedBudget === true,
       sessionId,
       pr,
       addDirs,
@@ -620,17 +631,33 @@ export default function (pi: ExtensionAPI) {
         );
         return;
       }
-      const plan = planFanoutResume(parsed.sessionId, readAllRecords(), ctx.cwd);
+      const known = readAllRecordsDetailed();
+      const plan = planFanoutResume(
+        parsed.sessionId,
+        known.records.map(l => l.record),
+        ctx.cwd,
+        known.skipped,
+      );
       if (!plan.ok) {
         say(plan.error);
         return;
       }
       if (plan.noSession.length > 0)
-        say(`resuming fan-out ${parsed.sessionId}; no recorded session id, skipped: ${plan.noSession.join(', ')}`);
+        say(
+          `resuming fan-out ${parsed.sessionId}; no recorded session id, skipped: ${plan.noSession.map(safeName).join(', ')}`,
+        );
+      if (plan.unreadable.length > 0)
+        say(
+          `resuming fan-out ${parsed.sessionId}; unreadable run record, not resumed: ${plan.unreadable.map(safeName).join(', ')}`,
+        );
       parsed.harness = plan.harnesses.join(',');
       parsed.mode = parsed.mode ?? plan.mode;
       parsed.sessionId = undefined;
-      await runFanoutCommand(pi, ui, ctx, parsed, { sessions: plan.sessions, noSession: plan.noSession });
+      await runFanoutCommand(pi, ui, ctx, parsed, {
+        sessions: plan.sessions,
+        noSession: plan.noSession,
+        unreadable: plan.unreadable,
+      });
       return;
     }
 
@@ -695,6 +722,8 @@ export default function (pi: ExtensionAPI) {
       model: parsed.model,
       budget: parsed.budget,
       timeoutSec: parsed.timeoutSec,
+      storedTimeout: parsed.storedTimeout,
+      storedBudget: parsed.storedBudget,
       sessionId: parsed.sessionId,
       pr: parsed.pr,
       addDirs: parsed.addDirs,
@@ -735,7 +764,14 @@ export default function (pi: ExtensionAPI) {
   };
 
   /** `/delegate rerun [n|runId] [--here] [--fanout] [--resume] [overrides…]` — plan a rerun from a run
-   *  record (rerun.ts re-validates everything stored) and hand it to the normal command tail. */
+   *  record (rerun.ts re-validates everything stored) and hand it to the normal command tail.
+   *
+   *  The record is untrusted stored data, so: only a record with a transcript next to it, in its own
+   *  harness's directory, is selectable (newest by transcript mtime — the history order); a UI session
+   *  is ALWAYS shown the plan and asked to confirm before anything runs (decline = nothing runs); a
+   *  headless session needs an EXPLICIT run id (a bare `rerun`/`rerun n` is refused — nobody could look
+   *  at what it would run); stored addDirs outside the project go through the model-set addDirs gate;
+   *  a stored timeout/budget can only narrow what is configured. */
   const handleRerun = async (ctx: ExtensionContext, rest: string, forcedHarness: string | undefined): Promise<void> => {
     const say = (msg: string, level: 'error' | 'warning' | 'info') => {
       if (ctx.hasUI) ctx.ui.notify?.(msg, level);
@@ -745,8 +781,17 @@ export default function (pi: ExtensionAPI) {
     const { rest: afterFlags, found } = extractBareFlags(rest, ['here', 'fanout', 'resume'] as const);
     const words = afterFlags.trim().split(/\s+/).filter(Boolean);
     const selector = words[0] && (/^\d+$/.test(words[0]) || isRunId(words[0])) ? words.shift() : undefined;
+    if (!ctx.hasUI && !(selector !== undefined && isRunId(selector))) {
+      say(
+        `rerun: with no interactive session to confirm it, a rerun needs an explicit run id (run_…) — a bare \`rerun\` or \`rerun <n>\` would run something nobody could look at first. Find the id with /delegate history\n${usage}`,
+        'error',
+      );
+      return;
+    }
     const trusted = isProjectTrusted(ctx);
     const allModes = new Set<string>();
+    // every mode name visible for any harness — the shared root and the per-harness partitions alike
+    for (const k of loadAllTemplates(ctx.cwd, trusted).keys()) allModes.add(k);
     for (const h of HARNESS_NAMES) for (const k of loadTemplates(ctx.cwd, h, trusted).keys()) allModes.add(k);
     const overrides = parseDelegateCommand(
       words.join(' '),
@@ -758,13 +803,15 @@ export default function (pi: ExtensionAPI) {
       say(`${overrides.errors.join('; ')}\n${usage}`, 'error');
       return;
     }
-    // a bare number indexes the listing the user last saw (else the full history); no selector means the most recent run
+    // a bare number indexes the listing the user last saw (the TUI list is numbered the same way; else the
+    // full history); no selector means the newest run that has a record
     const picked = selectRecord(selector, selector !== undefined && !isRunId(selector) ? currentHistoryView() : []);
     if (!picked.ok) {
       say(`rerun: ${picked.error}\n${usage}`, 'error');
       return;
     }
     const record = picked.record;
+    const everything = readAllRecordsDetailed();
     const plan = planRerun(
       record,
       overrides,
@@ -772,8 +819,14 @@ export default function (pi: ExtensionAPI) {
       {
         cwd: ctx.cwd,
         isKnownHarness,
-        modeAvailable: (h, m) => loadTemplates(ctx.cwd, h, trusted).has(m),
-        siblings: record.fanoutId ? readAllRecords().filter(r => r.fanoutId === record.fanoutId) : [],
+        // today's template, classified by the engine's own rules — see effectiveTemplateTier
+        modeTier: (h, m) => {
+          const t = loadTemplates(ctx.cwd, h, trusted).get(m);
+          return t ? effectiveTemplateTier(h, t) : null;
+        },
+        siblings: record.fanoutId
+          ? everything.records.map(l => l.record).filter(r => r.fanoutId === record.fanoutId)
+          : [],
       },
     );
     if (plan.errors.length > 0 || !plan.args) {
@@ -781,6 +834,27 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (plan.notices.length > 0) say(plan.notices.join('\n'), 'info');
+    // An interactive session always sees exactly what is about to run — decline (or a throwing dialog) = nothing runs.
+    if (ctx.hasUI) {
+      let ok = false;
+      try {
+        ok = await ctx.ui.confirm('Re-run this recorded delegation?', plan.summary.join('\n'));
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        say('rerun: declined — nothing was run', 'warning');
+        return;
+      }
+    }
+    // Stored addDirs are model-origin data: inside the project is fine, outside needs its own human yes
+    // (fail closed with no UI). Dirs typed on the rerun line replace them and are human-trusted.
+    try {
+      await confirmToolAddDirs(ctx, plan.storedAddDirs, 'record');
+    } catch (err) {
+      say(`rerun: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      return;
+    }
     // exactly the typed-command path from here on — danger confirm, fan-out, overlay and report included
     if (forcedHarness) plan.args.harness = forcedHarness;
     await runParsed(ctx, plan.args, forcedHarness, trusted);

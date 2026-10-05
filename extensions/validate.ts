@@ -12,6 +12,8 @@
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { sanitizeTemplateText } from './sanitize.ts';
+import { quoteValue } from './templates.ts';
 
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const PR_NUMBER_RE = /^\d{1,10}$/;
@@ -22,24 +24,32 @@ const PR_URL_RE = /^https?:\/\/[^/@\s]+\/[^/\s]+\/[^/\s]+\/pull\/\d{1,10}(?:[/?#
 // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 
+// (a comma is fine: a harness spec may be a list like `claude,codex`)
+const PLAIN_NAME_RE = /^[A-Za-z0-9_.,-]{1,200}$/;
+/** A harness / mode name for a prompt or error: shown as is when it is an ordinary identifier, else
+ *  quoted with every control / bidi / zero-width character escaped (`\\uXXXX`) — never raw. */
+export function safeName(name: string): string {
+  return PLAIN_NAME_RE.test(name) ? name : quoteValue(name, 200);
+}
+
 /** Returns an error message, or null when `id` is an acceptable session id. */
 export function sessionIdError(id: string): string | null {
   if (id.startsWith('-') || !SESSION_ID_RE.test(id))
-    return `invalid sessionId ${JSON.stringify(id.slice(0, 60))} — expected 1-128 chars of [A-Za-z0-9._:-], not starting with "-" (use the session id from a previous run's details)`;
+    return `invalid sessionId ${quoteValue(id.slice(0, 60), 200)} — expected 1-128 chars of [A-Za-z0-9._:-], not starting with "-" (use the session id from a previous run's details)`;
   return null;
 }
 
 /** Returns an error message, or null when `model` is an acceptable model name. */
 export function modelError(model: string): string | null {
   if (model.length === 0 || model.length > 200 || model.startsWith('-') || CONTROL_RE.test(model))
-    return `invalid model ${JSON.stringify(model.slice(0, 60))} — must be a non-empty name, not starting with "-"`;
+    return `invalid model ${quoteValue(model.slice(0, 60), 200)} — must be a non-empty name, not starting with "-"`;
   return null;
 }
 
 /** Returns an error message, or null when `pr` is a PR number, an http(s) pull-request URL
  *  (`<host>/<owner>/<repo>/pull/<n>`, no userinfo), or `owner/repo#n`. */
 export function prError(pr: string): string | null {
-  const bad = `invalid pr ${JSON.stringify(pr.slice(0, 80))} — expected a PR number, an http(s) PR URL, or owner/repo#123`;
+  const bad = `invalid pr ${quoteValue(pr.slice(0, 80), 240)} — expected a PR number, an http(s) PR URL, or owner/repo#123`;
   if (pr.startsWith('-') || CONTROL_RE.test(pr)) return bad;
   if (PR_NUMBER_RE.test(pr) || PR_SHORTHAND_RE.test(pr)) return null;
   if (PR_URL_RE.test(pr)) return null;
@@ -53,7 +63,7 @@ export function prError(pr: string): string | null {
  * (→ `<cwd>/-foo`) is fine. Empty, oversized, and control-character entries are still rejected.
  */
 export function addDirError(dir: string, cwd: string = process.cwd()): string | null {
-  const bad = `invalid addDirs entry ${JSON.stringify(dir.slice(0, 80))} — must be a non-empty path without control characters`;
+  const bad = `invalid addDirs entry ${quoteValue(dir.slice(0, 80), 240)} — must be a non-empty path without control characters`;
   if (dir.length === 0 || dir.length > 4096 || CONTROL_RE.test(dir)) return bad;
   const abs = resolve(cwd, dir);
   if (!isAbsolute(abs) || abs.startsWith('-')) return bad;
@@ -93,7 +103,8 @@ async function askDangerConfirmation(
   opts: { task: string; body: string; noUiError: string; declinedError: string },
 ): Promise<void> {
   if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') throw new Error(opts.noUiError);
-  const task = opts.task.length > 200 ? `${opts.task.slice(0, 199)}…` : opts.task;
+  // the task may be model-set or read from a stored run record: one line, escapes/invisibles stripped
+  const task = sanitizeTemplateText(opts.task, 200);
   let ok = false;
   try {
     ok = await ctx.ui.confirm('Allow dangerous delegation?', `${opts.body}\n\nTask: ${task}`);
@@ -114,7 +125,8 @@ export async function confirmDangerousToolCall(
   ctx: ConfirmCtx,
   summary: { harness?: string; mode?: string; task: string },
 ): Promise<void> {
-  const target = `${summary.harness ?? 'default harness'} ${summary.mode ?? 'default mode'}`;
+  // harness/mode are model-set strings: quoted (escapes, bidi, zero-width all rendered as \uXXXX)
+  const target = `${summary.harness === undefined ? 'default harness' : safeName(summary.harness)} ${summary.mode === undefined ? 'default mode' : safeName(summary.mode)}`;
   await askDangerConfirmation(ctx, {
     task: summary.task,
     body: `The agent wants to run ${target} with DANGER permission (unrestricted: no sandbox, no approval prompts).`,
@@ -135,11 +147,12 @@ export async function confirmDangerousCommand(
   summary: { harnesses: string[]; mode: string; task: string },
 ): Promise<void> {
   const n = summary.harnesses.length;
-  const names = summary.harnesses.join(', ');
-  const target = `${names} ${summary.mode}`;
+  const names = summary.harnesses.map(safeName).join(', ');
+  const mode = quoteValue(summary.mode, 200);
+  const target = `${names} ${safeName(summary.mode)}`;
   await askDangerConfirmation(ctx, {
     task: summary.task,
-    body: `--allow-dangerous: run "${summary.mode}" on ${n > 1 ? `all ${n} harnesses (${names})` : names} with DANGER permission — full, unrestricted permissions (no sandbox, no approval prompts). Applies to this invocation only.`,
+    body: `--allow-dangerous: run ${mode} on ${n > 1 ? `all ${n} harnesses (${names})` : names} with DANGER permission — full, unrestricted permissions (no sandbox, no approval prompts). Applies to this invocation only.`,
     noUiError: `--allow-dangerous for ${target} needs interactive confirmation, but there is no UI — refusing (a headless /delegate never runs with danger permission)`,
     declinedError: `--allow-dangerous for ${target} was declined — nothing was run`,
   });
@@ -192,10 +205,17 @@ export function addDirsOutsideCwd(cwd: string, addDirs: string[] | undefined): s
 export async function confirmToolAddDirs(
   ctx: Pick<ExtensionContext, 'hasUI' | 'cwd'> & { ui?: { confirm?: ExtensionContext['ui']['confirm'] } },
   addDirs: string[] | undefined,
+  /** Who is asking, for the prompt: the model (default), or a stored run record being rerun. */
+  source: 'agent' | 'record' = 'agent',
 ): Promise<void> {
   const outside = addDirsOutsideCwd(ctx.cwd, addDirs);
   if (outside.length === 0) return;
-  const list = outside.join(', ');
+  // directory names are model-set or stored: quoted so escapes / bidi / zero-width can't hide in them
+  const list = outside.map(d => quoteValue(d, 300)).join(', ');
+  const lead =
+    source === 'record'
+      ? 'The run record being repeated lists extra directories the delegated harness would access'
+      : 'The agent wants the delegated harness to access directories';
   if (!ctx.hasUI || typeof ctx.ui?.confirm !== 'function') {
     throw new Error(
       `addDirs outside the working directory requested (${list}), but there is no interactive UI to confirm it with — refusing (extra directories outside the project need a human's explicit approval)`,
@@ -205,7 +225,7 @@ export async function confirmToolAddDirs(
   try {
     ok = await ctx.ui.confirm(
       'Allow access outside the project?',
-      `The agent wants the delegated harness to access directories outside ${ctx.cwd}:\n\n${outside.map(d => `  ${d}`).join('\n')}\n\nOn non-readonly runs these may be writable.`,
+      `${lead} outside ${quoteValue(ctx.cwd, 300)}:\n\n${outside.map(d => `  ${quoteValue(d, 300)}`).join('\n')}\n\nOn non-readonly runs these may be writable.`,
     );
   } catch {
     ok = false;

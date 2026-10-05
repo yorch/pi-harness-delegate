@@ -1,6 +1,7 @@
-import { chmodSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
+import { sanitizeTemplateText } from './sanitize.ts';
 
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
@@ -295,13 +296,25 @@ export function buildFanoutReport(opts: {
   unknown: string[];
   /** Members of a resumed fan-out that recorded no session id — skipped, and said so. */
   noSession?: string[];
+  /** Members of a resumed fan-out whose run record could not be read. */
+  unreadable?: string[];
 }): string {
   const lines: string[] = [];
-  if (opts.unknown.length > 0) lines.push(`_unknown harness(es), skipped: ${opts.unknown.join(', ')}_`);
-  if (opts.skipped.length > 0) lines.push(`_not installed, skipped: ${opts.skipped.join(', ')}_`);
+  // names may be typed, model-set or read from a run record: shown one-line with escapes/invisibles stripped
+  const names = (xs: readonly string[]) => xs.map(x => sanitizeTemplateText(x, 40)).join(', ');
+  if (opts.unknown.length > 0) lines.push(`_unknown harness(es), skipped: ${names(opts.unknown)}_`);
+  if (opts.skipped.length > 0) lines.push(`_not installed, skipped: ${names(opts.skipped)}_`);
   if (opts.noSession && opts.noSession.length > 0)
-    lines.push(`_no recorded session id, skipped: ${opts.noSession.join(', ')}_`);
-  if (opts.unknown.length > 0 || opts.skipped.length > 0 || (opts.noSession?.length ?? 0) > 0) lines.push('');
+    lines.push(`_no recorded session id, skipped: ${names(opts.noSession)}_`);
+  if (opts.unreadable && opts.unreadable.length > 0)
+    lines.push(`_unreadable run record, not resumed: ${names(opts.unreadable)}_`);
+  if (
+    opts.unknown.length > 0 ||
+    opts.skipped.length > 0 ||
+    (opts.noSession?.length ?? 0) > 0 ||
+    (opts.unreadable?.length ?? 0) > 0
+  )
+    lines.push('');
 
   const spend = aggregateSpend(opts.runs.map(r => ({ harness: r.harness, cost: r.cost })));
   lines.push(`**Total spend:** ${formatSpend(spend.total)}`, '');
@@ -375,19 +388,26 @@ export function pruneOutputs(dir: string, maxCount: number): void {
       // best-effort
     }
   }
-  // Run-record sidecars (`<transcript>.json`, see run-record.ts) go with their transcript. A sidecar
-  // whose transcript is gone (pruned just now, or deleted by hand) is an orphan and is removed too —
-  // the transcript is always written before its sidecar, so a live run never looks orphaned.
+  // Run-record sidecars (`<transcript>.json`, see run-record.ts) go with their transcript. Only a file
+  // that is a regular file (lstat — a symlink is never followed or touched), whose name has exactly
+  // the shape the runner generates (`<ISO stamp>-<mode>.json`), and whose transcript is not among the
+  // kept ones (pruned just now, or an orphan) is removed. Every other `.json` — notes a user dropped
+  // in the directory, anything not written by `writeTranscript`+`writeRunRecord` — is left alone.
+  // The transcript is always written before its sidecar, so a live run never looks orphaned.
   const kept = new Set(byMtime.slice(0, maxCount).map(({ f }) => f.replace(/\.md$/, '')));
   for (const f of files) {
-    if (!f.endsWith('.json') || kept.has(f.replace(/\.json$/, ''))) continue;
+    if (!SIDECAR_NAME_RE.test(f) || kept.has(f.replace(/\.json$/, ''))) continue;
     try {
+      if (!lstatSync(join(dir, f)).isFile()) continue;
       rmSync(join(dir, f));
     } catch {
       // best-effort
     }
   }
 }
+
+/** The name `writeTranscript` + `recordPathFor` give a sidecar: `2026-10-05T12-00-00-123Z-<mode>.json`. */
+export const SIDECAR_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-.+\.json$/;
 
 /** Human-readable one-liner for a tool call (uses Claude's `description` when present). */
 export function formatToolUse(name: string, input: Record<string, unknown>): string {

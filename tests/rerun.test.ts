@@ -1,23 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { DelegateCommandArgs } from '../extensions/command.ts';
 import { outputsDir } from '../extensions/config.ts';
 import { planRerun, type RerunEnv, type RerunFlags, selectRecord } from '../extensions/rerun.ts';
-import {
-  buildRunRecord,
-  newFanoutId,
-  newRunId,
-  type RunRecord,
-  recordPathFor,
-  writeRunRecord,
-} from '../extensions/run-record.ts';
+import { buildRunRecord, newFanoutId, newRunId, type RunRecord } from '../extensions/run-record.ts';
 import {
   CLAUDE_RESULT,
   CODEX_RESULT_LINES,
   fakeCtx,
-  fakePi,
   loadExtension,
   readArgs,
   tpl,
@@ -25,6 +17,7 @@ import {
   withOnlyFakes,
   withSandbox,
 } from './helpers/sandbox.ts';
+import { UNSAFE } from './helpers/unsafe.ts';
 
 const record = (over: Partial<RunRecord> = {}, input: Partial<RunRecord['input']> = {}): RunRecord => ({
   ...buildRunRecord({
@@ -65,7 +58,7 @@ const flags = (f: Partial<RerunFlags> = {}): RerunFlags => ({ here: false, fanou
 const env = (over: Partial<RerunEnv> = {}): RerunEnv => ({
   cwd: '/proj',
   isKnownHarness: n => ['claude', 'codex', 'amp'].includes(n),
-  modeAvailable: () => true,
+  modeTier: () => 'readonly',
   siblings: [],
   ...over,
 });
@@ -86,6 +79,9 @@ test('planRerun: defaults replay harness/mode/task/scope/pr/addDirs/budget/timeo
       model: 'fast',
       budget: 2,
       timeoutSec: 120,
+      // stored values are untrusted: they may only narrow what is configured
+      storedBudget: true,
+      storedTimeout: true,
     },
   );
   assert.ok(plan.notices.some(n => /fresh session/.test(n)));
@@ -133,7 +129,7 @@ test('planRerun: refuses a different cwd unless --here; a missing mode is a clea
   const here = planRerun(r, none(), flags({ here: true }), env());
   assert.deepEqual(here.errors, []);
   assert.ok(here.notices.some(n => /current directory/.test(n)));
-  const gone = planRerun(record(), none(), flags(), env({ modeAvailable: () => false }));
+  const gone = planRerun(record(), none(), flags(), env({ modeTier: () => null }));
   assert.match(gone.errors[0], /mode "review" is not available for claude now.*untrust|trust/);
 });
 
@@ -159,11 +155,11 @@ test('planRerun: a hostile record is refused — argv-shaped, control-char, trun
     /invalid sessionId/,
   );
   assert.match(bad(record({}, { model: '--evil' })).errors[0], /invalid model/);
-  assert.match(bad(record({}, { model: 'a\u001b[31mb' })).errors[0], /invalid model/);
+  assert.match(bad(record({}, { model: 'a\u001b[31mb' })).errors[0], /control or invisible/);
   assert.match(bad(record({}, { pr: '--repo=evil/x' })).errors[0], /invalid pr/);
-  assert.match(bad(record({}, { addDirs: ['ok', 'bad\u0000dir'] })).errors[0], /invalid addDirs/);
-  assert.match(bad(record({}, { task: 'do\u001b[2Jit' })).errors[0], /control characters/);
-  assert.match(bad(record({}, { scope: 'a\u0007b' })).errors[0], /control characters/);
+  assert.match(bad(record({}, { addDirs: ['ok', 'bad\u0000dir'] })).errors[0], /control or invisible/);
+  assert.match(bad(record({}, { task: 'do\u001b[2Jit' })).errors[0], /control or invisible/);
+  assert.match(bad(record({}, { scope: 'a\u0007b' })).errors[0], /control or invisible/);
   assert.match(bad(record({}, { task: '   ' })).errors[0], /empty/);
   assert.match(bad(record({}, { taskTruncated: true })).errors[0], /truncated/);
   assert.match(bad(record({}, { budgetUsd: -1 })).errors[0], /budget/);
@@ -173,16 +169,33 @@ test('planRerun: a hostile record is refused — argv-shaped, control-char, trun
   assert.ok(!bad(record({}, { pr: '--x\u001b[31m' })).errors[0].includes('\u001b'));
 });
 
-test('selectRecord: run id, no selector (latest completed), numeric view position, legacy and bad selectors', async () => {
+// ── selection ────────────────────────────────────────────────────────────────
+
+/** Put a transcript + the record that names it into `harness`'s outputs dir (mtime in seconds). */
+function seed(
+  harness: string,
+  name: string,
+  over: Partial<RunRecord> = {},
+  input: Partial<RunRecord['input']> = {},
+  mtimeSec = 1000,
+  cwd = '/proj',
+): RunRecord {
+  const dir = outputsDir(harness);
+  mkdirSync(dir, { recursive: true });
+  const rec = { ...record({ harness, cwd, ...over }, input), transcript: `${name}.md` };
+  writeFileSync(join(dir, `${name}.md`), '#');
+  utimesSync(join(dir, `${name}.md`), mtimeSec, mtimeSec);
+  writeFileSync(join(dir, `${name}.json`), JSON.stringify(rec));
+  return rec;
+}
+
+test('selectRecord: run id, no selector (newest transcript), numeric view position, legacy and bad selectors', async () => {
   await withSandbox({}, async () => {
     const dir = outputsDir('claude');
-    mkdirSync(dir, { recursive: true });
-    const old = record({ startedAt: '2026-01-01T00:00:00.000Z' });
-    const recent = record({ startedAt: '2026-06-01T00:00:00.000Z' });
-    const partial = record({ startedAt: '2026-09-01T00:00:00.000Z', partial: true });
-    writeRunRecord(join(dir, 'old.md'), old);
-    writeRunRecord(join(dir, 'recent.md'), recent);
-    writeRunRecord(join(dir, 'p-partial.md'), partial);
+    // startedAt deliberately disagrees with the transcript mtime: the mtime (history's order) decides
+    const old = seed('claude', 'old', { startedAt: '2999-01-01T00:00:00.000Z' }, {}, 1000);
+    const recent = seed('claude', 'recent', { startedAt: '2001-01-01T00:00:00.000Z' }, {}, 2000);
+    const partial = seed('claude', 'p-partial', { partial: true }, {}, 3000);
     const sel = (s: string | undefined, view: Parameters<typeof selectRecord>[1] = []) => selectRecord(s, view);
     assert.equal((sel(undefined) as { record: RunRecord }).record.runId, recent.runId);
     assert.equal((sel(old.runId) as { record: RunRecord }).record.runId, old.runId);
@@ -195,14 +208,149 @@ test('selectRecord: run id, no selector (latest completed), numeric view positio
     assert.equal(sel('0').ok, false);
     assert.equal(sel('nope').ok, false);
     const view = [
-      { file: join(dir, 'recent.md'), hasRecord: true, mode: 'review' },
-      { file: join(dir, 'legacy.md'), hasRecord: false, mode: 'plan' },
+      { file: join(dir, 'recent.md'), harness: 'claude', hasRecord: true, mode: 'review' },
+      { file: join(dir, 'legacy.md'), harness: 'claude', hasRecord: false, mode: 'plan' },
+      { file: join(dir, 'broken.md'), harness: 'claude', hasRecord: false, mode: 'plan', recordProblem: 'too large' },
     ] as never;
     assert.equal((sel('1', view) as { record: RunRecord }).record.runId, recent.runId);
     assert.match((sel('2', view) as { error: string }).error, /predates run records/);
-    assert.match((sel('3', view) as { error: string }).error, /no run #3/);
+    assert.match((sel('3', view) as { error: string }).error, /unusable record \("too large"\)/);
+    assert.match((sel('4', view) as { error: string }).error, /no run #4/);
   });
 });
+
+test('selectRecord: a planted orphan sidecar (no transcript) is never selectable, by id or as "newest"', async () => {
+  await withSandbox({}, async () => {
+    const legit = seed('claude', 'legit', {}, {}, 1000);
+    const dir = outputsDir('claude');
+    const orphan = {
+      ...record({ harness: 'claude', startedAt: '2999-01-01T00:00:00.000Z' }, { addDirs: ['/', '/etc'] }),
+      transcript: 'orphan.md',
+    };
+    writeFileSync(join(dir, 'zzz-orphan.json'), JSON.stringify(orphan));
+    assert.equal((selectRecord(undefined, []) as { record: RunRecord }).record.runId, legit.runId);
+    const byId = selectRecord(orphan.runId, []);
+    assert.equal(byId.ok, false);
+  });
+});
+
+test('selectRecord: an id claimed by two records is ambiguous, never "first wins"', async () => {
+  await withSandbox({}, async () => {
+    const a = seed('claude', 'a', {}, {}, 1000);
+    seed('claude', 'b', { runId: a.runId }, {}, 2000);
+    const r = selectRecord(a.runId, []);
+    assert.ok(!r.ok && /ambiguous/.test(r.error));
+  });
+});
+
+test('selectRecord: a record whose harness differs from its directory is rejected (and the reason is reported)', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    const edited = seed('claude', 'edited', {}, {}, 1000);
+    const j = JSON.parse(readFileSync(join(dir, 'edited.json'), 'utf8'));
+    j.harness = 'codex';
+    j.mode = 'implement';
+    writeFileSync(join(dir, 'edited.json'), JSON.stringify(j));
+    const r = selectRecord(edited.runId, []);
+    assert.ok(!r.ok && /1 record file\(s\) were ignored.*harness/.test(r.error), JSON.stringify(r));
+  });
+});
+
+// ── planRerun: the new rules ─────────────────────────────────────────────────
+
+test("planRerun: refuses when today's template is WIDER than the recorded tier; shows the tier otherwise", () => {
+  const wider = planRerun(record(), none(), flags(), env({ modeTier: () => 'edit' }));
+  assert.match(wider.errors[0], /now runs at edit permission, but the recorded run used readonly/);
+  assert.match(
+    planRerun(record({ permission: 'edit' }), none(), flags(), env({ modeTier: () => 'danger' })).errors[0],
+    /widened/,
+  );
+  const same = planRerun(record({ permission: 'edit' }), none(), flags(), env({ modeTier: () => 'edit' }));
+  assert.deepEqual(same.errors, []);
+  assert.ok(same.summary.some(l => /today's template/.test(l)));
+  assert.ok(same.summary.some(l => /permission tier now: claude: edit$/.test(l)));
+  const narrower = planRerun(record({ permission: 'danger' }), none(), flags(), env({ modeTier: () => 'readonly' }));
+  assert.deepEqual(narrower.errors, []);
+  assert.ok(narrower.summary.some(l => /claude: readonly \(recorded run: danger\)/.test(l)));
+  // a human who names another mode/harness on the line has chosen the target: no comparison
+  assert.deepEqual(
+    planRerun(record(), { task: '', mode: 'other' }, flags(), env({ modeTier: () => 'edit' })).errors,
+    [],
+  );
+  // per member in a fan-out
+  const fid = newFanoutId();
+  const a = record({ fanoutId: fid, harness: 'claude', permission: 'edit' });
+  const b = record({ fanoutId: fid, harness: 'codex', permission: 'readonly' });
+  const fan = planRerun(a, none(), flags({ fanout: true }), env({ siblings: [a, b], modeTier: () => 'edit' }));
+  assert.match(fan.errors[0], /on codex now runs at edit.*recorded run used readonly/);
+});
+
+test('planRerun: a truncated scope cannot be rerun (a cut path would widen it) unless --scope is given', () => {
+  const r = record({}, { scope: 'src/foo', scopeTruncated: true });
+  assert.match(planRerun(r, none(), flags(), env()).errors[0], /scope was truncated/);
+  const given = planRerun(r, { task: '', scope: 'src/foo/bar.ts' }, flags(), env());
+  assert.deepEqual(given.errors, []);
+  assert.equal(given.args?.scope, 'src/foo/bar.ts');
+});
+
+test('planRerun: stored timeout/budget/addDirs are marked untrusted; typed overrides are not', () => {
+  const stored = planRerun(record(), none(), flags(), env());
+  assert.equal(stored.args?.storedTimeout, true);
+  assert.equal(stored.args?.storedBudget, true);
+  assert.deepEqual(stored.storedAddDirs, ['../shared']);
+  const typed = planRerun(record(), { task: '', timeoutSec: 900, budget: 9, addDirs: ['/typed'] }, flags(), env());
+  assert.equal(typed.args?.storedTimeout, undefined);
+  assert.equal(typed.args?.storedBudget, undefined);
+  assert.deepEqual(typed.storedAddDirs, [], 'a --add-dir typed on the rerun line is human-trusted');
+  assert.deepEqual(typed.args?.addDirs, ['/typed']);
+  const none2 = planRerun(record({}, { budgetUsd: null, timeoutSec: null, addDirs: [] }), none(), flags(), env());
+  assert.equal(none2.args?.storedTimeout, undefined);
+  assert.deepEqual(none2.storedAddDirs, []);
+});
+
+test('planRerun: control, C1, bidi and zero-width characters (and a bare \\r) in task/scope/model are refused', () => {
+  const bad = (input: Partial<RunRecord['input']>) => planRerun(record({}, input), none(), flags(), env());
+  for (const [label, ch] of [
+    ['CR', '\r'],
+    ['C1 CSI', '\u009b'],
+    ['bidi override', '\u202e'],
+    ['zero-width space', '\u200b'],
+    ['word joiner', '\u2060'],
+    ['ESC', '\u001b'],
+  ] as const) {
+    assert.match(bad({ task: `do${ch}it` }).errors[0] ?? '', /control or invisible/, `task ${label}`);
+    assert.match(bad({ scope: `src${ch}a` }).errors[0] ?? '', /control or invisible/, `scope ${label}`);
+    assert.match(bad({ model: `m${ch}x` }).errors[0] ?? '', /control or invisible/, `model ${label}`);
+  }
+  assert.deepEqual(bad({ task: 'multi\nline\ttext' }).errors, [], 'newlines and tabs are ordinary text');
+});
+
+test('planRerun: the summary (what the human confirms) is one sanitized, escaped line per fact', () => {
+  const plan = planRerun(
+    record({ mode: 'we\u001b]0;PWN\u0007ird\u202e' }, { task: 'plain task', pr: '12' }),
+    none(),
+    flags(),
+    env(),
+  );
+  const text = plan.summary.join('\n');
+  assert.ok(!UNSAFE.test(text), JSON.stringify(text));
+  assert.match(text, /\\u001b/, 'the escape is shown escaped, not hidden');
+  assert.match(text, /harness: claude/);
+  assert.match(text, /task: "plain task"/);
+});
+
+test('planRerun runs validateDelegateInputs itself — a bad stored value is an error before anything is shown', () => {
+  assert.match(
+    planRerun(record({}, { pr: 'not-a-pr' }), none(), flags(), env()).errors[0],
+    /unusable value.*invalid pr/,
+  );
+  assert.match(
+    planRerun(record({}, { addDirs: ['x'.repeat(5000)] }), none(), flags(), env()).errors[0],
+    /unusable value.*addDirs/,
+  );
+});
+
+// ── e2e ──────────────────────────────────────────────────────────────────────
 
 const ARGS = (argsFile: string, name = 'claude'): string => (readArgs(`${argsFile}.${name}`) ?? []).join('\n');
 const ran = (argsFile: string, name = 'claude'): boolean => {
@@ -210,21 +358,68 @@ const ran = (argsFile: string, name = 'claude'): boolean => {
   return argv !== null && !(argv.length === 1 && argv[0] === '--version');
 };
 
-async function captureStderr<T>(fn: () => Promise<T>): Promise<{ value: T; err: string }> {
-  const errs: string[] = [];
-  const orig = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((c: string | Uint8Array) => {
-    errs.push(String(c));
+/** Capture stderr + stdout while `fn` runs. */
+async function capture<T>(fn: () => Promise<T>): Promise<{ value: T; err: string }> {
+  const out: string[] = [];
+  const oe = process.stderr.write.bind(process.stderr);
+  const oo = process.stdout.write.bind(process.stdout);
+  const sink = (c: string | Uint8Array): boolean => {
+    out.push(String(c));
     return true;
-  }) as typeof process.stderr.write;
+  };
+  process.stderr.write = sink as typeof process.stderr.write;
+  process.stdout.write = sink as typeof process.stdout.write;
   try {
-    return { value: await fn(), err: errs.join('') };
+    return { value: await fn(), err: out.join('') };
   } finally {
-    process.stderr.write = orig;
+    process.stderr.write = oe;
+    process.stdout.write = oo;
   }
 }
 
-test('/delegate rerun (e2e): repeats the run via the normal path with a fresh session; verify is not replayed', async () => {
+type Handler = (a: string, c: unknown) => Promise<void>;
+const handlerOf = async (): Promise<Handler> => {
+  const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+  return commands.get('delegate')?.handler as Handler;
+};
+/** The run ids recorded for `harness`, oldest first (transcript names are timestamps). */
+const recordedIds = (harness = 'claude'): string[] =>
+  readdirSync(outputsDir(harness))
+    .filter(f => f.endsWith('.json'))
+    .sort()
+    .map(f => (JSON.parse(readFileSync(join(outputsDir(harness), f), 'utf8')) as RunRecord).runId);
+
+/** An interactive ctx that scripts `confirm` and never lets an unscripted dialog hang. */
+function ui(cwd: string, answers: boolean[] | boolean, trusted = true) {
+  const asked: string[] = [];
+  const notes: string[] = [];
+  const queue = Array.isArray(answers) ? [...answers] : null;
+  const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
+  const ctx = {
+    cwd,
+    hasUI: true,
+    isProjectTrusted: () => trusted,
+    ui: {
+      theme,
+      confirm: async (_t: string, message: string) => {
+        asked.push(message);
+        return queue ? (queue.shift() ?? false) : answers === true;
+      },
+      notify: (msg: string) => notes.push(msg),
+      setStatus: () => {},
+      custom: (factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => unknown) =>
+        new Promise(resolve => {
+          const comp = factory({ requestRender() {} }, theme, {}, v => {
+            (comp as { dispose?: () => void } | undefined)?.dispose?.();
+            resolve(v);
+          }) as { dispose?: () => void };
+        }),
+    },
+  };
+  return { ctx, asked, notes };
+}
+
+test('/delegate rerun (e2e, headless): an explicit run id repeats the run; a bare rerun / rerun <n> is refused', async () => {
   await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
     await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
       const execs: string[] = [];
@@ -233,140 +428,368 @@ test('/delegate rerun (e2e): repeats the run via the normal path with a fresh se
         return { stdout: '', stderr: '', code: 0 };
       });
       const ctx = fakeCtx(cwd);
-      const h = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+      const h = commands.get('delegate')?.handler as Handler;
       await h('claude tinker --verify="echo verifying" fix the widget', ctx);
       assert.ok(
         execs.some(e => e.startsWith('sh -c echo verifying')),
         'original verify ran',
       );
+      const [id] = recordedIds();
       execs.length = 0;
       rmSync(`${argsFile}.claude`, { force: true });
-      const { err } = await captureStderr(() => h('rerun', ctx));
+      for (const bare of ['rerun', 'rerun 1', 'rerun --resume']) {
+        const refused = await capture(() => h(bare, ctx));
+        assert.match(refused.err, /needs an explicit run id/, bare);
+        assert.ok(!ran(argsFile), `${bare}: nothing may run headless`);
+      }
+      const { err } = await capture(() => h(`rerun ${id}`, ctx));
       assert.ok(ran(argsFile), err);
       assert.match(ARGS(argsFile), /fix the widget/);
       assert.ok(!ARGS(argsFile).includes('--resume'), 'fresh session by default');
       assert.deepEqual(execs, [], 'verify command is not replayed');
       assert.match(err, /verify command.*not replayed/);
       assert.match(err, /fresh session/);
-      // --resume continues the recorded session
       rmSync(`${argsFile}.claude`, { force: true });
-      await captureStderr(() => h('rerun --resume', ctx));
+      await capture(() => h(`rerun ${id} --resume`, ctx));
       assert.match(ARGS(argsFile), /--resume\nsess-1/);
-      assert.equal(readdirSync(outputsDirFor()).filter(f => f.endsWith('.json')).length, 3);
+      assert.equal(readdirSync(outputsDir('claude')).filter(f => f.endsWith('.json')).length, 3);
     });
   });
 });
 
-function outputsDirFor(): string {
-  return outputsDir('claude');
-}
-
-test('/delegate rerun (e2e): a danger run is not replayed as danger; --allow-dangerous needs the human again', async () => {
+test('/delegate rerun (e2e, UI): the plan is always confirmed first — decline runs nothing; approve runs it', async () => {
   await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
-    const { delegate } = await import('../extensions/engine.ts');
     await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
-      // original: escalated to danger via the engine (as a confirmed --allow-dangerous would)
-      const first = await delegate(
-        fakePi(async () => ({})),
-        fakeCtx(cwd),
-        {
-          harness: 'claude',
-          mode: 'tinker',
-          task: 'risky thing',
-          allowDangerous: true,
-        },
-      );
-      assert.equal(first.details.permission, 'danger');
-      assert.match(ARGS(argsFile), /bypassPermissions/);
+      const h = await handlerOf();
+      await capture(() => h('claude tinker --scope=src/a.ts --budget=2 --timeout=120 fix the widget', fakeCtx(cwd)));
       rmSync(`${argsFile}.claude`, { force: true });
-      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
-      const h = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
-      const plain = await captureStderr(() => h('rerun', fakeCtx(cwd)));
-      assert.ok(ran(argsFile), plain.err);
-      assert.ok(!/bypassPermissions/.test(ARGS(argsFile)), 'the rerun runs at the template tier, not danger');
-      assert.match(plain.err, /never replayed/);
-      // typing --allow-dangerous again headless: refused, nothing runs
+      const declined = ui(cwd, false);
+      await h('rerun', declined.ctx);
+      assert.equal(declined.asked.length, 1);
+      assert.match(declined.asked[0], /harness: claude/);
+      assert.match(declined.asked[0], /mode: "tinker" — today's template/);
+      assert.match(declined.asked[0], /permission tier now: claude: edit/);
+      assert.match(declined.asked[0], /task: "fix the widget"/);
+      assert.match(declined.asked[0], /scope: "src\/a.ts"/);
+      assert.match(declined.asked[0], /budget: \$2/);
+      assert.match(declined.asked[0], /timeout: 120s/);
+      assert.ok(!ran(argsFile), 'declined: nothing runs');
+      assert.ok(declined.notes.some(n => /declined — nothing was run/.test(n)));
+      const approved = ui(cwd, true);
+      await h('rerun 1', approved.ctx); // a bare number works in a UI session (it indexes the history view)
+      assert.equal(approved.asked.length, 1);
+      assert.ok(ran(argsFile), approved.notes.join('|'));
+      assert.match(ARGS(argsFile), /fix the widget/);
+      // a throwing dialog counts as a decline
       rmSync(`${argsFile}.claude`, { force: true });
-      const again = await captureStderr(() => h('rerun --allow-dangerous', fakeCtx(cwd)));
-      assert.match(again.err, /needs interactive confirmation/);
+      const throwing = ui(cwd, true);
+      throwing.ctx.ui.confirm = async () => {
+        throw new Error('dialog crashed');
+      };
+      await h('rerun', throwing.ctx);
       assert.ok(!ran(argsFile));
     });
   });
 });
 
-test('/delegate rerun (e2e): a hand-edited hostile sidecar never reaches a harness', async () => {
+test('/delegate rerun (e2e): a planted orphan sidecar with future startedAt and addDirs ["/","/etc"] is never selected or run', async () => {
   await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
     await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
-      const dir = outputsDir('claude');
-      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
-      const h = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
-      await captureStderr(() => h('claude tinker seed run', fakeCtx(cwd)));
-      const name = readdirSync(dir).find(f => f.endsWith('.json')) as string;
-      const good = JSON.parse(readFileSync(join(dir, name), 'utf8')) as RunRecord;
-      const attempts: Array<[string, (r: Record<string, unknown>) => void, string]> = [
-        [
-          'leading-dash model',
-          r => ((r.input as Record<string, unknown>).model = '--dangerously-bypass'),
-          'invalid model',
-        ],
-        ['argv-shaped pr', r => ((r.input as Record<string, unknown>).pr = '--repo=evil/x'), 'invalid pr'],
-        ['control-char addDir', r => ((r.input as Record<string, unknown>).addDirs = ['a\u0000b']), 'invalid addDirs'],
-        [
-          'control-char task',
-          r => ((r.input as Record<string, unknown>).task = 'x\u001b]0;pwned\u0007'),
-          'control characters',
-        ],
-        ['wrong type', r => (r.harness = 7), 'no run record'],
-        ['oversized task', r => ((r.input as Record<string, unknown>).task = 'x'.repeat(50_000)), 'no run record'],
-        ['unknown mode', r => (r.mode = 'does-not-exist'), 'not available'],
-        ['unknown harness', r => (r.harness = 'evil'), 'unknown harness'],
-      ];
-      for (const [label, edit, expected] of attempts) {
-        const copy = JSON.parse(JSON.stringify(good)) as Record<string, unknown>;
-        edit(copy);
-        writeFileSync(join(dir, name), JSON.stringify(copy));
-        rmSync(`${argsFile}.claude`, { force: true });
-        const { err } = await captureStderr(() => h(`rerun ${good.runId}`, fakeCtx(cwd)));
-        assert.match(err, new RegExp(expected), `${label}: ${err}`);
-        assert.ok(!ran(argsFile), `${label}: nothing may run`);
-        assert.ok(!err.includes('\u001b'), `${label}: no raw escapes echoed`);
-      }
+      const h = await handlerOf();
+      await capture(() => h('claude tinker legit run', fakeCtx(cwd)));
+      const orphan = {
+        ...record(
+          { cwd, mode: 'tinker', startedAt: '2999-01-01T00:00:00.000Z' },
+          { task: 'PLANTED TASK', addDirs: ['/', '/etc'] },
+        ),
+        transcript: 'zzz-orphan.md',
+      };
+      writeFileSync(join(outputsDir('claude'), 'zzz-orphan.json'), JSON.stringify(orphan));
+      rmSync(`${argsFile}.claude`, { force: true });
+      const byId = await capture(() => h(`rerun ${orphan.runId}`, fakeCtx(cwd)));
+      assert.match(byId.err, /no run record with id/);
+      assert.ok(!ran(argsFile));
+      const u = ui(cwd, true);
+      await h('rerun', u.ctx); // newest by transcript mtime among records that have a transcript
+      assert.ok(ran(argsFile));
+      assert.match(ARGS(argsFile), /legit run/);
+      assert.ok(!/PLANTED/.test(ARGS(argsFile)) && !ARGS(argsFile).includes('/etc'));
+      assert.ok(u.asked.every(a => !a.includes('/etc')));
     });
   });
 });
 
-test('/delegate rerun (e2e): another cwd needs --here; --fanout reruns every recorded member', async () => {
+test('/delegate rerun (e2e): a claude sidecar edited to codex/implement is rejected — history and rerun both say so', async () => {
   await withSandbox({}, async ({ cwd }) => {
     await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
       await withOnlyFakes(argsFile, async () => {
-        const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
-        const h = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
-        await captureStderr(() => h('claude,codex general compare approaches', fakeCtx(cwd)));
-        assert.ok(ran(argsFile, 'claude') && ran(argsFile, 'codex'));
+        const h = await handlerOf();
+        await capture(() => h('claude review look at it', fakeCtx(cwd)));
+        const dir = outputsDir('claude');
+        const f = readdirSync(dir).find(x => x.endsWith('.json')) as string;
+        const j = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+        const id = j.runId;
+        j.harness = 'codex';
+        j.mode = 'implement';
+        writeFileSync(join(dir, f), JSON.stringify(j));
         rmSync(`${argsFile}.claude`, { force: true });
-        rmSync(`${argsFile}.codex`, { force: true });
-        // single member only, by default
-        await captureStderr(() => h('rerun', fakeCtx(cwd)));
-        assert.equal([ran(argsFile, 'claude'), ran(argsFile, 'codex')].filter(Boolean).length, 1);
-        rmSync(`${argsFile}.claude`, { force: true });
-        rmSync(`${argsFile}.codex`, { force: true });
-        const other = join(cwd, '..', 'elsewhere');
-        mkdirSync(other, { recursive: true });
-        const moved = await captureStderr(() => h('rerun', fakeCtx(other)));
-        assert.match(moved.err, /pass --here/);
-        assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
-        const member = readdirSync(outputsDir('codex'))
-          .filter(f => f.endsWith('.json'))
-          .map(f => JSON.parse(readFileSync(join(outputsDir('codex'), f), 'utf8')) as RunRecord)
-          .find(r => r.fanoutId);
-        assert.ok(member);
-        await captureStderr(() => h(`rerun ${member.runId} --fanout`, fakeCtx(cwd)));
-        assert.ok(ran(argsFile, 'claude') && ran(argsFile, 'codex'), 'both members rerun');
+        const hist = await capture(() => h('history', fakeCtx(cwd)));
+        assert.match(hist.err, /^1\. claude review/m, 'history lists what the directory says');
+        assert.match(hist.err, /1 run record\(s\) ignored.*not rerunnable.*harness "codex"/);
+        const out = await capture(() => h(`rerun ${id}`, fakeCtx(cwd)));
+        assert.match(out.err, /no run record with id.*1 record file\(s\) were ignored/);
+        assert.ok(!ran(argsFile, 'codex') && !ran(argsFile, 'claude'), 'nothing runs, on either harness');
       });
     });
   });
 });
 
-test('recordPathFor is what the rerun reads', () => {
-  assert.equal(recordPathFor('/a/b.md'), '/a/b.json');
+test('/delegate rerun (e2e): stored addDirs go through the model-set gate — outside the project need their own human yes', async () => {
+  await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const h = await handlerOf();
+      await capture(() => h('claude tinker --add-dir=/etc --add-dir=./inside fix it', fakeCtx(cwd)));
+      const id = recordedIds()[0];
+      rmSync(`${argsFile}.claude`, { force: true });
+      // headless: explicit id is allowed, but the outside dir fails closed
+      const headless = await capture(() => h(`rerun ${id}`, fakeCtx(cwd)));
+      assert.match(headless.err, /outside the working directory.*no interactive UI/);
+      assert.ok(!ran(argsFile));
+      // UI: plan confirm yes, addDirs confirm no -> nothing runs
+      const no = ui(cwd, [true, false]);
+      await h(`rerun ${id}`, no.ctx);
+      assert.equal(no.asked.length, 2);
+      assert.match(no.asked[1], /run record being repeated lists extra directories/);
+      assert.match(no.asked[1], /\/etc/);
+      assert.ok(!ran(argsFile));
+      // both yes -> runs
+      const yes = ui(cwd, [true, true]);
+      await h(`rerun ${id}`, yes.ctx);
+      assert.ok(ran(argsFile), yes.notes.join('|'));
+      // a --add-dir typed on the rerun line replaces the stored ones and is human-trusted (no second prompt)
+      rmSync(`${argsFile}.claude`, { force: true });
+      const typed = ui(cwd, [true]);
+      await h(`rerun ${id} --add-dir=/tmp`, typed.ctx);
+      assert.equal(typed.asked.length, 1);
+      assert.ok(ran(argsFile));
+    });
+  });
+});
+
+test('/delegate rerun (e2e): inside-cwd stored addDirs are silent (no second prompt)', async () => {
+  await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const h = await handlerOf();
+      await capture(() => h('claude tinker --add-dir=./inside fix it', fakeCtx(cwd)));
+      rmSync(`${argsFile}.claude`, { force: true });
+      const u = ui(cwd, [true]);
+      await h(`rerun ${recordedIds()[0]}`, u.ctx);
+      assert.equal(u.asked.length, 1);
+      assert.ok(ran(argsFile));
+    });
+  });
+});
+
+test('/delegate rerun (e2e): a stored timeout/budget can only narrow the configured ones; typed ones may raise', async () => {
+  await withSandbox(
+    { templates: { 'claude/tinker': tpl('tinker', 'edit') }, settings: { timeoutMs: 60_000, maxBudgetUsd: 1 } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+        const h = await handlerOf();
+        // the original, human-typed run legitimately raised both
+        await capture(() => h('claude tinker --timeout=3000 --budget=5 fix it', fakeCtx(cwd)));
+        const [id] = recordedIds();
+        const dir = outputsDir('claude');
+        const timeoutMsOfNewest = (): number | null => {
+          const files = readdirSync(dir)
+            .filter(f => f.endsWith('.json'))
+            .sort();
+          return (JSON.parse(readFileSync(join(dir, files[files.length - 1]), 'utf8')) as RunRecord).timeoutMs;
+        };
+        assert.equal(timeoutMsOfNewest(), 3_000_000, 'typed --timeout raised it');
+        assert.match(ARGS(argsFile), /--max-budget-usd\n5/);
+        rmSync(`${argsFile}.claude`, { force: true });
+        await new Promise(r => setTimeout(r, 15));
+        await capture(() => h(`rerun ${id}`, fakeCtx(cwd)));
+        assert.equal(timeoutMsOfNewest(), 60_000, 'a stored timeout never raises the configured one');
+        assert.match(ARGS(argsFile), /--max-budget-usd\n1\b/, 'a stored budget never raises the configured one');
+        rmSync(`${argsFile}.claude`, { force: true });
+        await new Promise(r => setTimeout(r, 15));
+        await capture(() => h(`rerun ${id} --timeout=3000 --budget=5`, fakeCtx(cwd)));
+        assert.equal(timeoutMsOfNewest(), 3_000_000, 'typed on the rerun line = human: may raise');
+        assert.match(ARGS(argsFile), /--max-budget-usd\n5/);
+      });
+    },
+  );
+});
+
+test('/delegate rerun (e2e): a stored budget LOWER than the configured one still applies', async () => {
+  await withSandbox(
+    { templates: { 'claude/tinker': tpl('tinker', 'edit') }, settings: { maxBudgetUsd: 10 } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+        const h = await handlerOf();
+        await capture(() => h('claude tinker --budget=2 fix it', fakeCtx(cwd)));
+        rmSync(`${argsFile}.claude`, { force: true });
+        await capture(() => h(`rerun ${recordedIds()[0]}`, fakeCtx(cwd)));
+        assert.match(ARGS(argsFile), /--max-budget-usd\n2\b/);
+      });
+    },
+  );
+});
+
+test("/delegate rerun (e2e): the trust gate and the tier check use TODAY's template", async () => {
+  await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'readonly') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const h = await handlerOf();
+      await capture(() => h('claude tinker look around', fakeCtx(cwd)));
+      const [id] = recordedIds();
+      rmSync(`${argsFile}.claude`, { force: true });
+      // untrusted project: a project-local mode does not resolve, so it is not rerunnable
+      const untrusted = await capture(() => h(`rerun ${id}`, fakeCtx(cwd, false)));
+      assert.match(untrusted.err, /mode "tinker" is not available for claude now/);
+      assert.ok(!ran(argsFile));
+      // the template is widened after the run: refused, with the reason
+      const file = join(cwd, '.pi', 'delegate', 'templates', 'claude', 'tinker.md');
+      writeFileSync(file, tpl('tinker', 'edit'));
+      const widened = await capture(() => h(`rerun ${id}`, fakeCtx(cwd)));
+      assert.match(widened.err, /now runs at edit permission, but the recorded run used readonly/);
+      assert.ok(!ran(argsFile));
+      // ...and no confirm is even shown for it in a UI session
+      const u = ui(cwd, true);
+      await h(`rerun ${id}`, u.ctx);
+      assert.equal(u.asked.length, 0);
+    });
+  });
+});
+
+test('/delegate rerun (e2e): a shared (harness-less) template name is recognised on the rerun line', async () => {
+  await withSandbox({ templates: { sharedmode: tpl('sharedmode', 'readonly') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const h = await handlerOf();
+      await capture(() => h('claude general run it', fakeCtx(cwd)));
+      const [id] = recordedIds();
+      rmSync(`${argsFile}.claude`, { force: true });
+      // `sharedmode` as the first word is a mode override, not a stray prompt
+      const out = await capture(() => h(`rerun ${id} sharedmode`, fakeCtx(cwd)));
+      assert.ok(!/takes no new prompt/.test(out.err), out.err);
+      assert.ok(ran(argsFile), out.err);
+      assert.match(ARGS(argsFile), /Mode: sharedmode/);
+    });
+  });
+});
+
+test('/delegate rerun (e2e): rerun validates BEFORE it asks — a bad stored value never reaches the confirm', async () => {
+  await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const h = await handlerOf();
+      await capture(() => h('claude tinker fix it', fakeCtx(cwd)));
+      const dir = outputsDir('claude');
+      const f = readdirSync(dir).find(x => x.endsWith('.json')) as string;
+      const j = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+      j.input.pr = '--repo=evil/x';
+      writeFileSync(join(dir, f), JSON.stringify(j));
+      rmSync(`${argsFile}.claude`, { force: true });
+      const u = ui(cwd, true);
+      await h(`rerun ${j.runId}`, u.ctx);
+      assert.equal(u.asked.length, 0, 'the planner refused it before any dialog');
+      assert.ok(
+        u.notes.some(n => /invalid pr/.test(n)),
+        u.notes.join('|'),
+      );
+      assert.ok(!ran(argsFile));
+    });
+  });
+});
+
+test('/delegate rerun (e2e): records with escape/bidi text in their mode are skipped; nothing raw reaches stderr, notify or confirm', async () => {
+  await withSandbox({ templates: { 'claude/tinker': tpl('tinker', 'edit') } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const h = await handlerOf();
+      await capture(() => h('claude tinker fix it', fakeCtx(cwd)));
+      const dir = outputsDir('claude');
+      const f = readdirSync(dir).find(x => x.endsWith('.json')) as string;
+      const j = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+      j.mode = 'evil\u001b]0;PWN\u0007\u202emode';
+      j.input.task = 'fix\u001b[2Jit';
+      writeFileSync(join(dir, f), JSON.stringify(j));
+      rmSync(`${argsFile}.claude`, { force: true });
+      const u = ui(cwd, true);
+      const outs = [
+        (await capture(() => h(`rerun ${j.runId}`, fakeCtx(cwd)))).err,
+        (await capture(() => h('history', fakeCtx(cwd)))).err,
+        (await capture(() => h(`rerun ${j.runId} --allow-dangerous`, u.ctx))).err,
+        ...u.notes,
+        ...u.asked,
+      ];
+      for (const o of outs) assert.ok(!UNSAFE.test(o), JSON.stringify(o));
+      assert.ok(!ran(argsFile));
+    });
+  });
+});
+
+test('/delegate history (TUI): rows are numbered exactly like the headless listing, so `rerun <n>` indexes what is shown', async () => {
+  await withSandbox(
+    { templates: { 'claude/tinker': tpl('tinker', 'edit'), 'claude/other': tpl('other', 'edit') } },
+    async ({ cwd }) => {
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async () => {
+        const h = await handlerOf();
+        await capture(() => h('claude tinker first', fakeCtx(cwd)));
+        await new Promise(r => setTimeout(r, 15));
+        await capture(() => h('claude other second', fakeCtx(cwd)));
+        const headless = await capture(() => h('history', fakeCtx(cwd)));
+        assert.match(headless.err, /^1\. claude other/m);
+        assert.match(headless.err, /^2\. claude tinker/m);
+        let rendered: string[] = [];
+        const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
+        const tuiCtx = {
+          cwd,
+          hasUI: true,
+          isProjectTrusted: () => true,
+          ui: {
+            theme,
+            notify: () => {},
+            setStatus: () => {},
+            custom: async (factory: (t: unknown, th: unknown, kb: unknown, done: (v: unknown) => void) => unknown) => {
+              const comp = factory({ requestRender() {} }, theme, {}, () => {}) as { render: (w: number) => string[] };
+              rendered = comp.render(120);
+              return undefined;
+            },
+          },
+        };
+        await h('history', tuiCtx);
+        const rows = rendered.filter(l => /\d+\. claude/.test(l));
+        assert.ok(rows.length >= 2, rendered.join('\n'));
+        assert.match(rows[0], /1\. claude other/);
+        assert.match(rows[1], /2\. claude tinker/);
+      });
+    },
+  );
+});
+
+test('/delegate rerun --fanout (e2e): a stored timeout never raises the configured one on any member; typed may', async () => {
+  await withSandbox({ settings: { timeoutMs: 60_000 } }, async ({ cwd }) => {
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+      await withOnlyFakes(argsFile, async () => {
+        const h = await handlerOf();
+        await capture(() => h('claude,codex general --timeout=3000 compare approaches', fakeCtx(cwd)));
+        const [claudeId] = recordedIds('claude');
+        const newestTimeouts = () =>
+          ['claude', 'codex'].map(hn => {
+            const files = readdirSync(outputsDir(hn))
+              .filter(f => f.endsWith('.json'))
+              .sort();
+            return (JSON.parse(readFileSync(join(outputsDir(hn), files[files.length - 1]), 'utf8')) as RunRecord)
+              .timeoutMs;
+          });
+        assert.deepEqual(newestTimeouts(), [3_000_000, 3_000_000]);
+        await new Promise(r => setTimeout(r, 15));
+        await capture(() => h(`rerun ${claudeId} --fanout`, fakeCtx(cwd)));
+        assert.deepEqual(newestTimeouts(), [60_000, 60_000], 'stored: only narrows');
+        await new Promise(r => setTimeout(r, 15));
+        await capture(() => h(`rerun ${claudeId} --fanout --timeout=3000`, fakeCtx(cwd)));
+        assert.deepEqual(newestTimeouts(), [3_000_000, 3_000_000], 'typed: human may raise');
+      });
+    });
+  });
 });

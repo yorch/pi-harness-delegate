@@ -16,6 +16,7 @@ import {
   withOnlyFakes,
   withSandbox,
 } from './helpers/sandbox.ts';
+import { UNSAFE } from './helpers/unsafe.ts';
 
 const rec = (over: Partial<RunRecord>): RunRecord => ({
   ...buildRunRecord({
@@ -265,6 +266,142 @@ test('delegate tool: resumeFanout resumes the recorded members; it cannot be com
         );
         assert.match((readArgs(`${argsFile}.claude`) ?? []).join('\n'), /--resume\nsess-1/);
         assert.match((readArgs(`${argsFile}.codex`) ?? []).join('\n'), /--\nthr-1\n/);
+      });
+    });
+  });
+});
+
+test('planFanoutResume: harness names are canonicalized so the session lookup always matches; unknown names are refused', () => {
+  const fid = newFanoutId();
+  const plan = planFanoutResume(
+    fid,
+    [
+      rec({ fanoutId: fid, harness: 'Claude', sessionId: 'c-1' }),
+      rec({ fanoutId: fid, harness: 'omp', sessionId: 'a-1' }),
+    ],
+    '/proj',
+  );
+  assert.ok(plan.ok);
+  if (plan.ok) {
+    assert.deepEqual(plan.harnesses, ['claude', 'amp']);
+    assert.deepEqual(plan.sessions, { claude: 'c-1', amp: 'a-1' });
+    // every harness the fan-out launches has a session under exactly that name
+    for (const h of plan.harnesses) assert.ok(Object.hasOwn(plan.sessions, h));
+  }
+  const bad = planFanoutResume(fid, [rec({ fanoutId: fid, harness: 'claude,codex', sessionId: 's' })], '/proj');
+  assert.ok(!bad.ok && /not a known harness/.test(bad.error));
+  const evil = planFanoutResume(fid, [rec({ fanoutId: fid, harness: 'x\u001b[31m\u202e', sessionId: 's' })], '/proj');
+  assert.ok(!evil.ok && !UNSAFE.test(evil.error), evil.ok ? '' : JSON.stringify(evil.error));
+});
+
+test("planFanoutResume: the newest record (input order, newest first) wins — a record's own startedAt is not trusted", () => {
+  const fid = newFanoutId();
+  const claimsFuture = rec({ fanoutId: fid, sessionId: 'planted', startedAt: '2999-01-01T00:00:00.000Z' });
+  const realNewest = rec({ fanoutId: fid, sessionId: 'real', startedAt: '2001-01-01T00:00:00.000Z' });
+  const p = planFanoutResume(fid, [realNewest, claimsFuture], '/proj');
+  assert.ok(p.ok && p.sessions.claude === 'real');
+});
+
+test('planFanoutResume: members whose record was unreadable are LISTED, and a fan-out of only unreadable records says so', () => {
+  const fid = newFanoutId();
+  const skipped = [
+    { file: 'a.md', reason: 'invalid field "sessionId"', fanoutId: fid, harness: 'codex' },
+    { file: 'b.md', reason: 'x', fanoutId: newFanoutId(), harness: 'devin' },
+  ];
+  const plan = planFanoutResume(fid, [rec({ fanoutId: fid, harness: 'claude', sessionId: 'c-1' })], '/proj', skipped);
+  assert.ok(plan.ok && plan.unreadable.length === 1 && plan.unreadable[0] === 'codex');
+  const onlyBad = planFanoutResume(fid, [], '/proj', skipped);
+  assert.ok(!onlyBad.ok && /no usable run record.*unreadable record\(s\) for: "?codex/.test(onlyBad.error));
+});
+
+test('fan-out resume (e2e): an unparseable or case-edited member is reported as unreadable — never a fresh session passed off as resumed', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    const { takePendingReport } = await import('../extensions/engine.ts');
+    await withFakeBinaries(['claude', 'codex'], [CLAUDE_RESULT, ...CODEX_RESULT_LINES], async argsFile => {
+      const { commands } = await loadExtension(async () => ({ stdout: '', stderr: '', code: 0 }));
+      const h = commands.get('delegate')?.handler as (a: string, c: unknown) => Promise<void>;
+      await withOnlyFakes(argsFile, async () => {
+        await capture(() => h('claude,codex general first pass', fakeCtx(cwd)));
+      });
+      const { id, file } = fanoutIdOf();
+      takePendingReport();
+      // codex: oversized session id (the parser refuses the whole record); claude: harness case-edited
+      const codexFile = file('codex');
+      const cr = JSON.parse(readFileSync(codexFile, 'utf8'));
+      cr.sessionId = 's'.repeat(600);
+      writeFileSync(codexFile, JSON.stringify(cr));
+      const claudeFile = file('claude');
+      const kr = JSON.parse(readFileSync(claudeFile, 'utf8'));
+      kr.harness = 'Claude';
+      writeFileSync(claudeFile, JSON.stringify(kr));
+      clear(argsFile);
+      await withOnlyFakes(argsFile, async () => {
+        const { err } = await capture(() => h(`--resume=${id} again`, fakeCtx(cwd)));
+        assert.match(err, /no usable run record.*unreadable record\(s\) for/, err);
+        assert.ok(!ran(argsFile, 'claude') && !ran(argsFile, 'codex'), 'nothing runs — no silent fresh session');
+      });
+      // one member readable again: it resumes, the other is listed as unreadable in the report
+      kr.harness = 'claude';
+      writeFileSync(claudeFile, JSON.stringify(kr));
+      clear(argsFile);
+      await withOnlyFakes(argsFile, async () => {
+        const { err } = await capture(() => h(`--resume=${id} again`, fakeCtx(cwd)));
+        assert.match(err, /unreadable run record, not resumed: "?codex/);
+        assert.ok(ran(argsFile, 'claude') && !ran(argsFile, 'codex'));
+        assert.match((readArgs(`${argsFile}.claude`) ?? []).join('\n'), /--resume\nsess-1/);
+        assert.match(takePendingReport()?.content ?? '', /unreadable run record, not resumed: codex/);
+      });
+    });
+  });
+});
+
+test('fan-out resume: a harness with no session mapping FAILS (tool path) instead of starting a fresh session', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { runFanoutTool } = await import('../extensions/fanout.ts');
+      const { loadConfig } = await import('../extensions/config.ts');
+      const { fakePi } = await import('./helpers/sandbox.ts');
+      await withOnlyFakes(argsFile, async () => {
+        const res = await runFanoutTool(
+          fakePi(async () => ({ code: 0, stdout: '', stderr: '' })),
+          fakeCtx(cwd),
+          loadConfig(),
+          { task: 'again', harness: 'claude' },
+          undefined,
+          undefined,
+          { sessions: {}, noSession: [] },
+        );
+        const runs = (res.details as { runs: { harness: string; ok: boolean; error?: string }[] }).runs;
+        assert.deepEqual(
+          runs.map(r => [r.harness, r.ok]),
+          [['claude', false]],
+        );
+        assert.match(runs[0].error ?? '', /no recorded session for claude.*not starting a fresh one/);
+        assert.ok(!ran(argsFile, 'claude'), 'no fresh claude session may start');
+      });
+    });
+  });
+});
+
+test('fan-out resume: a harness with no session mapping FAILS (command path) instead of starting a fresh session', async () => {
+  await withSandbox({}, async ({ cwd }) => {
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      const { runFanoutCommand } = await import('../extensions/fanout.ts');
+      const { fakePi } = await import('./helpers/sandbox.ts');
+      await withOnlyFakes(argsFile, async () => {
+        const { takePendingReport } = await import('../extensions/engine.ts');
+        takePendingReport();
+        await capture(() =>
+          runFanoutCommand(
+            fakePi(async () => ({ code: 0, stdout: '', stderr: '' })),
+            { activeRunId: 0, activeOverlay: null },
+            fakeCtx(cwd),
+            { task: 'again', harness: 'claude', mode: 'general' },
+            { sessions: {}, noSession: [] },
+          ),
+        );
+        assert.ok(!ran(argsFile, 'claude'), 'no fresh claude session may start');
+        assert.match(takePendingReport()?.content ?? '', /no recorded session for claude.*not starting a fresh one/);
       });
     });
   });

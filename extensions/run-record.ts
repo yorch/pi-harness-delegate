@@ -11,8 +11,22 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
+import { HARNESS_NAMES } from './harnesses/registry.ts';
 import type { StreamedUsage } from './harnesses/types.ts';
 import { sanitizeTemplateText } from './sanitize.ts';
 
@@ -20,6 +34,14 @@ export const RUN_RECORD_VERSION = 1;
 
 /** Stored text caps — a record can't grow without bound (and a rerun refuses a truncated task). */
 export const RECORD_LIMITS = { task: 20_000, scope: 4_000, field: 200, path: 4_096, addDirs: 32 } as const;
+
+/** A sidecar bigger than this is never read (and the writer shrinks a record to fit) — a hostile or
+ *  runaway file can't make a listing/rerun read megabytes, and a FIFO/device can't be slurped. */
+export const RECORD_MAX_BYTES = 64 * 1024;
+/** At most this many transcripts (newest first) have their sidecar read per outputs directory. */
+export const MAX_SIDECARS_SCANNED = 2000;
+/** A mode name as `/delegate history --mode=` and a template `name:` accept it. */
+export const MODE_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 const RUN_ID_RE = /^run_[0-9a-f]{16}$/;
 const FANOUT_ID_RE = /^fan_[0-9a-f]{16}$/;
@@ -48,6 +70,9 @@ export interface RunRecordInput {
   /** The task text was cut at `RECORD_LIMITS.task` — such a record is not rerunnable. */
   taskTruncated: boolean;
   scope: string | null;
+  /** The scope text was cut at `RECORD_LIMITS.scope` — not rerunnable either: a cut `src/foo/bar.ts`
+   *  would silently WIDEN the restriction to `src/foo`. Optional on disk (absent = false). */
+  scopeTruncated: boolean;
   pr: string | null;
   /** The call-level `addDirs` (not the template's), as given. */
   addDirs: string[];
@@ -168,6 +193,7 @@ export function buildRunRecord(s: RunRecordSource): RunRecord {
       task: cap(s.task, RECORD_LIMITS.task),
       taskTruncated: s.task.length > RECORD_LIMITS.task,
       scope: s.scope ? cap(s.scope, RECORD_LIMITS.scope) : null,
+      scopeTruncated: Boolean(s.scope && s.scope.length > RECORD_LIMITS.scope),
       pr: s.pr ?? null,
       addDirs: (s.addDirs ?? []).slice(0, RECORD_LIMITS.addDirs),
       model: s.requestedModel ?? null,
@@ -178,10 +204,69 @@ export function buildRunRecord(s: RunRecordSource): RunRecord {
   };
 }
 
-/** Write the sidecar next to its transcript (`0600`). Returns its path. Throws on I/O failure. */
+/** Serialize `record`, shrinking the stored task/scope (and flagging them truncated, so a rerun
+ *  refuses them) until it fits `RECORD_MAX_BYTES` — a record the reader would refuse is useless. */
+function serializeWithinCap(record: RunRecord): string {
+  let r = record;
+  for (let i = 0; i < 12; i++) {
+    const text = `${JSON.stringify(r, null, 2)}\n`;
+    if (Buffer.byteLength(text, 'utf8') <= RECORD_MAX_BYTES) return text;
+    const t = r.input.task;
+    const sc = r.input.scope;
+    r = {
+      ...r,
+      input: {
+        ...r.input,
+        task: t.length > 0 ? t.slice(0, Math.floor(t.length / 2)) : t,
+        taskTruncated: r.input.taskTruncated || t.length > 0,
+        scope: sc ? sc.slice(0, Math.floor(sc.length / 2)) : sc,
+        scopeTruncated: r.input.scopeTruncated || Boolean(sc),
+      },
+    };
+  }
+  throw new Error('run record too large');
+}
+
+/**
+ * Write the sidecar next to its transcript (`0600`) and return its path. Atomic and symlink-safe: the
+ * bytes go to a fresh, uniquely named temp file created with `O_EXCL` (`'wx'`, never follows a
+ * pre-existing link) and are then `rename`d over the final name — `rename` replaces a pre-existing
+ * symlink (or file) at that name instead of writing through it. The directory is (re)asserted `0700`.
+ * Throws on I/O failure (the caller treats a record as best-effort).
+ */
 export function writeRunRecord(transcriptFile: string, record: RunRecord): string {
   const file = recordPathFor(transcriptFile);
-  writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  const dir = dirname(file);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    // best-effort — e.g. a dir owned by someone else
+  }
+  const text = serializeWithinCap(record);
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, 'wx', 0o600);
+    writeSync(fd, text);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, file);
+  } catch (err) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed
+      }
+    }
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // never created, or already renamed
+    }
+    throw err;
+  }
   try {
     chmodSync(file, 0o600);
   } catch {
@@ -190,7 +275,9 @@ export function writeRunRecord(transcriptFile: string, record: RunRecord): strin
   return file;
 }
 
-export type ParsedRecord = { ok: true; record: RunRecord } | { ok: false; reason: string };
+/** A failed parse may still say which fan-out the file claims (`fanoutId` peeked, shape-checked) so a
+ *  resume can LIST an unreadable member instead of silently losing it. Nothing else is taken from it. */
+export type ParsedRecord = { ok: true; record: RunRecord } | { ok: false; reason: string; fanoutId?: string };
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isStr = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max;
@@ -213,13 +300,21 @@ export function parseRunRecord(text: string): ParsedRecord {
   if (!isObj(raw)) return { ok: false, reason: 'not a JSON object' };
   if (raw.version !== RUN_RECORD_VERSION)
     return { ok: false, reason: `unsupported record version ${JSON.stringify(String(raw.version).slice(0, 20))}` };
-  const bad = (field: string): ParsedRecord => ({ ok: false, reason: `invalid field "${field}"` });
+  const peeked = typeof raw.fanoutId === 'string' && FANOUT_ID_RE.test(raw.fanoutId) ? raw.fanoutId : undefined;
+  const bad = (field: string): ParsedRecord => ({
+    ok: false,
+    reason: `invalid field "${field}"`,
+    ...(peeked ? { fanoutId: peeked } : {}),
+  });
   const F = RECORD_LIMITS.field;
   if (typeof raw.runId !== 'string' || !RUN_ID_RE.test(raw.runId)) return bad('runId');
   if (raw.fanoutId !== null && !(typeof raw.fanoutId === 'string' && FANOUT_ID_RE.test(raw.fanoutId)))
     return bad('fanoutId');
-  if (!isStr(raw.harness, F) || !raw.harness) return bad('harness');
-  if (!isStr(raw.mode, F) || !raw.mode) return bad('mode');
+  // exactly one canonical harness name — never a comma list, `all`, an alias or a case variant: what a
+  // record names is what a rerun launches, so it must be the thing the listing shows.
+  if (typeof raw.harness !== 'string' || !(HARNESS_NAMES as readonly string[]).includes(raw.harness))
+    return bad('harness');
+  if (typeof raw.mode !== 'string' || !MODE_NAME_RE.test(raw.mode)) return bad('mode');
   if (raw.permission !== 'readonly' && raw.permission !== 'edit' && raw.permission !== 'danger')
     return bad('permission');
   if (!strOrNull(raw.nativePermission, F)) return bad('nativePermission');
@@ -264,6 +359,8 @@ export function parseRunRecord(text: string): ParsedRecord {
   if (!isStr(i.task, RECORD_LIMITS.task)) return bad('input.task');
   if (typeof i.taskTruncated !== 'boolean') return bad('input.taskTruncated');
   if (!strOrNull(i.scope, RECORD_LIMITS.scope)) return bad('input.scope');
+  // optional (older records lack it) — absent means "not truncated"
+  if (i.scopeTruncated !== undefined && typeof i.scopeTruncated !== 'boolean') return bad('input.scopeTruncated');
   if (!strOrNull(i.pr, 1_000)) return bad('input.pr');
   if (
     !Array.isArray(i.addDirs) ||
@@ -320,6 +417,7 @@ export function parseRunRecord(text: string): ParsedRecord {
       task: i.task,
       taskTruncated: i.taskTruncated,
       scope: i.scope as string | null,
+      scopeTruncated: i.scopeTruncated === true,
       pr: i.pr as string | null,
       addDirs: i.addDirs as string[],
       model: i.model as string | null,
@@ -331,12 +429,40 @@ export function parseRunRecord(text: string): ParsedRecord {
   return { ok: true, record };
 }
 
-/** Read + parse one sidecar file; never throws. */
+/**
+ * Read + parse one sidecar file; never throws. Only a regular file qualifies (`lstat`, so a symlink
+ * is refused rather than followed), no bigger than `RECORD_MAX_BYTES`, opened non-blocking and
+ * `fstat`ed again after the open — a FIFO/device named `x.json` can neither hang a rerun nor be read.
+ */
 export function readRunRecord(file: string): ParsedRecord {
+  let fd: number | undefined;
   try {
-    return parseRunRecord(readFileSync(file, 'utf8'));
+    const st = lstatSync(file);
+    if (!st.isFile()) return { ok: false, reason: 'not a regular file' };
+    if (st.size > RECORD_MAX_BYTES) return { ok: false, reason: 'too large' };
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
+    const fst = fstatSync(fd);
+    if (!fst.isFile()) return { ok: false, reason: 'not a regular file' };
+    if (fst.size > RECORD_MAX_BYTES) return { ok: false, reason: 'too large' };
+    const buf = Buffer.alloc(RECORD_MAX_BYTES + 1);
+    let n = 0;
+    for (;;) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+      if (n > RECORD_MAX_BYTES) return { ok: false, reason: 'too large' };
+    }
+    return parseRunRecord(buf.subarray(0, n).toString('utf8'));
   } catch {
     return { ok: false, reason: 'unreadable' };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed
+      }
+    }
   }
 }
 
@@ -345,20 +471,119 @@ export function displayText(text: string, max = 80): string {
   return sanitizeTemplateText(text, max);
 }
 
-/** Every record found directly in `dir` (skipping — with a reason — anything unparseable). */
-export function readRecordsIn(dir: string): { records: RunRecord[]; skipped: { file: string; reason: string }[] } {
-  const records: RunRecord[] = [];
-  const skipped: { file: string; reason: string }[] = [];
+/** A record sitting next to a real transcript, in the outputs directory of its own harness. */
+export interface LocatedRecord {
+  record: RunRecord;
+  /** Absolute path of the sibling transcript (`.md`). */
+  transcript: string;
+  /** The transcript's mtime — the one ordering key history and rerun share. */
+  mtimeMs: number;
+}
+
+export type RecordLoad =
+  | { ok: true; record: RunRecord }
+  | { ok: false; reason: string; hasSidecar: boolean; fanoutId?: string };
+
+/**
+ * Load the sidecar of `transcriptPath`, which lives in the outputs directory of `dirHarness`. A
+ * record is trusted to describe a run only when ALL hold: the transcript is a regular file, the
+ * sidecar parses, its `harness` equals the directory's harness (a hand-edited `claude` sidecar that
+ * says `codex` is refused — the listing shows the directory, a rerun would launch the record), and
+ * its `transcript` names this very file (a copied/planted sidecar is refused).
+ */
+export function loadRecordForTranscript(transcriptPath: string, dirHarness: string): RecordLoad {
+  try {
+    if (!lstatSync(transcriptPath).isFile())
+      return { ok: false, reason: 'transcript is not a regular file', hasSidecar: false };
+  } catch {
+    return { ok: false, reason: 'transcript is missing', hasSidecar: false };
+  }
+  const sidecar = recordPathFor(transcriptPath);
+  try {
+    lstatSync(sidecar);
+  } catch {
+    return { ok: false, reason: 'no run record', hasSidecar: false };
+  }
+  const parsed = readRunRecord(sidecar);
+  if (!parsed.ok)
+    return {
+      ok: false,
+      reason: parsed.reason,
+      hasSidecar: true,
+      ...(parsed.fanoutId ? { fanoutId: parsed.fanoutId } : {}),
+    };
+  const r = parsed.record;
+  if (r.harness !== dirHarness)
+    return {
+      ok: false,
+      reason: `record says harness ${JSON.stringify(displayText(r.harness, 24))} but it is in the ${dirHarness} outputs directory`,
+      hasSidecar: true,
+      ...(r.fanoutId ? { fanoutId: r.fanoutId } : {}),
+    };
+  if (r.transcript !== transcriptPath.split(/[\\/]/).pop())
+    return {
+      ok: false,
+      reason: 'record names a different transcript',
+      hasSidecar: true,
+      ...(r.fanoutId ? { fanoutId: r.fanoutId } : {}),
+    };
+  return { ok: true, record: r };
+}
+
+/** Newest first by transcript mtime; the file name breaks ties so the order is total and shared. */
+export function newestFirst(a: { mtimeMs: number; name: string }, b: { mtimeMs: number; name: string }): number {
+  return b.mtimeMs - a.mtimeMs || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0);
+}
+
+export interface SkippedRecord {
+  file: string;
+  reason: string;
+  /** The fan-out the unusable file claims to belong to (shape-checked), when it said. */
+  fanoutId?: string;
+  /** The harness whose outputs directory it sits in (trusted: a location, not the file's own claim). */
+  harness?: string;
+}
+
+/**
+ * Every usable record in `dir` (the outputs directory of `dirHarness`), newest transcript first. Only
+ * records with a sibling transcript are considered (a stray `.json` alone is never selectable); at
+ * most `MAX_SIDECARS_SCANNED` transcripts are looked at. A transcript whose sidecar exists but is
+ * unusable is reported in `skipped` with the reason — never silently dropped. A transcript with no
+ * sidecar at all (legacy) is simply not a record.
+ */
+export function readRecordsIn(
+  dir: string,
+  dirHarness: string,
+): { records: LocatedRecord[]; skipped: SkippedRecord[]; truncated: boolean } {
+  const records: LocatedRecord[] = [];
+  const skipped: SkippedRecord[] = [];
   let names: string[] = [];
   try {
-    names = readdirSync(dir).filter(f => f.endsWith('.json'));
+    names = readdirSync(dir).filter(f => f.endsWith('.md'));
   } catch {
-    return { records, skipped };
+    return { records, skipped, truncated: false };
   }
-  for (const f of names) {
-    const parsed = readRunRecord(join(dir, f));
-    if (parsed.ok) records.push(parsed.record);
-    else skipped.push({ file: f, reason: parsed.reason });
+  const stamped: { name: string; mtimeMs: number }[] = [];
+  for (const name of names) {
+    try {
+      const st = lstatSync(join(dir, name));
+      if (st.isFile()) stamped.push({ name, mtimeMs: st.mtimeMs });
+    } catch {
+      // vanished
+    }
   }
-  return { records, skipped };
+  stamped.sort(newestFirst);
+  for (const { name, mtimeMs } of stamped.slice(0, MAX_SIDECARS_SCANNED)) {
+    const transcript = join(dir, name);
+    const loaded = loadRecordForTranscript(transcript, dirHarness);
+    if (loaded.ok) records.push({ record: loaded.record, transcript, mtimeMs });
+    else if (loaded.hasSidecar)
+      skipped.push({
+        file: name,
+        reason: loaded.reason,
+        harness: dirHarness,
+        ...(loaded.fanoutId ? { fanoutId: loaded.fanoutId } : {}),
+      });
+  }
+  return { records, skipped, truncated: stamped.length > MAX_SIDECARS_SCANNED };
 }

@@ -33,6 +33,14 @@ export interface DelegateCommandArgs {
    * — never inherited from config, never applied headless. Absent unless explicitly true.
    */
   allowDangerous?: boolean;
+  /**
+   * Internal — set only by the rerun planner, never parsed from text: the `timeoutSec` / `budget`
+   * came from a stored run record (untrusted data), so each may only NARROW what is configured — the
+   * same rule as a model-set tool param. A human-typed `--timeout=`/`--budget=` on the rerun line
+   * replaces the stored value and is not marked.
+   */
+  storedTimeout?: boolean;
+  storedBudget?: boolean;
   /** Flag values that were given but are unusable (e.g. `--budget=0`) — the handler reports these
    *  and runs nothing, rather than silently dropping the flag. Absent when there are none. */
   errors?: string[];

@@ -39,11 +39,13 @@ import {
   classifyNativePermission,
   getHarness,
   HARNESS_NAMES,
+  isTemplateDanger,
   nativePermissionTier,
 } from './harnesses/registry.ts';
-import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
+import type { ActivityEvent, Harness, NormalizedPermission } from './harnesses/types.ts';
 import { buildRunRecord, newRunId, type RunRecord, writeRunRecord } from './run-record.ts';
 import { runHarness } from './runner.ts';
+import { sanitizeTemplateText } from './sanitize.ts';
 import {
   callTimeoutError,
   type DelegateTemplate,
@@ -62,6 +64,25 @@ import { validateDelegateInputs } from './validate.ts';
 /** Render a possibly-unknown cost — `null` means the harness didn't report one, not a measured $0. */
 export function formatCost(cost: number | null): string {
   return cost !== null ? `$${cost.toFixed(3)}` : '$—';
+}
+
+/**
+ * The tier a template runs at when nothing escalates it: a native read-only value (`permission: plan`)
+ * is filed under `edit` by normalizePermission but runs as `readonly`. Only ever narrows (never
+ * `danger`). The one definition `delegate()` and the rerun planner share.
+ */
+export function templateRunTier(harness: Harness, template: DelegateTemplate): NormalizedPermission {
+  return classifyNativePermission(harness, template.nativePermission) === 'safe'
+    ? (nativePermissionTier(harness, template.nativePermission) ?? template.permission)
+    : template.permission;
+}
+
+/** The tier a template would effectively need — `danger` when its own gate would (the engine's
+ *  `isTemplateDanger`), else `templateRunTier`. What `/delegate rerun` compares against the recorded tier. */
+export function effectiveTemplateTier(harnessName: string, template: DelegateTemplate): NormalizedPermission {
+  const harness = getHarness(harnessName);
+  if (!harness || isTemplateDanger(harnessName, template)) return 'danger';
+  return templateRunTier(harness, template);
 }
 
 export interface DelegateOptions {
@@ -88,6 +109,12 @@ export interface DelegateOptions {
    * configured timeout. Only the command paths set this — never the tool path, never from config.
    */
   timeoutSecMayRaise?: boolean;
+  /**
+   * `maxBudgetUsd` came from stored (untrusted) data — a rerun of a run record — so it may only
+   * narrow a configured budget (template > global > per-harness), never raise it. Absent: the call's
+   * budget replaces the configured one (the typed `--budget=` / tool behavior, unchanged).
+   */
+  maxBudgetNarrowOnly?: boolean;
   /**
    * Host-run verification command override — takes precedence over the template's `verify`
    * frontmatter. Internal engine option only, not exposed on the `delegate` tool's schema — see
@@ -389,7 +416,7 @@ export async function delegate(
   const harness = getHarness(harnessName);
   if (!harness)
     throw new Error(
-      `unknown harness "${harnessName}". Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
+      `unknown harness ${quoteValue(harnessName, 200)}. Available: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`,
     );
   const projectTrusted = isProjectTrusted(ctx);
   warnIfProjectTemplatesSkipped(ctx, projectTrusted);
@@ -398,10 +425,15 @@ export async function delegate(
   const template = templates.get(mode);
   if (!template)
     throw new Error(
-      `unknown delegate mode "${mode}" for harness "${harnessName}". Available: ${[...templates.keys()].sort().join(', ')}`,
+      `unknown delegate mode ${quoteValue(mode, 200)} for harness ${quoteValue(harnessName, 200)}. Available: ${[
+        ...templates.keys(),
+      ]
+        .sort()
+        .map(k => sanitizeTemplateText(k, 64))
+        .join(', ')}`,
     );
   const task = opts.task || template.defaultTask;
-  if (!task) throw new Error(`delegate mode "${mode}" requires a task`);
+  if (!task) throw new Error(`delegate mode ${quoteValue(mode, 200)} requires a task`);
   // permission: normalized, danger requires explicit per-call allowDangerous:true (tool: model-set,
   // human-confirmed in execute(); command: --allow-dangerous, human-confirmed in the handler). Resolved (and
   // the danger refusal thrown) before acquireSlot() — it's pure, so a refused run never occupies
@@ -411,10 +443,7 @@ export async function delegate(
   // under `edit` by normalizePermission, but runs as `readonly` — recorded as such and, above all,
   // subject to resolveVerifyPlan's readonly skip. Only ever narrows (never `danger`), and the
   // canonical native value below is still what reaches argv/ACP.
-  const templateTier: NormalizedPermission =
-    nativeClass === 'safe'
-      ? (nativePermissionTier(harness, template.nativePermission) ?? template.permission)
-      : template.permission;
+  const templateTier: NormalizedPermission = templateRunTier(harness, template);
   const isNativeDanger = nativeClass === 'danger' || nativeClass === 'unlisted';
 
   // A template permission problem (an unrecognized legacy value failed closed to readonly, or an
@@ -485,8 +514,13 @@ export async function delegate(
 
   const model = resolveModelForHarness(config, harnessName, opts.model, template.model);
   const addDirs = mergeAddDirs(ctx.cwd, template.addDirs, opts.addDirs);
+  const configuredBudget = template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd;
   const maxBudgetUsd =
-    opts.maxBudgetUsd ?? template.maxBudgetUsd ?? config.maxBudgetUsd ?? config.harnesses[harnessName]?.maxBudgetUsd;
+    opts.maxBudgetUsd === undefined
+      ? configuredBudget
+      : opts.maxBudgetNarrowOnly === true && configuredBudget !== undefined
+        ? Math.min(opts.maxBudgetUsd, configuredBudget)
+        : opts.maxBudgetUsd;
   // template `timeout:` > per-harness config > global config; a per-call timeout only lowers that unless
   // a human typed it — never past the hard cap. See config.ts.
   const timeoutMs = resolveRunTimeoutMs(

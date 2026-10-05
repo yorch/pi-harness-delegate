@@ -4,6 +4,8 @@
  * lists nothing); it is never silently ignored.
  */
 
+import { newestFirst } from './run-record.ts';
+
 /** One run in the history view: from its run-record sidecar when present, else parsed from the
  *  transcript header (legacy transcripts). `isError`/`runId` are `null` when unknowable. */
 export interface HistoryEntry {
@@ -20,8 +22,11 @@ export interface HistoryEntry {
   startedMs: number;
   runId: string | null;
   fanoutId: string | null;
-  /** True when this entry came from a sidecar (so it can be rerun). */
+  /** True when this entry came from a usable sidecar (so it can be rerun). */
   hasRecord: boolean;
+  /** Why an existing-but-unusable sidecar was ignored (the entry then lists from its transcript
+   *  header). Absent when there is no sidecar at all or it is fine. Record-derived: sanitize to show. */
+  recordProblem?: string;
 }
 
 export interface HistoryFilter {
@@ -142,7 +147,7 @@ export function applyHistoryFilter(entries: readonly HistoryEntry[], f: HistoryF
     .filter(e => !f.failed || e.isError === true)
     .filter(e => !f.ok || e.isError === false)
     .filter(e => f.sinceMs === undefined || e.startedMs >= f.sinceMs)
-    .sort((a, b) => b.mtime - a.mtime);
+    .sort((a, b) => newestFirst({ mtimeMs: a.mtime, name: a.file }, { mtimeMs: b.mtime, name: b.file }));
   return f.limit !== undefined ? out.slice(0, f.limit) : out;
 }
 

@@ -16,42 +16,93 @@ import { resolve } from 'node:path';
 import type { DelegateCommandArgs } from './command.ts';
 import { legacyOutputsDir, outputsDir } from './config.ts';
 import { HARNESS_NAMES } from './harnesses/registry.ts';
+import type { NormalizedPermission } from './harnesses/types.ts';
 import type { HistoryEntry } from './history-filter.ts';
-import { displayText, isRunId, type RunRecord, readRecordsIn, readRunRecord, recordPathFor } from './run-record.ts';
-import { callTimeoutError } from './templates.ts';
+import {
+  displayText,
+  isRunId,
+  type LocatedRecord,
+  loadRecordForTranscript,
+  newestFirst,
+  type RunRecord,
+  readRecordsIn,
+  type SkippedRecord,
+} from './run-record.ts';
+import { INVISIBLE_OR_CONTROL_RE } from './sanitize.ts';
+import { callTimeoutError, quoteValue } from './templates.ts';
 import { validateDelegateInputs } from './validate.ts';
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
-const BAD_TEXT_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+// One non-global copy of the shared invisible/control set (the exported one carries the `g` flag, whose
+// `lastIndex` makes `.test` stateful). Covers C0/C1 controls (incl. `\r`), bidi, zero-width, tag characters.
+const NON_PRINTABLE_RE = new RegExp(INVISIBLE_OR_CONTROL_RE.source, 'u');
 
-/** Every record on disk (all harness partitions + the legacy dir), newest first. Never throws. */
+/** True when `text` holds a control / invisible / bidi character. Free text (task, scope) may keep newlines and tabs. */
+export function hasUnsafeChars(text: string, allowNewlines: boolean): boolean {
+  return NON_PRINTABLE_RE.test(allowNewlines ? text.replace(/[\n\t]/g, '') : text);
+}
+
+/**
+ * Every usable record on disk — all harness partitions plus the legacy dir — newest transcript first
+ * (the very ordering `/delegate history` lists, `newestFirst`). Only records with a sibling transcript
+ * in their own harness's directory count (`readRecordsIn`); unusable ones come back in `skipped`.
+ * Never throws.
+ */
+export function readAllRecordsDetailed(): { records: LocatedRecord[]; skipped: SkippedRecord[] } {
+  const records: LocatedRecord[] = [];
+  const skipped: SkippedRecord[] = [];
+  const dirs: [string, string][] = [...HARNESS_NAMES.map(h => [outputsDir(h), h] as [string, string])];
+  dirs.push([legacyOutputsDir(), 'claude']);
+  for (const [dir, harness] of dirs) {
+    const r = readRecordsIn(dir, harness);
+    records.push(...r.records);
+    skipped.push(...r.skipped);
+  }
+  records.sort((a, b) =>
+    newestFirst({ mtimeMs: a.mtimeMs, name: a.transcript }, { mtimeMs: b.mtimeMs, name: b.transcript }),
+  );
+  return { records, skipped };
+}
+
+/** Every usable record (see `readAllRecordsDetailed`), newest transcript first. */
 export function readAllRecords(): RunRecord[] {
-  const out: RunRecord[] = [];
-  for (const dir of [...HARNESS_NAMES.map(h => outputsDir(h)), legacyOutputsDir()])
-    out.push(...readRecordsIn(dir).records);
-  return out.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  return readAllRecordsDetailed().records.map(l => l.record);
 }
 
 export type RecordSelection = { ok: true; record: RunRecord } | { ok: false; error: string };
 
+/** " (N record file(s) were ignored: <reason>)" for an error message, or '' when none were. */
+function ignoredNote(skipped: readonly SkippedRecord[]): string {
+  if (skipped.length === 0) return '';
+  return ` (${skipped.length} record file(s) were ignored as unusable, e.g. ${quoteValue(displayText(skipped[0].reason, 100), 140)})`;
+}
+
 /**
- * Pick the record to rerun. `selector` is `undefined` (the most recent), a 1-based position in
- * `view` (the history listing the user last saw, or the unfiltered history), or a run id.
+ * Pick the record to rerun. `selector` is `undefined` (the newest completed run with a record — by
+ * transcript mtime, the order history lists), a 1-based position in `view` (the history listing the user
+ * last saw, or the unfiltered history), or a run id.
  */
 export function selectRecord(selector: string | undefined, view: readonly HistoryEntry[]): RecordSelection {
   if (selector !== undefined && isRunId(selector)) {
-    const rec = readAllRecords().find(r => r.runId === selector);
-    return rec ? { ok: true, record: rec } : { ok: false, error: `no run record with id ${selector}` };
+    const { records, skipped } = readAllRecordsDetailed();
+    const hits = records.filter(r => r.record.runId === selector);
+    if (hits.length > 1)
+      return { ok: false, error: `run id ${selector} is ambiguous — ${hits.length} records claim it` };
+    return hits[0]
+      ? { ok: true, record: hits[0].record }
+      : { ok: false, error: `no run record with id ${selector}${ignoredNote(skipped)}` };
   }
   if (selector === undefined) {
-    // no selector: the most recent *completed* run that has a record (a partial run is rerunnable only by id)
-    const rec = readAllRecords().find(r => !r.partial);
-    return rec ? { ok: true, record: rec } : { ok: false, error: 'no run records yet — nothing to rerun' };
+    // no selector: the newest *completed* run that has a record (a partial run is rerunnable only by id)
+    const { records, skipped } = readAllRecordsDetailed();
+    const rec = records.find(r => !r.record.partial);
+    return rec
+      ? { ok: true, record: rec.record }
+      : { ok: false, error: `no run records yet — nothing to rerun${ignoredNote(skipped)}` };
   }
   if (!/^\d{1,4}$/.test(selector) || Number(selector) < 1)
     return {
       ok: false,
-      error: `expected a position (1, 2, …) or a run id (run_…), got ${JSON.stringify(displayText(selector, 40))}`,
+      error: `expected a position (1, 2, …) or a run id (run_…), got ${quoteValue(selector, 60)}`,
     };
   const n = Number(selector);
   const entry = view[n - 1];
@@ -63,12 +114,15 @@ export function selectRecord(selector: string | undefined, view: readonly Histor
   if (!entry.hasRecord)
     return {
       ok: false,
-      error: `run #${n} (${displayText(entry.mode, 64)}) predates run records, so it cannot be rerun`,
+      error: entry.recordProblem
+        ? `run #${n} (${quoteValue(entry.mode, 80)}) has an unusable record (${quoteValue(displayText(entry.recordProblem, 100), 140)}), so it cannot be rerun`
+        : `run #${n} (${quoteValue(entry.mode, 80)}) predates run records, so it cannot be rerun`,
     };
-  const parsed = readRunRecord(recordPathFor(entry.file));
-  return parsed.ok
-    ? { ok: true, record: parsed.record }
-    : { ok: false, error: `run #${n}'s record is unusable (${parsed.reason})` };
+  // re-validated against the directory the transcript lives in — the same check the listing applied
+  const loaded = loadRecordForTranscript(entry.file, entry.harness);
+  return loaded.ok
+    ? { ok: true, record: loaded.record }
+    : { ok: false, error: `run #${n}'s record is unusable (${quoteValue(displayText(loaded.reason, 100), 140)})` };
 }
 
 export interface RerunFlags {
@@ -83,9 +137,13 @@ export interface RerunFlags {
 export interface RerunEnv {
   cwd: string;
   isKnownHarness: (name: string) => boolean;
-  /** Does `mode` resolve for `harness` right now (same trust gating as a real run)? */
-  modeAvailable: (harness: string, mode: string) => boolean;
-  /** Records sharing the selected one's fan-out id (when it has one). */
+  /**
+   * The tier `mode` would run at on `harness` TODAY (the engine's own classification —
+   * `effectiveTemplateTier`), or `null` when it does not resolve now (removed, or a project-local
+   * template in a project pi does not trust).
+   */
+  modeTier: (harness: string, mode: string) => NormalizedPermission | null;
+  /** Records sharing the selected one's fan-out id (when it has one), newest first. */
   siblings: readonly RunRecord[];
 }
 
@@ -93,12 +151,24 @@ export interface RerunPlan {
   errors: string[];
   notices: string[];
   args?: DelegateCommandArgs;
+  /** The plan as one sanitized line per fact — what an interactive session must confirm before anything runs. */
+  summary: string[];
+  /** Extra directories that came from the stored record (not typed now): treated like model-set values. */
+  storedAddDirs: string[];
 }
+
+const TIER_RANK: Record<NormalizedPermission, number> = { readonly: 0, edit: 1, danger: 2 };
 
 /**
  * Turn a record + the human's command-line overrides into the `DelegateCommandArgs` of an ordinary
  * `/delegate` invocation. `overrides` is the parsed rest of the rerun command line (`--harness=`,
  * `--model=`, …); anything it sets wins over the record. Pure aside from the env callbacks.
+ *
+ * A rerun uses TODAY's template for the mode, never a stored copy: if that template's tier is WIDER
+ * than the recorded run's, it is refused (the human can start the run with the normal command).
+ * Stored values are untrusted: a stored `timeoutSec`/budget may only narrow what is configured
+ * (`storedTimeout`/`storedBudget`), stored `addDirs` are returned in `storedAddDirs` for the caller to
+ * gate like model-set ones; only values typed on the rerun line carry human trust.
  */
 export function planRerun(
   record: RunRecord,
@@ -108,21 +178,26 @@ export function planRerun(
 ): RerunPlan {
   const errors: string[] = [];
   const notices: string[] = [];
-  const fail = (msg: string): RerunPlan => ({ errors: [...errors, msg], notices });
+  const summary: string[] = [];
+  const fail = (msg: string): RerunPlan => ({ errors: [...errors, msg], notices, summary, storedAddDirs: [] });
   const input = record.input;
 
-  if (overrides.errors?.length) return { errors: overrides.errors, notices };
+  if (overrides.errors?.length) return { errors: overrides.errors, notices, summary, storedAddDirs: [] };
   if (overrides.task) return fail('rerun takes no new prompt — use /delegate <prompt> to start a different run');
 
   if (input.taskTruncated)
     return fail('the stored task was truncated when the run was recorded, so it cannot be rerun faithfully');
+  if (input.scopeTruncated && overrides.scope === undefined)
+    return fail(
+      'the stored scope was truncated when the run was recorded (a cut scope would silently widen the restriction), so it cannot be rerun faithfully — pass --scope=… to give one',
+    );
   if (resolve(record.cwd) !== resolve(env.cwd)) {
     if (!flags.here)
       return fail(
-        `this run was in ${displayText(record.cwd, 120)} but the current directory is ${displayText(env.cwd, 120)} — cd there, or pass --here to run it in the current directory`,
+        `this run was in ${quoteValue(record.cwd, 160)} but the current directory is ${quoteValue(env.cwd, 160)} — cd there, or pass --here to run it in the current directory`,
       );
     notices.push(
-      `running in the current directory (${displayText(env.cwd, 120)}), not the original ${displayText(record.cwd, 120)}`,
+      `running in the current directory (${quoteValue(env.cwd, 160)}), not the original ${quoteValue(record.cwd, 160)}`,
     );
   }
   if (flags.fanout && flags.resumeOwn)
@@ -142,18 +217,41 @@ export function planRerun(
   }
   const harnessNames = harnessSpec.split(',').filter(Boolean);
   for (const h of harnessNames)
-    if (h !== 'all' && !env.isKnownHarness(h)) return fail(`unknown harness ${JSON.stringify(displayText(h, 40))}`);
+    if (h !== 'all' && !env.isKnownHarness(h)) return fail(`unknown harness ${quoteValue(h, 80)}`);
   const mode = overrides.mode ?? record.mode;
-  if (!fanoutSpec && harnessNames.length === 1 && !env.modeAvailable(harnessNames[0], mode))
-    return fail(
-      `mode ${JSON.stringify(displayText(mode, 64))} is not available for ${harnessNames[0]} now — it may have been removed, or be a project-local template in a project pi does not trust (/delegate status shows trust)`,
-    );
+
+  // Today's template, per harness. The tier is compared with what the recorded run had — a mode that
+  // has since been widened (readonly -> edit, edit -> danger) is never silently re-run at the wider tier.
+  const recordedTier = (h: string): NormalizedPermission =>
+    (h === record.harness ? record : env.siblings.find(r => r.harness === h))?.permission ?? record.permission;
+  const targets = harnessNames.filter(h => h !== 'all');
+  const tiers: string[] = [];
+  const typedTarget = overrides.mode !== undefined || overrides.harness !== undefined;
+  for (const h of targets) {
+    const now = env.modeTier(h, mode);
+    if (now === null) {
+      if (!fanoutSpec)
+        return fail(
+          `mode ${quoteValue(mode, 80)} is not available for ${h} now — it may have been removed, or be a project-local template in a project pi does not trust (/delegate status shows trust)`,
+        );
+      continue;
+    }
+    const was = recordedTier(h);
+    tiers.push(`${h}: ${now}${now === was ? '' : ` (recorded run: ${was})`}`);
+    if (!typedTarget && TIER_RANK[now] > TIER_RANK[was])
+      return fail(
+        `mode ${quoteValue(mode, 80)} on ${h} now runs at ${now} permission, but the recorded run used ${was} — the template has been widened since, so it is not re-run as a repeat. Start it with the normal command (/delegate ${h} ${displayText(mode, 40)} <prompt>) if you want the wider tier`,
+      );
+  }
 
   const task = input.task;
   const scope = overrides.scope ?? input.scope ?? undefined;
   const pr = overrides.pr ?? input.pr ?? undefined;
+  const storedAddDirs = overrides.addDirs === undefined && input.addDirs.length > 0 ? input.addDirs : [];
   const addDirs = overrides.addDirs ?? (input.addDirs.length > 0 ? input.addDirs : undefined);
   const model = overrides.model ?? input.model ?? undefined;
+  const storedBudget = overrides.budget === undefined && input.budgetUsd !== null;
+  const storedTimeout = overrides.timeoutSec === undefined && input.timeoutSec !== null;
   const budget = overrides.budget ?? input.budgetUsd ?? undefined;
   const timeoutSec = overrides.timeoutSec ?? input.timeoutSec ?? undefined;
   let sessionId = overrides.sessionId;
@@ -167,8 +265,17 @@ export function planRerun(
   // Stored values are untrusted: the same gates a typed command goes through, applied up front so a
   // bad record is a clear error rather than a failure deep in a run (delegate() re-validates too).
   if (!task.trim()) return fail('the stored task is empty');
-  if (BAD_TEXT_RE.test(task) || (scope !== undefined && BAD_TEXT_RE.test(scope)))
-    return fail('the stored task/scope contains control characters — refusing to rerun it');
+  if (hasUnsafeChars(task, true) || (scope !== undefined && hasUnsafeChars(scope, true)))
+    return fail('the stored task/scope contains control or invisible characters — refusing to rerun it');
+  for (const [label, v] of [
+    ['model', model],
+    ['pr', pr],
+    ['sessionId', sessionId],
+  ] as const)
+    if (v !== undefined && hasUnsafeChars(v, false))
+      return fail(`the stored ${label} contains control or invisible characters — refusing to rerun it`);
+  if (addDirs?.some(d => hasUnsafeChars(d, false)))
+    return fail('a stored addDirs entry contains control or invisible characters — refusing to rerun it');
   if (budget !== undefined && !(typeof budget === 'number' && Number.isFinite(budget) && budget > 0))
     return fail('the stored budget is not a positive number');
   if (timeoutSec !== undefined) {
@@ -198,6 +305,28 @@ export function planRerun(
   if (sessionId === undefined && record.sessionId)
     notices.push('starting a fresh session (pass --resume to continue the recorded one)');
 
+  summary.push(
+    `Re-run ${record.runId}`,
+    // every name was checked against the known harnesses (or is `all`) above, so it is plain text
+    `harness: ${harnessNames.join(', ')}`,
+    `mode: ${quoteValue(mode, 80)} — today's template of that name, not a stored copy`,
+    `permission tier now: ${tiers.length > 0 ? tiers.join('; ') : 'resolved per harness at run time'}`,
+    `task: ${quoteValue(displayText(task, 300), 320)}`,
+  );
+  if (scope !== undefined) summary.push(`scope: ${quoteValue(displayText(scope, 200), 220)}`);
+  if (pr !== undefined) summary.push(`pr: ${quoteValue(pr, 120)}`);
+  if (addDirs !== undefined)
+    summary.push(
+      `addDirs: ${addDirs.map(d => quoteValue(d, 200)).join(', ')}${storedAddDirs.length > 0 ? ' (from the record)' : ''}`,
+    );
+  if (model !== undefined) summary.push(`model: ${quoteValue(model, 120)}`);
+  if (budget !== undefined)
+    summary.push(`budget: $${budget}${storedBudget ? ' (stored; can only lower a configured budget)' : ''}`);
+  if (timeoutSec !== undefined)
+    summary.push(`timeout: ${timeoutSec}s${storedTimeout ? ' (stored; can only lower the configured timeout)' : ''}`);
+  summary.push(sessionId === undefined ? 'session: fresh' : `session: resumes ${quoteValue(sessionId, 140)}`);
+  summary.push(`directory: ${quoteValue(env.cwd, 200)}`);
+
   const args: DelegateCommandArgs = { task, harness: harnessSpec, mode };
   if (scope !== undefined) args.scope = scope;
   if (pr !== undefined) args.pr = pr;
@@ -205,8 +334,10 @@ export function planRerun(
   if (model !== undefined) args.model = model;
   if (budget !== undefined) args.budget = budget;
   if (timeoutSec !== undefined) args.timeoutSec = timeoutSec;
+  if (storedBudget) args.storedBudget = true;
+  if (storedTimeout) args.storedTimeout = true;
   if (sessionId !== undefined) args.sessionId = sessionId;
   if (overrides.verify !== undefined) args.verify = overrides.verify;
   if (overrides.allowDangerous) args.allowDangerous = true;
-  return { errors, notices, args };
+  return { errors, notices, args, summary, storedAddDirs };
 }

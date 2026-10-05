@@ -61,6 +61,16 @@ export async function closeWhenMounted(getClose: () => (() => void) | null, capM
 export interface FanoutResumeSessions {
   sessions: Record<string, string>;
   noSession: string[];
+  /** Members whose run record could not be read — listed in the report, never silently dropped. */
+  unreadable?: string[];
+}
+
+/** The recorded session of harness `h` in a fan-out resume. A harness with no mapping FAILS (throws) —
+ *  it must never fall through to a fresh session that the report would call "resumed". */
+function resumeSessionFor(resume: FanoutResumeSessions, h: string): string {
+  if (!Object.hasOwn(resume.sessions, h))
+    throw new Error(`no recorded session for ${h} in this fan-out — not starting a fresh one`);
+  return resume.sessions[h];
 }
 
 /** `delegate({harness:"all"|"a,b"})` — resolve the requested harnesses to detected installs, run the
@@ -107,6 +117,7 @@ export async function runFanoutTool(
   const tasks = resolved.map(async (h): Promise<TaskResult> => {
     onUpdate?.({ content: [{ type: 'text', text: `[${h}] queued…` }], details: { progress: 0.5 } });
     try {
+      const sessionId = resume ? resumeSessionFor(resume, h) : params.sessionId;
       const run = await runDelegateForTool(
         pi,
         ctx,
@@ -120,7 +131,7 @@ export async function runFanoutTool(
           maxBudgetUsd: params.maxBudgetUsd,
           timeoutSec: params.timeoutSec,
           allowDangerous: params.allowDangerous === true,
-          sessionId: resume ? resume.sessions[h] : params.sessionId,
+          sessionId,
           pr: params.pr,
           addDirs: params.addDirs,
           // no verify: intentionally not model-settable — see DelegateToolParams
@@ -172,7 +183,13 @@ export async function runFanoutTool(
     }
   }
 
-  const report = buildFanoutReport({ runs, skipped, unknown, noSession: resume?.noSession });
+  const report = buildFanoutReport({
+    runs,
+    skipped,
+    unknown,
+    noSession: resume?.noSession,
+    unreadable: resume?.unreadable,
+  });
   const okCount = runs.filter(r => r.ok).length;
   const head = `## delegate all — ${mode} (${okCount}/${runs.length} ok)`;
   const usage = mapClaudeUsage({
@@ -202,6 +219,9 @@ export interface FanoutSpec {
   model?: string;
   budget?: number;
   timeoutSec?: number;
+  /** The timeout / budget came from a stored run record: they may only narrow what is configured. */
+  storedTimeout?: boolean;
+  storedBudget?: boolean;
   sessionId?: string;
   pr?: string;
   addDirs?: string[];
@@ -285,7 +305,8 @@ export async function runFanoutConcurrent(
       model: spec.model,
       maxBudgetUsd: spec.budget,
       timeoutSec: spec.timeoutSec,
-      timeoutSecMayRaise: true, // command path only: --timeout= is human-typed
+      timeoutSecMayRaise: spec.storedTimeout !== true, // command path only: --timeout= is human-typed; a stored (rerun) value never raises
+      maxBudgetNarrowOnly: spec.storedBudget === true,
       sessionId: spec.sessionId,
       pr: spec.pr,
       addDirs: spec.addDirs,
@@ -459,6 +480,12 @@ export async function runFanoutCommand(
     // the template delegate() will actually run for this harness (default mode when none given),
     // judged by the engine's own danger gate — so the banner can't disagree with the engine
     const isDanger = isTemplateDanger(h, templates.get(modeForReport));
+    if (resume && !Object.hasOwn(resume.sessions, h)) {
+      const message = `no recorded session for ${h} in this fan-out — not starting a fresh one`;
+      immediateFailures.push({ harness: h, ok: false, cost: null, error: message });
+      batcher.failure(`${h}: ${message}`);
+      continue;
+    }
     specs.push({
       harnessName: h,
       task: resolvedTaskScope.task,
@@ -466,7 +493,9 @@ export async function runFanoutCommand(
       model: parsed.model,
       budget: parsed.budget,
       timeoutSec: parsed.timeoutSec,
-      sessionId: resume ? resume.sessions[h] : parsed.sessionId,
+      storedTimeout: parsed.storedTimeout,
+      storedBudget: parsed.storedBudget,
+      sessionId: resume ? resume.sessions[h] : parsed.sessionId, // presence checked above
       pr: parsed.pr,
       addDirs: parsed.addDirs,
       verify: parsed.verify,
@@ -521,7 +550,13 @@ export async function runFanoutCommand(
 
   const runs = orderFanoutResults(resolved, [...immediateFailures, ...completed]);
   const okCount = runs.filter(r => r.ok).length;
-  const report = buildFanoutReport({ runs, skipped, unknown, noSession: resume?.noSession });
+  const report = buildFanoutReport({
+    runs,
+    skipped,
+    unknown,
+    noSession: resume?.noSession,
+    unreadable: resume?.unreadable,
+  });
   injectReport(ctx, {
     harness: 'all',
     mode: modeForReport,
