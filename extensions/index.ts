@@ -59,6 +59,7 @@ import {
 import type { ActivityEvent } from './harnesses/types.ts';
 import { delegationHint, stripMarker } from './hint.ts';
 import { showHistory } from './history.ts';
+import { HISTORY_FLAGS_HINT, parseHistoryArgs } from './history-filter.ts';
 import {
   collectModes,
   formatModesForModel,
@@ -627,11 +628,19 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (sub === 'history' || sub === 'logs' || subLower.startsWith('history ') || subLower.startsWith('logs ')) {
-      const h = filterHarness(
-        subLower.startsWith('history ') || subLower.startsWith('logs ') ? sub.split(/\s+/)[1] : undefined,
-      );
-      if (h === 'unknown') return;
-      await showHistory(ctx, h);
+      // filters: optional harness word/--harness=, --failed|--ok, --since=, --limit=, --mode= (pure, history-filter.ts)
+      const { filter, errors } = parseHistoryArgs(sub.replace(/^\S+\s*/, ''), Date.now(), word => {
+        const lower = word.toLowerCase();
+        return isKnownHarness(lower) ? resolveHarnessName(lower) : null;
+      });
+      if (errors.length > 0) {
+        const msg = `${errors.join('; ')}\nUsage: /delegate history ${HISTORY_FLAGS_HINT}\nHarnesses: ${HARNESS_NAMES.join(', ')} (aliases: ${Object.keys(ALIASES).join(', ')})`;
+        if (!ctx.hasUI) process.stdout.write(`${msg}\n`);
+        else ctx.ui.notify?.(msg, 'warning');
+        return;
+      }
+      if (forcedHarness) filter.harness = forcedHarness;
+      await showHistory(ctx, filter);
       return;
     }
 
@@ -761,7 +770,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand('delegate', {
-    description: `Delegate a task to any harness. Usage: ${delegateUsage()} — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless.`,
+    description: `Delegate a task to any harness. Usage: ${delegateUsage()} — or use harness as first word: /delegate codex review <prompt>. harness=all or a comma list (e.g. claude,codex) fans out to every detected harness and returns one comparison report. --allow-dangerous runs this one invocation with danger (unrestricted) permission after an interactive confirm; refused headless. /delegate history ${HISTORY_FLAGS_HINT} lists past runs.`,
     handler: makeHandler(),
   });
   // alias commands: same flag set as /delegate (one source — COMMAND_FLAGS_HINT), harness fixed

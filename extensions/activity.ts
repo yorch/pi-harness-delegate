@@ -58,6 +58,12 @@ export function parseTranscriptMeta(head: string): {
   return { mode, cost, sessionId, harness };
 }
 
+/** Whether a transcript header says the run errored (`isError: true|false`); `null` when it doesn't say. */
+export function parseTranscriptIsError(head: string): boolean | null {
+  const m = /\bisError: (true|false)\b/.exec(head);
+  return m ? m[1] === 'true' : null;
+}
+
 /** One history entry's harness + cost, for spend aggregation. */
 export interface SpendEntry {
   harness: string;

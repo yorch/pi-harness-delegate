@@ -62,7 +62,7 @@ Flag values may be quoted (`--verify="bun test && bun run lint"`). `--resume`, `
 | Subcommand | What it does |
 | --- | --- |
 | `/delegate list [harness]` | Available modes/templates (all harnesses, or one) |
-| `/delegate history [harness]` (alias `logs`) | Past transcripts, newest first; open one to read it (and see its resume hint) |
+| `/delegate history [harness] [--failed\|--ok] [--since=<2h\|3d\|1w\|YYYY-MM-DD>] [--limit=<n>] [--mode=<name>]` (alias `logs`) | Past runs, newest first, with optional filters; open one to read its transcript (and see its resume hint). Runs show their run id. Reads the [run-record](#run-records) sidecars and falls back to the transcript header for older transcripts (a legacy transcript whose header doesn't say matches neither `--failed` nor `--ok`). An invalid filter value is an error and lists nothing. |
 | `/delegate status [harness]` (aliases `health`, `doctor`, `check`) | Config provenance, project trust, per-harness detection/version/templates/active-vs-cap, spend rollup |
 | `/delegate config` | What was read from `settings.json` and the effective config (print-only) |
 | `/delegate config init` | Write the effective config into `settings.json`'s `delegate` key (the only write this extension does) |
