@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { acpView, runAcpHarness } from '../extensions/acp-runner.ts';
 import { devinHarness } from '../extensions/harnesses/devin.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
-import { readPid, waitForProcessExit } from './helpers/wait.ts';
+import { readPid, waitForNoProcessWithArg, waitForProcessExit } from './helpers/wait.ts';
 
 /**
  * A fake ACP agent (spawned via `node -e <script>`, not the real `devin` binary) that speaks the
@@ -102,6 +102,13 @@ rl.on('line', (line) => {
 });
 `;
 
+/**
+ * Every test here spawns a real child process. bun's default per-test timeout (5s) is shorter than
+ * the waitFor hang guards (15s) and than a cold spawn can take on a loaded machine, so give these room:
+ * a passing test still finishes the moment its condition holds — this only moves the hang guard.
+ */
+const SPAWN = { timeout: 60_000 };
+
 function fakeHarness(mode: string, pidFile?: string): Harness {
   return {
     ...devinHarness,
@@ -133,7 +140,7 @@ test('acpView: prefers the Acp-prefixed fields for a dual-transport harness', ()
   assert.equal(view.permissionMap, acpPermissionMap);
 });
 
-test('runAcpHarness: a rejected handshake step kills the child process (Finding 1)', async () => {
+test('runAcpHarness: a rejected handshake step kills the child process (Finding 1)', SPAWN, async () => {
   const pidFile = tmpPidFile('fail-handshake');
   const harness = fakeHarness('fail-handshake', pidFile);
 
@@ -151,7 +158,7 @@ test('runAcpHarness: a rejected handshake step kills the child process (Finding 
   assert.ok(exited, `child process ${pid} was not killed after a rejected handshake step`);
 });
 
-test('runAcpHarness: resume discards replayed text/activity before the new prompt (Finding 3)', async () => {
+test('runAcpHarness: resume discards replayed text/activity before the new prompt (Finding 3)', SPAWN, async () => {
   const harness = fakeHarness('replay');
   let streamed = '';
   const activityIds: string[] = [];
@@ -180,98 +187,124 @@ test('runAcpHarness: resume discards replayed text/activity before the new promp
   assert.ok(!result.result.includes('OLD REPLAYED'));
 });
 
-test('runAcpHarness: a protocolVersion mismatch on initialize fails clearly (docs/acp-protocol-research.md §4/§8)', async () => {
-  const harness = fakeHarness('protocol-mismatch');
-  await assert.rejects(
-    runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
-    /protocolVersion/,
-  );
-});
-
-test('runAcpHarness: an agent that never advertises session-mode support fails instead of running unconstrained', async () => {
-  const harness = fakeHarness('no-modes');
-  await assert.rejects(
-    runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
-    /session-mode support/,
-  );
-});
-
-test('runAcpHarness: writing to an agent that already exited fails the run cleanly (stdin EPIPE is handled)', async () => {
-  // closes its stdin, then answers initialize and lingers briefly — the runner's next write
-  // (session/new) lands on a pipe with no reader. Whether that surfaces as an async EPIPE 'error'
-  // event is runtime/timing dependent (bun doesn't reliably emit one here), so this is a smoke test
-  // that the run fails cleanly either way. The guard itself is pinned by the injected-EPIPE test below.
-  const script =
-    "process.stdin.once('data', d => { const m = JSON.parse(String(d).split('\\n')[0]); process.stdin.destroy(); " +
-    "process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } }) + '\\n'); " +
-    'setTimeout(() => process.exit(0), 300); });';
-  const harness: Harness = { ...devinHarness, binary: process.execPath, buildArgs: () => ['-e', script] };
-  for (let i = 0; i < 5; i++) {
+test(
+  'runAcpHarness: a protocolVersion mismatch on initialize fails clearly (docs/acp-protocol-research.md §4/§8)',
+  SPAWN,
+  async () => {
+    const harness = fakeHarness('protocol-mismatch');
     await assert.rejects(
       runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
-      /exited|finished without|session ended/,
+      /protocolVersion/,
     );
-  }
-});
+  },
+);
 
-test('runAcpHarness: an async stdin error (EPIPE) mid-handshake never escapes as an unhandled error', async () => {
-  // bun doesn't emit EPIPE for a real closed pipe (the smoke test above), so inject it: the real
-  // fake agent is spawned, and the runner's first stdin write is answered with the exact async
-  // 'error' event node emits for EPIPE. Without the runner's stdin 'error' listener, EventEmitter
-  // throws it as an uncaught exception, which the guard below turns into a test failure.
-  const { spawn } = await import('node:child_process');
-  const uncaught: unknown[] = [];
-  const onUncaught = (err: unknown) => uncaught.push(err);
-  process.on('uncaughtException', onUncaught);
-  const prevListeners = process.listeners('uncaughtException').filter(l => l !== onUncaught);
-  for (const l of prevListeners) process.off('uncaughtException', l);
-  let injected = false;
-  const spawnWithEpipe = ((...a: Parameters<typeof spawn>) => {
-    const proc = spawn(...a);
-    const write = proc.stdin?.write.bind(proc.stdin);
-    if (proc.stdin && write) {
-      proc.stdin.write = ((chunk: unknown, ...rest: never[]) => {
-        if (!injected) {
-          injected = true;
-          const err = Object.assign(new Error('write EPIPE'), { code: 'EPIPE', errno: -32, syscall: 'write' });
-          setImmediate(() => proc.stdin?.emit('error', err));
-        }
-        return write(chunk as string, ...rest);
-      }) as typeof proc.stdin.write;
+test(
+  'runAcpHarness: an agent that never advertises session-mode support fails instead of running unconstrained',
+  SPAWN,
+  async () => {
+    const harness = fakeHarness('no-modes');
+    await assert.rejects(
+      runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
+      /session-mode support/,
+    );
+  },
+);
+
+test(
+  'runAcpHarness: writing to an agent that already exited fails the run cleanly (stdin EPIPE is handled)',
+  SPAWN,
+  async () => {
+    // closes its stdin, then answers initialize and lingers briefly — the runner's next write
+    // (session/new) lands on a pipe with no reader. Whether that surfaces as an async EPIPE 'error'
+    // event is runtime/timing dependent (bun doesn't reliably emit one here), so this is a smoke test
+    // that the run fails cleanly either way. The guard itself is pinned by the injected-EPIPE test below.
+    const script =
+      "process.stdin.once('data', d => { const m = JSON.parse(String(d).split('\\n')[0]); process.stdin.destroy(); " +
+      "process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } }) + '\\n'); " +
+      'setTimeout(() => process.exit(0), 300); });';
+    const harness: Harness = { ...devinHarness, binary: process.execPath, buildArgs: () => ['-e', script] };
+    for (let i = 0; i < 5; i++) {
+      await assert.rejects(
+        runAcpHarness({ harness, prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 10_000 }),
+        /exited|finished without|session ended/,
+      );
     }
-    return proc;
-  }) as typeof spawn;
-  try {
-    const res = await runAcpHarness(
-      { harness: fakeHarness('default'), prompt: 'hi', cwd: process.cwd(), permission: 'readonly', timeoutMs: 20_000 },
-      { spawn: spawnWithEpipe },
-    );
-    // the run itself is unaffected: the agent still answered over a pipe that only *reported* an error
+  },
+);
+
+test(
+  'runAcpHarness: an async stdin error (EPIPE) mid-handshake never escapes as an unhandled error',
+  SPAWN,
+  async () => {
+    // bun doesn't emit EPIPE for a real closed pipe (the smoke test above), so inject it: the real
+    // fake agent is spawned, and the runner's first stdin write is answered with the exact async
+    // 'error' event node emits for EPIPE. Without the runner's stdin 'error' listener, EventEmitter
+    // throws it as an uncaught exception, which the guard below turns into a test failure.
+    const { spawn } = await import('node:child_process');
+    const uncaught: unknown[] = [];
+    const onUncaught = (err: unknown) => uncaught.push(err);
+    process.on('uncaughtException', onUncaught);
+    const prevListeners = process.listeners('uncaughtException').filter(l => l !== onUncaught);
+    for (const l of prevListeners) process.off('uncaughtException', l);
+    let injected = false;
+    const spawnWithEpipe = ((...a: Parameters<typeof spawn>) => {
+      const proc = spawn(...a);
+      const write = proc.stdin?.write.bind(proc.stdin);
+      if (proc.stdin && write) {
+        proc.stdin.write = ((chunk: unknown, ...rest: never[]) => {
+          if (!injected) {
+            injected = true;
+            const err = Object.assign(new Error('write EPIPE'), { code: 'EPIPE', errno: -32, syscall: 'write' });
+            setImmediate(() => proc.stdin?.emit('error', err));
+          }
+          return write(chunk as string, ...rest);
+        }) as typeof proc.stdin.write;
+      }
+      return proc;
+    }) as typeof spawn;
+    try {
+      const res = await runAcpHarness(
+        {
+          harness: fakeHarness('default'),
+          prompt: 'hi',
+          cwd: process.cwd(),
+          permission: 'readonly',
+          timeoutMs: 20_000,
+        },
+        { spawn: spawnWithEpipe },
+      );
+      // the run itself is unaffected: the agent still answered over a pipe that only *reported* an error
+      assert.equal(res.streamedText, 'NEW ANSWER');
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      for (const l of prevListeners) process.on('uncaughtException', l);
+    }
+    assert.ok(injected, 'the EPIPE was injected');
+    assert.deepEqual(uncaught, [], 'stdin EPIPE escaped as an uncaught exception');
+  },
+);
+
+test(
+  'runAcpHarness: a successful run resolves and kills the agent itself (ACP agents never exit on their own)',
+  SPAWN,
+  async () => {
+    const pidFile = tmpPidFile('success');
+    // the fake agent never exits by itself — resolving at all proves the runner didn't wait for 'close'
+    const res = await runAcpHarness({
+      harness: fakeHarness('default', pidFile),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'readonly',
+      timeoutMs: 20_000,
+    });
     assert.equal(res.streamedText, 'NEW ANSWER');
-  } finally {
-    process.off('uncaughtException', onUncaught);
-    for (const l of prevListeners) process.on('uncaughtException', l);
-  }
-  assert.ok(injected, 'the EPIPE was injected');
-  assert.deepEqual(uncaught, [], 'stdin EPIPE escaped as an uncaught exception');
-});
+    assert.equal(res.isError, false);
+    assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed after success');
+  },
+);
 
-test('runAcpHarness: a successful run resolves and kills the agent itself (ACP agents never exit on their own)', async () => {
-  const pidFile = tmpPidFile('success');
-  // the fake agent never exits by itself — resolving at all proves the runner didn't wait for 'close'
-  const res = await runAcpHarness({
-    harness: fakeHarness('default', pidFile),
-    prompt: 'hi',
-    cwd: process.cwd(),
-    permission: 'readonly',
-    timeoutMs: 20_000,
-  });
-  assert.equal(res.streamedText, 'NEW ANSWER');
-  assert.equal(res.isError, false);
-  assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed after success');
-});
-
-test('runAcpHarness: the overall timeout kills a hung turn', async () => {
+test('runAcpHarness: the overall timeout kills a hung turn', SPAWN, async () => {
   const pidFile = tmpPidFile('timeout');
   await assert.rejects(
     runAcpHarness({
@@ -283,10 +316,12 @@ test('runAcpHarness: the overall timeout kills a hung turn', async () => {
     }),
     /timed out after 500ms/,
   );
-  assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed on timeout');
+  // Not readPid: on a loaded machine the 500ms timeout can kill the agent before it writes its pid.
+  // The pid file's (unique) path is in the agent's argv, so "no such process left" is the check.
+  assert.ok(await waitForNoProcessWithArg(pidFile), 'agent process must be killed on timeout');
 });
 
-test('runAcpHarness: aborting the signal mid-turn kills the agent and rejects as cancelled', async () => {
+test('runAcpHarness: aborting the signal mid-turn kills the agent and rejects as cancelled', SPAWN, async () => {
   const pidFile = tmpPidFile('abort');
   const ac = new AbortController();
   const run = runAcpHarness({
@@ -303,92 +338,118 @@ test('runAcpHarness: aborting the signal mid-turn kills the agent and rejects as
   assert.ok(await waitForProcessExit(pid), 'agent process must be killed on abort');
 });
 
-test('runAcpHarness: a hung handshake step fails at the handshake timeout, not the overall one, and kills the agent', async () => {
-  const pidFile = tmpPidFile('hang-new');
-  const started = Date.now();
-  await assert.rejects(
-    runAcpHarness(
-      {
-        harness: fakeHarness('hang-new', pidFile),
-        prompt: 'hi',
-        cwd: process.cwd(),
-        permission: 'readonly',
-        timeoutMs: 60_000,
+test(
+  'runAcpHarness: a hung handshake step fails at the handshake timeout, not the overall one, and kills the agent',
+  SPAWN,
+  async () => {
+    const pidFile = tmpPidFile('hang-new');
+    const started = Date.now();
+    await assert.rejects(
+      runAcpHarness(
+        {
+          harness: fakeHarness('hang-new', pidFile),
+          prompt: 'hi',
+          cwd: process.cwd(),
+          permission: 'readonly',
+          timeoutMs: 60_000,
+        },
+        // generous enough that `initialize` (whose timer starts at spawn) can't trip it on a loaded
+        // machine, so the step that times out is reliably the hung session/new
+        { handshakeTimeoutMs: 2_000 },
+      ),
+      /session\/new timed out after 2000ms/,
+    );
+    assert.ok(Date.now() - started < 30_000, 'must not wait for the overall timeoutMs (60s)');
+    assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed');
+  },
+);
+
+test(
+  'runAcpHarness: session/request_permission is answered with a reject option, preferring reject_once',
+  SPAWN,
+  async () => {
+    const res = await runAcpHarness({
+      harness: fakeHarness('perm-reject'),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'edit',
+      timeoutMs: 20_000,
+    });
+    assert.deepEqual(JSON.parse(res.streamedText), { outcome: { outcome: 'selected', optionId: 'nope' } });
+  },
+);
+
+test(
+  'runAcpHarness: session/request_permission with no reject option is answered cancelled, never allowed',
+  SPAWN,
+  async () => {
+    const res = await runAcpHarness({
+      harness: fakeHarness('perm-none'),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'edit',
+      timeoutMs: 20_000,
+    });
+    assert.deepEqual(JSON.parse(res.streamedText), { outcome: { outcome: 'cancelled' } });
+  },
+);
+
+test(
+  'runAcpHarness: any other server-initiated request gets a JSON-RPC error (no fs/terminal proxying)',
+  SPAWN,
+  async () => {
+    const res = await runAcpHarness({
+      harness: fakeHarness('fs-read'),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'edit',
+      timeoutMs: 20_000,
+    });
+    const reply = JSON.parse(res.streamedText) as { error: { code: number; message: string } };
+    assert.equal(reply.error.code, -32601);
+    assert.match(reply.error.message, /fs\/read_text_file not supported/);
+  },
+);
+
+test(
+  'runAcpHarness: a configOptions "mode" category is accepted as session-mode support (opencode dialect)',
+  SPAWN,
+  async () => {
+    const res = await runAcpHarness({
+      harness: fakeHarness('config-modes'),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'readonly',
+      timeoutMs: 20_000,
+    });
+    assert.equal(res.streamedText, 'NEW ANSWER');
+  },
+);
+
+test(
+  'runAcpHarness: streamed text is capped at 5MB with a truncation marker, and only kept text is forwarded',
+  SPAWN,
+  async () => {
+    const { MAX_STREAMED_CHARS } = await import('../extensions/stream-caps.ts');
+    let forwarded = 0;
+    const res = await runAcpHarness({
+      harness: fakeHarness('flood-text'),
+      prompt: 'hi',
+      cwd: process.cwd(),
+      permission: 'readonly',
+      timeoutMs: 30_000,
+      onStream: t => {
+        forwarded += t.length;
       },
-      { handshakeTimeoutMs: 300 },
-    ),
-    /session\/new timed out after 300ms/,
-  );
-  assert.ok(Date.now() - started < 10_000, 'must not wait for the overall timeoutMs');
-  assert.ok(await waitForProcessExit(await readPid(pidFile)), 'agent process must be killed');
-});
+    });
+    assert.ok(res.streamedText.startsWith('x'.repeat(1000)));
+    assert.match(res.streamedText, /\[truncated \d+ chars\]$/);
+    assert.equal(res.streamedText.replace(/ \[truncated \d+ chars\]$/, '').length, MAX_STREAMED_CHARS);
+    assert.equal(forwarded, res.streamedText.length, 'onStream sees exactly what was kept');
+  },
+);
 
-test('runAcpHarness: session/request_permission is answered with a reject option, preferring reject_once', async () => {
-  const res = await runAcpHarness({
-    harness: fakeHarness('perm-reject'),
-    prompt: 'hi',
-    cwd: process.cwd(),
-    permission: 'edit',
-    timeoutMs: 20_000,
-  });
-  assert.deepEqual(JSON.parse(res.streamedText), { outcome: { outcome: 'selected', optionId: 'nope' } });
-});
-
-test('runAcpHarness: session/request_permission with no reject option is answered cancelled, never allowed', async () => {
-  const res = await runAcpHarness({
-    harness: fakeHarness('perm-none'),
-    prompt: 'hi',
-    cwd: process.cwd(),
-    permission: 'edit',
-    timeoutMs: 20_000,
-  });
-  assert.deepEqual(JSON.parse(res.streamedText), { outcome: { outcome: 'cancelled' } });
-});
-
-test('runAcpHarness: any other server-initiated request gets a JSON-RPC error (no fs/terminal proxying)', async () => {
-  const res = await runAcpHarness({
-    harness: fakeHarness('fs-read'),
-    prompt: 'hi',
-    cwd: process.cwd(),
-    permission: 'edit',
-    timeoutMs: 20_000,
-  });
-  const reply = JSON.parse(res.streamedText) as { error: { code: number; message: string } };
-  assert.equal(reply.error.code, -32601);
-  assert.match(reply.error.message, /fs\/read_text_file not supported/);
-});
-
-test('runAcpHarness: a configOptions "mode" category is accepted as session-mode support (opencode dialect)', async () => {
-  const res = await runAcpHarness({
-    harness: fakeHarness('config-modes'),
-    prompt: 'hi',
-    cwd: process.cwd(),
-    permission: 'readonly',
-    timeoutMs: 20_000,
-  });
-  assert.equal(res.streamedText, 'NEW ANSWER');
-});
-
-test('runAcpHarness: streamed text is capped at 5MB with a truncation marker, and only kept text is forwarded', async () => {
-  const { MAX_STREAMED_CHARS } = await import('../extensions/stream-caps.ts');
-  let forwarded = 0;
-  const res = await runAcpHarness({
-    harness: fakeHarness('flood-text'),
-    prompt: 'hi',
-    cwd: process.cwd(),
-    permission: 'readonly',
-    timeoutMs: 30_000,
-    onStream: t => {
-      forwarded += t.length;
-    },
-  });
-  assert.ok(res.streamedText.startsWith('x'.repeat(1000)));
-  assert.match(res.streamedText, /\[truncated \d+ chars\]$/);
-  assert.equal(res.streamedText.replace(/ \[truncated \d+ chars\]$/, '').length, MAX_STREAMED_CHARS);
-  assert.equal(forwarded, res.streamedText.length, 'onStream sees exactly what was kept');
-});
-
-test('runAcpHarness: activities are capped at 5000 (stored and forwarded)', async () => {
+test('runAcpHarness: activities are capped at 5000 (stored and forwarded)', SPAWN, async () => {
   const { MAX_ACTIVITIES } = await import('../extensions/stream-caps.ts');
   let forwarded = 0;
   await runAcpHarness({
