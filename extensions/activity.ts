@@ -2,7 +2,7 @@ import { chmodSync, lstatSync, readdirSync, rmSync, statSync, writeFileSync } fr
 import { join } from 'node:path';
 import type { ActivityEvent, NormalizedPermission } from './harnesses/types.ts';
 import { ensurePrivateDir } from './private-dir.ts';
-import { newestFirst } from './recency.ts';
+import { isRecentForPrune, pruneOrder } from './recency.ts';
 import { sanitizeTemplateText } from './sanitize.ts';
 
 function truncate(s: string, max: number): string {
@@ -396,14 +396,18 @@ export function pruneOutputs(
     }
   }
   if (maxCount <= 0) return;
-  // Newest first by the shared ordering (recency.ts): a transcript dated in the FUTURE sorts last, so a
-  // flood of planted future-dated files can't make every real transcript "old" — and the transcript this
-  // run just wrote is never a candidate at all (`keep`).
+  // Newest first, a future mtime clamped to now (`pruneOrder`): a clock stepped back must not make the newest
+  // REAL transcripts look "last" and delete them — and never demote-and-delete. Protected from deletion: the
+  // transcript this run just wrote (`keep`) and anything modified within PRUNE_PROTECT_MS of now — a concurrent
+  // run's just-written file (a small maxTranscripts must not let two runs prune each other's). Protected files
+  // count toward `maxCount`, so older ones still go.
   const byMtime = files
     .filter(f => f.endsWith('.md'))
     .map(f => ({ f, mtimeMs: statSync(join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
-    .sort((a, b) => newestFirst({ mtimeMs: a.mtimeMs, name: a.f }, { mtimeMs: b.mtimeMs, name: b.f }, now));
-  const kept = new Set<string>(byMtime.filter(({ f }) => keep.includes(f)).map(({ f }) => f));
+    .sort((a, b) => pruneOrder({ mtimeMs: a.mtimeMs, name: a.f }, { mtimeMs: b.mtimeMs, name: b.f }, now));
+  const kept = new Set<string>(
+    byMtime.filter(({ f, mtimeMs }) => keep.includes(f) || isRecentForPrune(mtimeMs, now)).map(({ f }) => f),
+  );
   for (const { f } of byMtime) {
     if (kept.size >= Math.max(maxCount, keep.length)) break;
     kept.add(f);

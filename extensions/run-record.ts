@@ -29,7 +29,7 @@ import { HARNESS_NAMES } from './harnesses/registry.ts';
 import type { StreamedUsage } from './harnesses/types.ts';
 import { ensurePrivateDir } from './private-dir.ts';
 import { newestFirst } from './recency.ts';
-import { sanitizeTemplateText } from './sanitize.ts';
+import { INVISIBLE_OR_CONTROL_RE, sanitizeTemplateText } from './sanitize.ts';
 
 export const RUN_RECORD_VERSION = 1;
 
@@ -216,12 +216,25 @@ export function buildRunRecord(s: RunRecordSource): RunRecord {
   };
 }
 
+/**
+ * `JSON.stringify` with every invisible / direction-changing character written as `\uXXXX` (a valid JSON
+ * escape, read back identically): `JSON.stringify` leaves bidi controls, U+2028/2029, zero-width and other
+ * format characters raw, so a task from the tool path could reorder or hide text for anyone who `cat`s the file.
+ */
+export function stringifyRecord(record: unknown): string {
+  return JSON.stringify(record, null, 2).replace(INVISIBLE_OR_CONTROL_RE, ch =>
+    ch === '\n'
+      ? ch
+      : Array.from({ length: ch.length }, (_, i) => `\\u${ch.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''),
+  );
+}
+
 /** Serialize `record`, shrinking the stored task/scope (and flagging them truncated, so a rerun
  *  refuses them) until it fits `RECORD_MAX_BYTES` — a record the reader would refuse is useless. */
 function serializeWithinCap(record: RunRecord): string {
   let r = record;
   for (let i = 0; i < 12; i++) {
-    const text = `${JSON.stringify(r, null, 2)}\n`;
+    const text = `${stringifyRecord(r)}\n`;
     if (Buffer.byteLength(text, 'utf8') <= RECORD_MAX_BYTES) return text;
     const t = r.input.task;
     const sc = r.input.scope;

@@ -40,6 +40,7 @@ import {
   writeRunRecord,
 } from '../extensions/run-record.ts';
 import { CLAUDE_RESULT, fakeCtx, fakePi, tpl, withFakeBinaries, withSandbox } from './helpers/sandbox.ts';
+import { UNSAFE } from './helpers/unsafe.ts';
 
 const baseSource = (): RunRecordSource => ({
   runId: newRunId(),
@@ -509,7 +510,7 @@ test('delegate: the verify command text (template or --verify) is stored nowhere
 
 // ── future mtimes, crash-orphaned temp files, symlinked directories, non-regular transcripts ───────────────────
 
-test('newestFirst: a future-dated file sorts after every believable one, whatever its name; skew is tolerated', () => {
+test('newestFirst: a future-dated file sorts after every believable one, whatever its name; five minutes of skew is tolerated', () => {
   const now = 1_000_000_000_000;
   const real = { mtimeMs: now - 5000, name: 'a-real.md' };
   const planted = { mtimeMs: now + 3600_000, name: 'zzz-planted.md' };
@@ -518,39 +519,87 @@ test('newestFirst: a future-dated file sorts after every believable one, whateve
     [planted, real, skewed].sort((a, b) => newestFirst(a, b, now)),
     [skewed, real, planted],
   );
+  assert.equal(FUTURE_SKEW_MS, 5 * 60_000);
   assert.equal(newestFirst({ mtimeMs: now, name: 'a' }, { mtimeMs: now, name: 'b' }, now), 1, 'ties: the name decides');
   const older = { mtimeMs: now - 10, name: 'x' };
   assert.ok(newestFirst(older, real, now) < 0, 'ordinary files: newest first');
 });
 
-test('pruneOutputs: a flood of future-dated files does not push real transcripts out; the one just written always survives', async () => {
+const ST = (i: number) => `2026-01-01T00-00-${String(i).padStart(2, '0')}-000Z-x`;
+
+test('pruneOutputs: a clock stepped back does not delete the newest REAL transcripts (future mtimes are clamped to now, not ranked last)', async () => {
   await withSandbox({}, async () => {
     const dir = outputsDir('claude');
     mkdirSync(dir, { recursive: true });
     const now = Date.now();
-    // three real runs (past), each with a sidecar
-    for (let i = 0; i < 3; i++) {
+    const touch = (i: number, offsetS: number) => {
+      writeFileSync(join(dir, `${ST(i)}.md`), '#');
+      writeFileSync(join(dir, `${ST(i)}.json`), '{}');
+      utimesSync(join(dir, `${ST(i)}.md`), now / 1000 + offsetS, now / 1000 + offsetS);
+    };
+    for (let i = 0; i < 5; i++) touch(i, -7 * 86400 + i); // five week-old transcripts
+    for (let i = 10; i < 13; i++) touch(i, 60 + i); // three real runs whose mtimes are a minute "in the future"
+    touch(20, 0); // the one just written
+    pruneOutputs(dir, 4, [`${ST(20)}.md`], now);
+    const left = readdirSync(dir).filter(f => f.endsWith('.md'));
+    assert.deepEqual(
+      left.sort(),
+      [10, 11, 12, 20].map(i => `${ST(i)}.md`),
+      'the newest real runs survive, the old ones go',
+    );
+    assert.ok(readdirSync(dir).includes(`${ST(10)}.json`), 'and so do their sidecars');
+    assert.ok(!readdirSync(dir).includes(`${ST(0)}.json`));
+  });
+});
+
+test("pruneOutputs: files modified within 2 minutes are never pruned — two concurrent runs with maxTranscripts 1 keep each other's transcript", async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    // run A and run B each wrote their transcript, then each pruned with only ITS OWN file in `keep`
+    for (const [i, off] of [
+      [1, -30],
+      [2, -10],
+    ] as const) {
       writeFileSync(join(dir, `${STAMP(i)}.md`), '#');
       writeFileSync(join(dir, `${STAMP(i)}.json`), '{}');
-      utimesSync(join(dir, `${STAMP(i)}.md`), now / 1000 - 100 + i, now / 1000 - 100 + i);
+      utimesSync(join(dir, `${STAMP(i)}.md`), now / 1000 + off, now / 1000 + off);
     }
-    // ten planted files an hour in the FUTURE, named to sort "newest"
+    writeFileSync(join(dir, `${STAMP(0)}.md`), '#'); // an older, finished run
+    utimesSync(join(dir, `${STAMP(0)}.md`), now / 1000 - 3600, now / 1000 - 3600);
+    pruneOutputs(dir, 1, [`${STAMP(2)}.md`], now); // run B prunes
+    pruneOutputs(dir, 1, [`${STAMP(1)}.md`], now); // run A prunes
+    assert.deepEqual(
+      readdirSync(dir)
+        .filter(f => f.endsWith('.md'))
+        .sort(),
+      [`${STAMP(1)}.md`, `${STAMP(2)}.md`],
+      "both runs' transcripts survive; only the old one is pruned",
+    );
+    assert.ok(readdirSync(dir).includes(`${STAMP(1)}.json`) && readdirSync(dir).includes(`${STAMP(2)}.json`));
+    // …and once they are older than the window, the quota applies again
+    pruneOutputs(dir, 1, [`${STAMP(2)}.md`], now + 10 * 60_000);
+    assert.deepEqual(
+      readdirSync(dir).filter(f => f.endsWith('.md')),
+      [`${STAMP(2)}.md`],
+    );
+  });
+});
+
+test('pruneOutputs: a flood of far-future files counts as "now": it never outranks the file just written or deletes it', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    writeFileSync(join(dir, `${STAMP(2)}.md`), '#');
     for (let i = 0; i < 10; i++) {
       const f = join(dir, `${STAMP(50 + i, 'zzz')}.md`);
       writeFileSync(f, 'junk');
       utimesSync(f, now / 1000 + 3600, now / 1000 + 3600);
     }
-    pruneOutputs(dir, 3, [`${STAMP(2)}.md`]);
-    const left = readdirSync(dir).sort();
-    for (let i = 0; i < 3; i++)
-      assert.ok(left.includes(`${STAMP(i)}.md`) && left.includes(`${STAMP(i)}.json`), `real run ${i} kept: ${left}`);
-    assert.equal(left.filter(f => f.includes('zzz')).length, 0, 'the planted files are what got pruned');
-    // and with the real runs OLDER than the keep quota allows, the one just written still survives
-    pruneOutputs(dir, 1, [`${STAMP(0)}.md`]);
-    assert.deepEqual(
-      readdirSync(dir).filter(f => f.endsWith('.md')),
-      [`${STAMP(0)}.md`],
-    );
+    pruneOutputs(dir, 1, [`${STAMP(2)}.md`], now);
+    assert.ok(readdirSync(dir).includes(`${STAMP(2)}.md`), 'the just-written transcript survives');
   });
 });
 
@@ -653,5 +702,24 @@ test('loadRecordForTranscript: a symlinked or FIFO TRANSCRIPT is never a record 
       records.map(r => r.transcript),
       [real],
     );
+  });
+});
+
+test('writeRunRecord: bidi controls, U+2028 and zero-width characters are written \\uXXXX-escaped (cat-safe) and read back identically', async () => {
+  await withSandbox({}, async () => {
+    const dir = outputsDir('claude');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'esc.md'), '#');
+    const task = `fix\u202e\u2066 it\u2028next\u200b${'\u{1F468}\u200d\u{1F469}'}\u{e0041}\u0085 end`;
+    const rec = buildRunRecord({ ...baseSource(), task });
+    writeRunRecord(join(dir, 'esc.md'), rec);
+    const raw = readFileSync(join(dir, 'esc.json'), 'utf8');
+    assert.ok(!UNSAFE.test(raw.replace(/\n/g, '')), 'no raw invisible / bidi / separator character in the file');
+    assert.match(raw, /\\u202e/);
+    assert.match(raw, /\\u2028/);
+    assert.match(raw, /\\udb40\\udc41/, 'an astral tag character is escaped as its surrogate pair');
+    const back = parseRunRecord(raw);
+    assert.ok(back.ok);
+    assert.equal(back.ok ? back.record.input.task : null, task, 'the parser reads the exact task back');
   });
 });

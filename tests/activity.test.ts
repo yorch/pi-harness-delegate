@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -75,8 +75,10 @@ test('safeSegmentName neutralizes path separators', () => {
 test('pruneOutputs keeps the newest N transcripts', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pcd-prune-'));
   try {
+    const old = Date.now() / 1000 - 3600; // an hour old: outside the protect window for just-written files
     for (let i = 0; i < 5; i++) {
       writeFileSync(join(dir, `00${i}-a.md`), 'x');
+      utimesSync(join(dir, `00${i}-a.md`), old + i, old + i);
     }
     pruneOutputs(dir, 2);
     assert.equal(readdirSync(dir).filter(f => f.endsWith('.md')).length, 2);
