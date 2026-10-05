@@ -73,7 +73,11 @@ if (!LIVE) {
   for (const harness of getAllHarnesses()) {
     // Explicit timeout above the run's own 60s `timeoutMs`, so bun never abandons a run still in flight.
     test(`live: ${harness.name} runs a tiny read-only delegation`, { timeout: 90_000 }, async () => {
-      const detected = await harness.detect();
+      // detect()'s `--version` probe is a child process too: hand it the outer value the same way. Each
+      // detect() starts its first probe synchronously (an async function runs up to its first await);
+      // amp's `omp --version` fallback starts after an await and so sees the pinned dir — harmless, it
+      // only reads a version string.
+      const detected = await withEnvSync({ PI_CODING_AGENT_DIR: outerAgentDir }, () => harness.detect());
       if (!detected.ok) {
         console.log(`skip ${harness.name}: not detected (${detected.hint ?? 'binary not found'})`);
         return;
