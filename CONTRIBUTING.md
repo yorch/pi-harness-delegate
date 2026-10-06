@@ -88,8 +88,9 @@ throw, or unreachable (a helper that returns only a file *inside* the dir — `a
 thousands in total). `makeTempDir` records the exact path it hands out:
 
 - Prefer `removeTempDir(dir)` (usually in `finally`) when a test owns the dir's lifetime. Most existing call sites still
-  clean up with a plain `rmSync`; that is tolerated, and safe, because the registry records each dir's identity
-  (`dev`+`ino` from `lstat`) and the sweep only ever deletes a registered path that is *still that same real directory*:
+  clean up with a plain `rmSync`; that is tolerated, and safe, because `makeTempDir` writes an ownership marker
+  (`OWNER_MARKER`, a random token, at the dir root — tests that list a `makeTempDir` root must ignore it) and the sweep
+  only ever deletes a registered path that is *still a real directory holding that exact token*:
   a path that is gone is unregistered silently, and one that now holds something else (recreated, replaced by a symlink)
   is left alone with a single process warning. `removeTempDir`/`sweepTempDirs` also refuse a path that was never
   registered (normalised first, so `dir/` and `dir/sub/..` match the registered path, but a symlink to it never does),
@@ -103,6 +104,16 @@ thousands in total). `makeTempDir` records the exact path it hands out:
   SIGKILLed child leaks everything it had not yet removed — its tracked dirs as well as its pinned agent dir.
 
 `tempRoot()` names the temp root for assertions only (e.g. `startsWith(tempRoot())`); building a path from it is flagged.
+
+### Filesystem behaviour differs between macOS and Linux
+
+Most development here happens on macOS, but CI runs on ubuntu — and CI is the oracle. Filesystems differ in ways
+that make a test pass locally and fail there: Linux (ext4/tmpfs) reuses inode numbers (a dir created right after
+another was removed often gets the same one; APFS does not), birthtime/mtime resolution and support vary, and
+permission and ownership semantics differ (root ignores `chmod`). So never use inode identity or timestamps to decide
+who owns a path — use something only the owner knows (see the marker above) — and, where a scenario depends on
+filesystem behaviour, simulate it deterministically rather than hoping the local filesystem produces it
+(`tests/tmp-hygiene.test.ts` strips the marker from the same dir to get an "equal `dev`+`ino`, not ours" case).
 
 ### Setting env vars in tests
 
