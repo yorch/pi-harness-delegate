@@ -326,3 +326,24 @@ test('preload: a tracked dir that cannot be removed fails the run (non-zero exit
   assert.notEqual(stuck.code, 0, `a stuck tracked dir must fail the run: ${stuck.output}`);
   assert.match(stuck.output, /temp dir leak \(tests\/helpers\/tmp\.ts\): could not remove .*tracked-/);
 });
+
+test('registry: a dir replaced by a dangling symlink counts as replaced (lstat, not stat), not as vanished', async () => {
+  const dir = makeTempDir('tmp-hygiene-dangling-');
+  rmSync(dir, { recursive: true });
+  symlinkSync(join(dir, 'nowhere'), dir); // a link whose target does not exist: stat() throws, lstat() sees it
+  try {
+    const warnings = await warningsDuring(() => assert.deepEqual(sweepTempDirs([dir]), []));
+    assert.ok(lstatSync(dir).isSymbolicLink(), 'the foreign link is left in place');
+    assert.equal(warnings.filter(w => w.includes(dir)).length, 1, `a replaced dir warns: ${warnings}`);
+  } finally {
+    rmSync(dir, { force: true });
+  }
+});
+
+test('registry: sweepTempDirs normalises the paths it is given (trailing slash) before matching', () => {
+  const dir = makeTempDir('tmp-hygiene-norm-');
+  writeFileSync(join(dir, 'f'), 'x');
+  assert.deepEqual(sweepTempDirs([`${dir}/`]), []);
+  assert.equal(existsSync(dir), false, 'the registered dir was swept via its trailing-slash spelling');
+  assert.ok(!trackedTempDirs().includes(dir));
+});
