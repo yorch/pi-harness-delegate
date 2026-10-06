@@ -14,7 +14,7 @@ import {
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { withEnv } from './helpers/env.ts';
-import { makeTempDir } from './helpers/tmp.ts';
+import { makeTempDir, OWNER_MARKER } from './helpers/tmp.ts';
 
 test('config: delegate key preferred over claudeDelegate', async () => {
   const dir = makeTempDir('cfg-test-');
@@ -513,7 +513,12 @@ test('writeDelegateConfig: releases its lock and leaves no tmp file behind', asy
     dir => writeFileSync(join(dir, 'settings.json'), '{}'),
     dir => {
       writeDelegateConfig({});
-      assert.deepEqual(readdirSync(dir).sort(), ['settings.json']);
+      assert.deepEqual(
+        readdirSync(dir)
+          .filter(f => f !== OWNER_MARKER)
+          .sort(),
+        ['settings.json'],
+      );
     },
   );
 });

@@ -11,7 +11,7 @@ import {
   pruneOutputs,
   safeSegmentName,
 } from '../extensions/activity.ts';
-import { makeTempDir } from './helpers/tmp.ts';
+import { makeTempDir, OWNER_MARKER } from './helpers/tmp.ts';
 
 test('formatToolUse prefers description', () => {
   assert.equal(formatToolUse('Bash', { command: 'ls', description: 'List files' }), 'Bash: List files');
@@ -92,7 +92,7 @@ test('pruneOutputs maxCount 0 keeps everything', () => {
   try {
     for (let i = 0; i < 3; i++) writeFileSync(join(dir, `${i}.md`), 'x');
     pruneOutputs(dir, 0);
-    assert.equal(readdirSync(dir).length, 3);
+    assert.equal(readdirSync(dir).filter(f => f !== OWNER_MARKER).length, 3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

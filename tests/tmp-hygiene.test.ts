@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
-import { makeTempDir, removeTempDir, sweepTempDirs, trackedTempDirs } from './helpers/tmp.ts';
+import { makeTempDir, OWNER_MARKER, removeTempDir, sweepTempDirs, trackedTempDirs } from './helpers/tmp.ts';
 
 // Guard for leaked temp dirs: every test temp dir must come from `makeTempDir` (tests/helpers/tmp.ts), which
 // registers it so the preload sweeps whatever a test forgot. A raw `mkdtempSync(join(tmpdir(), …))` is
@@ -345,5 +345,74 @@ test('registry: sweepTempDirs normalises the paths it is given (trailing slash) 
   writeFileSync(join(dir, 'f'), 'x');
   assert.deepEqual(sweepTempDirs([`${dir}/`]), []);
   assert.equal(existsSync(dir), false, 'the registered dir was swept via its trailing-slash spelling');
+  assert.ok(!trackedTempDirs().includes(dir));
+});
+
+test('registry: ownership is the marker token; inode equality is irrelevant (no dependence on fs inode reuse)', async () => {
+  // Linux reuses inode numbers for a dir created right after another was removed; macOS does not. Simulate the
+  // worst case deterministically on any fs: the SAME directory (same dev+ino by construction) loses its
+  // marker, which is what "someone else's dir at the same dev/ino" looks like to the registry.
+  const dir = makeTempDir('tmp-hygiene-ino-');
+  const before = lstatSync(dir);
+  rmSync(join(dir, OWNER_MARKER));
+  writeFileSync(join(dir, 'foreign.txt'), 'not ours');
+  const after = lstatSync(dir);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.dev, before.dev);
+  try {
+    const warnings = await warningsDuring(() => assert.deepEqual(sweepTempDirs([dir]), []));
+    assert.equal(
+      readFileSync(join(dir, 'foreign.txt'), 'utf8'),
+      'not ours',
+      'equal dev+ino without our marker is not ours',
+    );
+    assert.equal(warnings.filter(w => w.includes(dir)).length, 1, `${warnings}`);
+    assert.ok(!trackedTempDirs().includes(dir));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('registry: a recreated dir carrying a marker with a different token, or a bad marker, is never deleted', async () => {
+  // each arrange() runs on a dir whose own marker was just removed; `token` is what it held
+  const cases: Array<[string, (dir: string, token: string) => void]> = [
+    ['other token', dir => writeFileSync(join(dir, OWNER_MARKER), 'f'.repeat(32))],
+    ['empty marker', dir => writeFileSync(join(dir, OWNER_MARKER), '')],
+    ['oversized marker', dir => writeFileSync(join(dir, OWNER_MARKER), 'a'.repeat(1_000_000))],
+    ['marker is a directory', dir => mkdirSync(join(dir, OWNER_MARKER))],
+    [
+      'marker is a symlink to a file with the right token',
+      (dir, token) => {
+        writeFileSync(join(dir, 'real-token'), token);
+        symlinkSync(join(dir, 'real-token'), join(dir, OWNER_MARKER));
+      },
+    ],
+  ];
+  for (const [label, arrange] of cases) {
+    const dir = makeTempDir('tmp-hygiene-badmarker-');
+    const token = readFileSync(join(dir, OWNER_MARKER), 'utf8');
+    rmSync(join(dir, OWNER_MARKER));
+    arrange(dir, token);
+    writeFileSync(join(dir, 'foreign.txt'), 'not ours');
+    try {
+      const warnings = await warningsDuring(() => assert.deepEqual(sweepTempDirs([dir]), []));
+      assert.equal(readFileSync(join(dir, 'foreign.txt'), 'utf8'), 'not ours', `${label}: left alone`);
+      assert.equal(warnings.filter(w => w.includes(dir)).length, 1, `${label}: one warning: ${warnings}`);
+      assert.ok(!trackedTempDirs().includes(dir), label);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('registry: a legitimately owned dir (marker intact, files and subdirs inside) is removed', () => {
+  const dir = makeTempDir('tmp-hygiene-owned-');
+  assert.match(readFileSync(join(dir, OWNER_MARKER), 'utf8'), /^[0-9a-f]{32}$/);
+  assert.equal(lstatSync(join(dir, OWNER_MARKER)).mode & 0o777, 0o600);
+  mkdirSync(join(dir, 'sub'));
+  writeFileSync(join(dir, 'sub', 'f'), 'x');
+  writeFileSync(join(dir, 'g'), 'y');
+  removeTempDir(dir);
+  assert.equal(existsSync(dir), false);
   assert.ok(!trackedTempDirs().includes(dir));
 });
