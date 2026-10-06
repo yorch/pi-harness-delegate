@@ -383,8 +383,11 @@ test('registry: a recreated dir carrying a marker with a different token, or a b
     [
       'marker is a symlink to a file with the right token',
       (dir, token) => {
-        writeFileSync(join(dir, 'real-token'), token);
-        symlinkSync(join(dir, 'real-token'), join(dir, OWNER_MARKER));
+        // a symlink's lstat size is its target's length: make it exactly the token's length, so only the
+        // "is a regular file" check (not the size check) can refuse it
+        const target = 'r'.repeat(token.length);
+        writeFileSync(join(dir, target), token);
+        symlinkSync(target, join(dir, OWNER_MARKER));
       },
     ],
   ];
@@ -415,4 +418,22 @@ test('registry: a legitimately owned dir (marker intact, files and subdirs insid
   removeTempDir(dir);
   assert.equal(existsSync(dir), false);
   assert.ok(!trackedTempDirs().includes(dir));
+});
+
+test("registry: every dir gets its own token, so one dir's marker never vouches for another", async () => {
+  const a = makeTempDir('tmp-hygiene-tok-a-');
+  const b = makeTempDir('tmp-hygiene-tok-b-');
+  const tokenA = readFileSync(join(a, OWNER_MARKER), 'utf8');
+  assert.notEqual(tokenA, readFileSync(join(b, OWNER_MARKER), 'utf8'));
+  rmSync(b, { recursive: true });
+  mkdirSync(b); // b recreated by someone else who happens to hold a copy of a's marker
+  writeFileSync(join(b, OWNER_MARKER), tokenA);
+  writeFileSync(join(b, 'foreign.txt'), 'not ours');
+  try {
+    await warningsDuring(() => assert.deepEqual(sweepTempDirs([b]), []));
+    assert.equal(readFileSync(join(b, 'foreign.txt'), 'utf8'), 'not ours');
+  } finally {
+    rmSync(b, { recursive: true, force: true });
+    removeTempDir(a);
+  }
 });
