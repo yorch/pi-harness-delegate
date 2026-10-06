@@ -18,18 +18,39 @@ import { makeTempDir, removeTempDir, sweepTempDirs, trackedTempDirs } from './he
 // registers it so the preload sweeps whatever a test forgot. A raw `mkdtempSync(join(tmpdir(), …))` is
 // invisible to that sweep and leaks into $TMPDIR on every run (thousands of `acp-runner-test-*` dirs did).
 //
-// Static scan: any `mkdtemp`/`mkdtempSync`/`tmpdir(` under tests/ outside the allow-list fails. Comments are
-// blanked first (a plain line/block-comment regex). Known false positives: a `//` or `/*` inside a string
-// literal or regex blanks the rest of that line / up to the next `*/`, which could hide a call written
-// after it on the same line; and a string literal that merely contains `tmpdir(` is flagged — write it
-// differently. Neither has occurred; a hit is cheap to rework, a miss is the leak.
+// Static scan over tests/ (outside the allow-list), comments blanked first (a plain line/block-comment regex).
+// It flags, as identifiers (so `import { tmpdir as t }`, `os.tmpdir`, `fs.promises.mkdtemp`, aliases and
+// destructuring all match): `mkdtemp*`, `tmpdir`, `mktemp`, `TMPDIR`; any `/var/folders`/`/private/tmp`
+// literal; a `/tmp` literal on a line that also creates/writes something (`Bun.write('/tmp/x')`,
+// `mkdirSync('/tmp/x')`, …); and `tempRoot()` anywhere except on a line that only *asserts* about it
+// (`startsWith`/`relative`/`isAbsolute`) — `tempRoot()` names the temp root, so `join(tempRoot(), 'leak')`
+// would be an unregistered dir by another name.
+//
+// Known misses (heuristics, not a parser): a `/tmp` literal that is stored and used on a different line
+// (`const d = '/tmp/x'; mkdirSync(d)`); a path built from pieces (`'/t' + 'mp'`); `tempRoot()` stored in a
+// variable on an assert-looking line. Known false positives: a `//` or `/*` inside a string literal or regex
+// blanks the rest of that line / up to the next `*/`, which could hide a call written after it on the same
+// line; and a string literal that merely contains one of the names above is flagged — write it differently
+// (a `/tmp/...` literal used as inert path data on a line with no fs call is fine). A hit is cheap to
+// rework, a miss is the leak.
 
 const TESTS_DIR = import.meta.dirname;
 const SOURCE_FILE = /\.[cm]?[jt]sx?$/;
 /** Files allowed to call the raw APIs: the helper itself, and the preload (its pinned agent dir has its own
  *  signal/afterAll cleanup, and the preload must not depend on the registry to protect the real agent dir). */
 const ALLOWED = new Set(['helpers/tmp.ts', 'helpers/preload.ts', 'tmp-hygiene.test.ts']);
-const RAW_TEMP = /(?<![\w$])(?:mkdtemp(?:Sync)?|tmpdir)\s*[(,}]|(?<![\w$])(?:mkdtemp(?:Sync)?)\b/g;
+const IDENTIFIER_RULES: RegExp[] = [
+  /(?<![\w$])mkdtemp\w*/g,
+  /(?<![\w$])tmpdir(?![\w$])/g,
+  /(?<![\w$])mktemp(?![\w$])/g,
+  /(?<![\w$])TMPDIR(?![\w$])/g,
+];
+const ALWAYS_TEMP_PATH = /(?:\/var\/folders|\/private\/tmp)\b/g;
+const TMP_LITERAL = /['"`]\/tmp(?:\/|['"`])/;
+const FS_WRITE =
+  /(?:Bun\.write|\b(?:write|append|mkdir|copy|cp|rename|symlink|link|createWrite|open|rm|unlink|rmdir|truncate)\w*)\s*\(/;
+const TEMP_ROOT_CALL = /(?<![\w$])tempRoot\s*\(/;
+const TEMP_ROOT_ASSERT_ONLY = /\b(?:startsWith|relative|isAbsolute)\s*\(/;
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
@@ -45,14 +66,21 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' ')).replace(/\/\/[^\n]*/g, '');
 }
 
-/** `line: text` for every raw temp-dir API use in `source`. */
+/** `line N: text` for every raw temp-dir API use in `source`. */
 export function findRawTempUse(source: string): string[] {
-  const code = stripComments(source);
+  const lines = stripComments(source).split('\n');
   const hits: string[] = [];
-  for (const m of code.matchAll(RAW_TEMP)) {
-    const line = code.slice(0, m.index).split('\n').length;
-    hits.push(`line ${line}: ${m[0]}`);
-  }
+  lines.forEach((line, i) => {
+    const found: string[] = [];
+    for (const re of [...IDENTIFIER_RULES, ALWAYS_TEMP_PATH]) for (const m of line.matchAll(re)) found.push(m[0]);
+    if (TMP_LITERAL.test(line) && FS_WRITE.test(line)) found.push('/tmp literal on an fs-writing line');
+    if (
+      TEMP_ROOT_CALL.test(line) &&
+      (!TEMP_ROOT_ASSERT_ONLY.test(line) || FS_WRITE.test(line) || /\b(?:join|resolve)\s*\(/.test(line))
+    )
+      found.push('tempRoot() used to build a path');
+    for (const f of found) hits.push(`line ${i + 1}: ${f}`);
+  });
   return hits;
 }
 
@@ -77,6 +105,23 @@ test('tmp hygiene: the scan flags the raw shapes and ignores comments', () => {
     "import { tmpdir } from 'node:os'; const t = tmpdir();",
     "fs.mkdtemp('x', cb)",
     'join(tmpdir (), 1)',
+    "import { tmpdir as t } from 'node:os'; t();",
+    "import { tmpdir as t } from 'node:os';",
+    "const { tmpdir } = os; join(tmpdir, 'x')",
+    "join(tempRoot(), 'leak')",
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test, not a template
+    'const d = `${tempRoot()}/leak`; mkdirSync(d)',
+    "mkdirSync(tempRoot() + '/leak')",
+    "writeFileSync('/tmp/leak.txt', 'x')",
+    "await Bun.write('/tmp/leak.txt', 'x')",
+    "mkdirSync('/private/tmp/leak')",
+    "const d = '/var/folders/ab/T/leak'",
+    'const d = process.env.TMPDIR;',
+    "spawnSync('sh', ['-c', 'mktemp -d'])",
+    "const { mkdtemp } = await import('node:fs/promises');",
+    "import { mkdtemp as m } from 'node:fs/promises';",
+    "import { mkdtempSync as m } from 'node:fs'; m('x')",
+    "fs.promises.mkdtemp('x')",
   ]) {
     assert.ok(findRawTempUse(bad).length > 0, bad);
   }
@@ -84,7 +129,10 @@ test('tmp hygiene: the scan flags the raw shapes and ignores comments', () => {
     "makeTempDir('x-')",
     '// mkdtempSync(join(tmpdir(), "x"))',
     '/* os.tmpdir() mkdtemp\n mkdtempSync */ const a = 1;',
-    'const tempRoot = () => 1; tempRoot()',
+    'const tempRoot = () => 1;',
+    "assert.ok(realpathSync(dir).startsWith(realpathSync(tempRoot()) + sep), 'under the temp root')",
+    "const o = { cwd: '/tmp', file: '/tmp/out.md' };",
+    "assert.equal(agentDir(), '/tmp/some-test-override')",
   ]) {
     assert.deepEqual(findRawTempUse(ok), [], ok);
   }
