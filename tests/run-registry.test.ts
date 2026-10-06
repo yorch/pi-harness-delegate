@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { withEnv } from './helpers/env.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 // `fn` is always an async callback, so this must itself stay async and `await` it (not just
 // `return fn(dir)` from a sync try/finally): every one of these tests' first statement is an
@@ -12,7 +12,7 @@ import { withEnv } from './helpers/env.ts';
 // resetting the env var and deleting `dir` before the test body executes a single line, silently
 // pointing every test at the real ~/.pi/agent instead of an isolated tmp dir.
 function withAgentDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = mkdtempSync(join(tmpdir(), 'run-registry-'));
+  const dir = makeTempDir('run-registry-');
   return withEnv({ PI_CODING_AGENT_DIR: dir }, () => fn(dir)).finally(() => {
     rmSync(dir, { recursive: true, force: true });
   });

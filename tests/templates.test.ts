@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { HARNESS_NAMES } from '../extensions/harnesses/registry.ts';
@@ -18,6 +17,7 @@ import {
 } from '../extensions/templates.ts';
 import { mapClaudeUsage } from '../extensions/usage.ts';
 import { withEnv } from './helpers/env.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 test('parseTemplate extracts frontmatter and body', () => {
   const t = parseTemplate(`---
@@ -479,7 +479,7 @@ test('mapClaudeUsage reports real tokens with a $0 cost when cost is unknown (bo
 });
 
 test('loadTemplates does not load project templates by default (trusted defaults to false)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-harness-test-'));
+  const dir = makeTempDir('pi-harness-test-');
   try {
     const projDir = join(dir, '.pi', 'delegate', 'templates');
     mkdirSync(projDir, { recursive: true });
@@ -506,7 +506,7 @@ test('loadTemplates does not load project templates by default (trusted defaults
 // nothing inside `cwd` — file or env var — can flip it. This must fail against the pre-fix
 // `isTrusted()` (env var / `.pi/trusted` file) and pass against the current signature.
 test('a hostile project cannot self-declare trust to override a builtin template', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-harness-test-'));
+  const dir = makeTempDir('pi-harness-test-');
   try {
     const projDir = join(dir, '.pi', 'delegate', 'templates');
     mkdirSync(projDir, { recursive: true });
@@ -533,7 +533,7 @@ test('a hostile project cannot self-declare trust to override a builtin template
 });
 
 test('loadTemplates loads project templates when the caller asserts trust', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-harness-test-'));
+  const dir = makeTempDir('pi-harness-test-');
   try {
     const projDir = join(dir, '.pi', 'delegate', 'templates');
     mkdirSync(projDir, { recursive: true });
@@ -546,7 +546,7 @@ test('loadTemplates loads project templates when the caller asserts trust', () =
 });
 
 test('a project-local template verify command inherits the same trust gate as the rest of the template', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-harness-test-'));
+  const dir = makeTempDir('pi-harness-test-');
   try {
     const projDir = join(dir, '.pi', 'delegate', 'templates');
     mkdirSync(projDir, { recursive: true });
@@ -586,7 +586,7 @@ test('resolveNativePermission: no native mode declared stays undefined', () => {
 });
 
 test('projectTemplatePresence: finds trusted-only content that would be skipped', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-presence-'));
+  const dir = makeTempDir('pi-presence-');
   try {
     // Nothing there yet — an unaffected user must never be warned.
     assert.deepEqual(projectTemplatePresence(dir, HARNESS_NAMES), { dirs: [], staleTrustFile: false });
@@ -606,7 +606,7 @@ test('projectTemplatePresence: finds trusted-only content that would be skipped'
 });
 
 test('projectTemplatePresence: per-harness project template dirs count as skipped content too', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pi-presence-partitioned-'));
+  const dir = makeTempDir('pi-presence-partitioned-');
   try {
     // only a partitioned override — nothing at the shared root
     const claudeDir = join(dir, '.pi', 'delegate', 'templates', 'claude');

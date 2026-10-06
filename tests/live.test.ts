@@ -13,8 +13,7 @@
  */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
@@ -23,6 +22,7 @@ import { getAllHarnesses } from '../extensions/harnesses/registry.ts';
 import { runHarness } from '../extensions/runner.ts';
 import { withEnvSync } from './helpers/env.ts';
 import { preloadState } from './helpers/preload-state.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 const LIVE = process.env.PI_DELEGATE_LIVE === '1';
 
@@ -35,7 +35,7 @@ if (!LIVE) {
   });
 } else {
   const execFileAsync = promisify(execFile);
-  const scratchDir = mkdtempSync(join(tmpdir(), 'pi-harness-delegate-live-'));
+  const scratchDir = makeTempDir('pi-harness-delegate-live-');
   const MARKER = 'quokka-nebula-live-check';
   writeFileSync(join(scratchDir, 'README.md'), `marker: ${MARKER}\n`);
   await execFileAsync('git', ['init', '-q'], { cwd: scratchDir });

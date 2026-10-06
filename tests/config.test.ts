@@ -4,7 +4,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -12,13 +11,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { withEnv } from './helpers/env.ts';
+import { makeTempDir, OWNER_MARKER } from './helpers/tmp.ts';
 
 test('config: delegate key preferred over claudeDelegate', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cfg-test-'));
+  const dir = makeTempDir('cfg-test-');
   try {
     await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
       // write settings with both keys, delegate should win
@@ -41,7 +40,7 @@ test('config: delegate key preferred over claudeDelegate', async () => {
 });
 
 test('config: legacy claudeDelegate migrates', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cfg-legacy-'));
+  const dir = makeTempDir('cfg-legacy-');
   try {
     await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
       writeFileSync(
@@ -72,7 +71,7 @@ test('config: outputsDir partitioned', async () => {
 });
 
 async function loadConfigFromSettings(settings: unknown): Promise<import('../extensions/config.ts').DelegateConfig> {
-  const dir = mkdtempSync(join(tmpdir(), 'cfg-transport-'));
+  const dir = makeTempDir('cfg-transport-');
   try {
     return await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
       writeFileSync(join(dir, 'settings.json'), JSON.stringify(settings));
@@ -210,7 +209,7 @@ async function withSettingsDir<T>(
   write: ((dir: string) => void) | undefined,
   fn: (dir: string) => Promise<T> | T,
 ): Promise<T> {
-  const dir = mkdtempSync(join(tmpdir(), 'cfg-source-'));
+  const dir = makeTempDir('cfg-source-');
   try {
     return await withEnv({ PI_CODING_AGENT_DIR: dir }, async () => {
       write?.(dir);
@@ -514,7 +513,12 @@ test('writeDelegateConfig: releases its lock and leaves no tmp file behind', asy
     dir => writeFileSync(join(dir, 'settings.json'), '{}'),
     dir => {
       writeDelegateConfig({});
-      assert.deepEqual(readdirSync(dir).sort(), ['settings.json']);
+      assert.deepEqual(
+        readdirSync(dir)
+          .filter(f => f !== OWNER_MARKER)
+          .sort(),
+        ['settings.json'],
+      );
     },
   );
 });

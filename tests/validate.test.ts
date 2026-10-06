@@ -11,6 +11,7 @@ import {
   sessionIdError,
   validateDelegateInputs,
 } from '../extensions/validate.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 test('sessionIdError: accepts real-world session ids from every harness', () => {
   for (const id of [
@@ -130,10 +131,9 @@ test('confirmDangerousToolCall: resolves on approval; a throwing dialog counts a
 });
 
 test('addDirsOutsideCwd: inside paths pass; .., absolute, and symlink escapes are caught', async () => {
-  const { mkdirSync, mkdtempSync, rmSync, symlinkSync, realpathSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
+  const { mkdirSync, rmSync, symlinkSync, realpathSync } = await import('node:fs');
   const { join } = await import('node:path');
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'adddirs-')));
+  const root = realpathSync(makeTempDir('adddirs-'));
   const cwd = join(root, 'repo');
   const outside = join(root, 'outside');
   mkdirSync(join(cwd, 'sub'), { recursive: true });

@@ -1,7 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { withEnv } from './env.ts';
+import { makeTempDir, removeTempDir } from './tmp.ts';
 import { withViewport } from './viewport.ts';
 
 /**
@@ -28,7 +28,7 @@ export async function withSandbox<T>(
   },
   fn: (s: Sandbox) => Promise<T>,
 ): Promise<T> {
-  const root = mkdtempSync(join(tmpdir(), 'delegate-sandbox-'));
+  const root = makeTempDir('delegate-sandbox-');
   const agentDir = join(root, 'agent');
   const cwd = join(root, 'project');
   mkdirSync(agentDir, { recursive: true });
@@ -50,7 +50,7 @@ export async function withSandbox<T>(
     // every confirmation dialog is laid out for the terminal's size: pin it, so a test never depends on the developer's window
     return await withViewport(80, 40, () => withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => fn({ agentDir, cwd })));
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTempDir(root);
   }
 }
 
@@ -133,7 +133,7 @@ export async function withFakeBinaries<T>(
   fn: (argsFile: string) => Promise<T>,
   opts: { sleepAfterSec?: number } = {},
 ): Promise<T> {
-  const binDir = mkdtempSync(join(tmpdir(), 'fake-bin-'));
+  const binDir = makeTempDir('fake-bin-');
   const argsFile = join(binDir, 'args.txt');
   const body = stdoutLines.map(l => `printf '%s\\n' '${l.replace(/'/g, `'\\''`)}'`).join('\n');
   const script = `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE"\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE.$(basename "$0")"\n${body}\n${opts.sleepAfterSec ? `exec sleep ${opts.sleepAfterSec}\n` : ''}`;
@@ -144,7 +144,7 @@ export async function withFakeBinaries<T>(
   try {
     return await withEnv({ PATH: `${binDir}:${process.env.PATH}`, FAKE_ARGS_FILE: argsFile }, () => fn(argsFile));
   } finally {
-    rmSync(binDir, { recursive: true, force: true });
+    removeTempDir(binDir);
   }
 }
 

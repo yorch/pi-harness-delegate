@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { runAcpHarness } from '../extensions/acp-runner.ts';
@@ -8,6 +7,7 @@ import { claudeHarness } from '../extensions/harnesses/claude.ts';
 import { devinHarness } from '../extensions/harnesses/devin.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
 import { runHarness } from '../extensions/runner.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 import { readPid, waitForNoProcessWithArg, waitForProcessExit } from './helpers/wait.ts';
 
 /** A stdout harness that runs `node -e <script>` instead of a real CLI, parsed as Claude stream-json. */
@@ -17,7 +17,7 @@ function nodeHarness(base: Harness, script: string): Harness {
 
 /** A marker file inside its own fresh `mkdtemp` dir — unique by construction; remove with `rmMarker`. */
 function markerPath(): string {
-  return join(mkdtempSync(join(tmpdir(), 'runner-test-')), 'pid.marker');
+  return join(makeTempDir('runner-test-'), 'pid.marker');
 }
 
 function rmMarker(path: string): void {
