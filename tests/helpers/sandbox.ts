@@ -1,7 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { withEnv } from './env.ts';
-import { makeTempDir } from './tmp.ts';
+import { makeTempDir, removeTempDir } from './tmp.ts';
 import { withViewport } from './viewport.ts';
 
 /**
@@ -50,7 +50,7 @@ export async function withSandbox<T>(
     // every confirmation dialog is laid out for the terminal's size: pin it, so a test never depends on the developer's window
     return await withViewport(80, 40, () => withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => fn({ agentDir, cwd })));
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTempDir(root);
   }
 }
 
@@ -144,7 +144,7 @@ export async function withFakeBinaries<T>(
   try {
     return await withEnv({ PATH: `${binDir}:${process.env.PATH}`, FAKE_ARGS_FILE: argsFile }, () => fn(argsFile));
   } finally {
-    rmSync(binDir, { recursive: true, force: true });
+    removeTempDir(binDir);
   }
 }
 

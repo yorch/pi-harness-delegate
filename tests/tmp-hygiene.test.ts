@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { makeTempDir, removeTempDir, sweepTempDirs, trackedTempDirs } from './helpers/tmp.ts';
@@ -106,5 +116,120 @@ test('sweepTempDirs: removes the dirs it is given, never follows a symlink out o
   } finally {
     removeTempDir(mine);
     removeTempDir(outside);
+  }
+});
+
+/** Run `fn` and collect the process warnings it (or the next tick) emitted. */
+async function warningsDuring(fn: () => void): Promise<string[]> {
+  const seen: string[] = [];
+  const listener = (w: Error) => seen.push(w.message);
+  process.on('warning', listener);
+  try {
+    fn();
+    await new Promise(resolve => setTimeout(resolve, 20)); // 'warning' is emitted on a later tick
+  } finally {
+    process.off('warning', listener);
+  }
+  return seen;
+}
+
+test('registry: a dir removed with a raw rmSync and recreated by someone else survives the sweep', async () => {
+  const dir = makeTempDir('tmp-hygiene-stale-');
+  rmSync(dir, { recursive: true }); // a call site that cleans up without removeTempDir: a dead entry stays
+  mkdirSync(dir); // ... and something else later reuses the exact path
+  writeFileSync(join(dir, 'foreign.txt'), 'not ours');
+  try {
+    const warnings = await warningsDuring(() => assert.deepEqual(sweepTempDirs([dir]), []));
+    assert.equal(readFileSync(join(dir, 'foreign.txt'), 'utf8'), 'not ours', 'the foreign dir is left alone');
+    assert.ok(!trackedTempDirs().includes(dir), 'the stale entry is dropped');
+    assert.equal(warnings.filter(w => w.includes(dir)).length, 1, `exactly one warning naming the path: ${warnings}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true }); // not registered any more: raw cleanup of our own scratch
+  }
+});
+
+test('registry: a dir that vanished is unregistered silently', async () => {
+  const dir = makeTempDir('tmp-hygiene-vanished-');
+  rmSync(dir, { recursive: true });
+  const warnings = await warningsDuring(() => assert.deepEqual(sweepTempDirs([dir]), []));
+  assert.deepEqual(warnings, []);
+  assert.ok(!trackedTempDirs().includes(dir));
+  removeTempDir(dir); // already released: a no-op, not an error
+});
+
+test('registry: a dir replaced by a symlink is not followed or deleted; the target stays intact', async () => {
+  const dir = makeTempDir('tmp-hygiene-swap-');
+  const target = makeTempDir('tmp-hygiene-swap-target-');
+  writeFileSync(join(target, 'keep.txt'), 'keep');
+  rmSync(dir, { recursive: true });
+  symlinkSync(target, dir);
+  try {
+    const warnings = await warningsDuring(() => removeTempDir(dir));
+    assert.equal(readFileSync(join(target, 'keep.txt'), 'utf8'), 'keep', 'the link target is intact');
+    assert.ok(lstatSync(dir).isSymbolicLink(), 'the foreign link is left in place');
+    assert.ok(!trackedTempDirs().includes(dir));
+    assert.equal(warnings.filter(w => w.includes(dir)).length, 1, `one warning: ${warnings}`);
+  } finally {
+    rmSync(dir, { force: true }); // unlinks the link only
+    removeTempDir(target);
+  }
+});
+
+test('registry: removeTempDir refuses unregistered paths, trailing-slash symlink spellings and normalises `..`', () => {
+  const real = makeTempDir('tmp-hygiene-real-');
+  const holder = makeTempDir('tmp-hygiene-holder-');
+  writeFileSync(join(real, 'keep.txt'), 'keep');
+  const link = join(holder, 'link');
+  symlinkSync(real, link);
+  try {
+    assert.throws(() => removeTempDir(join(holder, 'never-made')), /not a directory created by makeTempDir/);
+    assert.throws(() => removeTempDir(link), /not a directory created by makeTempDir/);
+    assert.throws(() => removeTempDir(`${link}/`), /not a directory created by makeTempDir/, 'no following the link');
+    assert.throws(() => removeTempDir(join(real, '..', 'x')), /not a directory created/);
+    assert.equal(readFileSync(join(real, 'keep.txt'), 'utf8'), 'keep', 'the symlink target is untouched');
+    // a registered dir spelled with a trailing slash / a `..` detour is the same registered dir
+    removeTempDir(`${holder}/`);
+    assert.equal(existsSync(holder), false);
+    removeTempDir(join(real, 'sub', '..'));
+    assert.equal(existsSync(real), false);
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+    rmSync(real, { recursive: true, force: true });
+  }
+});
+
+test('registry: sweepTempDirs ignores (with a warning) a path that was never registered', async () => {
+  const holder = makeTempDir('tmp-hygiene-unreg-');
+  const other = join(holder, 'never-registered');
+  mkdirSync(other);
+  writeFileSync(join(other, 'sentinel'), 'x');
+  try {
+    const warnings = await warningsDuring(() => assert.deepEqual(sweepTempDirs([other]), []));
+    assert.ok(existsSync(join(other, 'sentinel')), 'an unregistered dir is never removed');
+    assert.equal(warnings.filter(w => w.includes(other)).length, 1, `${warnings}`);
+  } finally {
+    removeTempDir(holder);
+  }
+});
+
+test('makeTempDir: a relative TMPDIR is refused, so a chdir can never repoint a registered path', () => {
+  const cwd = makeTempDir('tmp-hygiene-reltmp-');
+  mkdirSync(join(cwd, 'rel'));
+  const helper = join(import.meta.dirname, 'helpers', 'tmp.ts');
+  const script = join(cwd, 'probe.ts');
+  writeFileSync(
+    script,
+    `import { makeTempDir } from ${JSON.stringify(helper)};\ntry { console.log('MADE ' + makeTempDir('p-')); } catch (e) { console.log('REFUSED ' + (e as Error).message); }\n`,
+  );
+  try {
+    const run = spawnSync(process.execPath, [script], {
+      cwd,
+      env: { ...process.env, TMPDIR: 'rel' },
+      encoding: 'utf8',
+    });
+    assert.match(run.stdout, /REFUSED .*not absolute/, run.stdout + run.stderr);
+    assert.deepEqual(readdirSync(join(cwd, 'rel')), [], 'nothing was created under the relative root');
+  } finally {
+    removeTempDir(cwd);
   }
 });
