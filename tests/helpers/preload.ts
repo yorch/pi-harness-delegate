@@ -26,9 +26,11 @@
  * The pinned dir is removed when the process ends: from a `bun:test` `afterAll` (end of `bun test`, pass
  * or fail — bun 1.3.14, the pinned version, never emits 'exit' there), on 'exit' (bun 1.4.x, and any
  * `process.exit()`), and on SIGINT/SIGTERM/SIGHUP, which otherwise kill bun without running either. The signal is
- * re-raised after cleanup, so Ctrl-C still stops the run with the conventional 128+n status — unless
- * something else also listens for that signal (then the signal doesn't end the run, so the dir is left
- * for the end-of-run cleanup; see `registerPinnedDirCleanup`).
+ * re-raised after cleanup, so Ctrl-C stops the run with the conventional 128+n status — but only when
+ * nothing else listens for that signal. In a full `bun test` run every one of these signals has a second
+ * listener, so our handler steps aside and the signal does NOT stop the run (pre-existing: a SIGINT mid-run
+ * still finished every test and exited 0); the end-of-run `afterAll` cleans up instead. A signal followed by
+ * SIGKILL leaks whatever was not yet removed (see `registerPinnedDirCleanup`).
  *
  * Runtime backstop for the `process.env.X = prev` restore bug (`tests/env-hygiene.test.ts` is the
  * primary, static guard): after every test, any env var whose value is exactly `"undefined"` or `"null"`,

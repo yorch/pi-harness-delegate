@@ -52,9 +52,13 @@ throwaway manual session.
 
 As a safety net, `bun test` preloads `tests/helpers/preload.ts` (wired in `bunfig.toml`), which pins
 `PI_CODING_AGENT_DIR` to a fresh `mkdtemp` dir under `os.tmpdir()` for the whole test process — overriding any
-outer value — and removes it at the end of the run (a `bun:test` `afterAll`, plus `'exit'`) and on
-SIGINT/SIGTERM/SIGHUP (re-raised afterwards, so Ctrl-C still stops the run with the usual status; if some other
-code also listens for that signal, the run isn't killed by it, so the dir is left for the end-of-run cleanup instead). A test that sets its own via `withEnv`/`withSandbox` is restored to that pinned
+outer value — and removes it at the end of the run (a `bun:test` `afterAll`, plus `'exit'`) and, in a
+process where nothing else listens for the signal, on SIGINT/SIGTERM/SIGHUP (re-raised afterwards, so the process still dies
+with the usual status). A **full `bun test` run is not such a process**: each signal there already has a second listener
+(besides ours), so our handler steps aside, nothing exits, and the run keeps going — Ctrl-C does not stop a full
+run (pre-existing behaviour, measured: a SIGINT mid-run still finished every test and exited 0); cleanup then happens via
+the end-of-run `afterAll`. A signal that is followed by SIGKILL (a second Ctrl-C from a wrapper, a CI timeout) leaks
+whatever was not yet removed. A test that sets its own via `withEnv`/`withSandbox` is restored to that pinned
 dir, never to unset, so a run that outlives its sandbox can't reach your real `~/.pi/agent`. `bunfig.toml` and
 `tests/` are not in `package.json` `files`, so none of this ships.
 
@@ -77,20 +81,28 @@ dir, never to unset, so a run that outlives its sandbox can't reach your real `~
 ### Temp directories in tests
 
 Create every temp dir with `makeTempDir(prefix)` from `tests/helpers/tmp.ts` — never `mkdtempSync(join(tmpdir(), …))`
-(`tmpdir()`/`mkdtemp*` anywhere else under `tests/` fails `tests/tmp-hygiene.test.ts`; the preload and the helper are
-the only allow-listed files). A raw `mkdtemp` leaks into `$TMPDIR` whenever its cleanup is forgotten, skipped by a
+(`tmpdir`/`mkdtemp*`/`mktemp`/`TMPDIR`, `/var/folders`/`/private/tmp` literals, a `/tmp` literal on an fs-writing line, or a
+`tempRoot()` used to build a path anywhere else under `tests/` fails `tests/tmp-hygiene.test.ts` — a line-based heuristic
+scan with documented misses; the preload, the helper and that test itself are the only allow-listed files). A raw `mkdtemp` leaks into `$TMPDIR` whenever its cleanup is forgotten, skipped by a
 throw, or unreachable (a helper that returns only a file *inside* the dir — `acp-runner-test-*` leaked five dirs per run,
 thousands in total). `makeTempDir` records the exact path it hands out:
 
-- A test that owns the dir's lifetime still removes it itself with `removeTempDir(dir)` (usually in `finally`).
+- Prefer `removeTempDir(dir)` (usually in `finally`) when a test owns the dir's lifetime. Most existing call sites still
+  clean up with a plain `rmSync`; that is tolerated, and safe, because the registry records each dir's identity
+  (`dev`+`ino` from `lstat`) and the sweep only ever deletes a registered path that is *still that same real directory*:
+  a path that is gone is unregistered silently, and one that now holds something else (recreated, replaced by a symlink)
+  is left alone with a single process warning. `removeTempDir`/`sweepTempDirs` also refuse a path that was never
+  registered (normalised first, so `dir/` and `dir/sub/..` match the registered path, but a symlink to it never does),
+  and `makeTempDir` throws if `TMPDIR` is relative.
 - Whatever is still registered at the end of the run is swept by the preload: from a `bun:test` `afterAll` (bun 1.3.14,
-  the pinned version, never emits `'exit'` at the end of `bun test`), on `'exit'`, and on SIGINT/SIGTERM/SIGHUP. The
-  sweep removes only registered paths (never a glob by prefix, never through a symlink) and never the outer
+  the pinned version, never emits `'exit'` at the end of `bun test`), on `'exit'`, and (see the signal caveat above) on
+  SIGINT/SIGTERM/SIGHUP when nothing else listens. The sweep never uses a glob by prefix and never touches the outer
   `PI_CODING_AGENT_DIR`. If a registered dir cannot be removed, the run fails loudly (non-zero exit).
 - A child `bun test` a test spawns runs the same preload, so it sweeps its own dirs too, including when it is
-  killed by SIGINT/SIGTERM (`tests/preload.test.ts`); only a SIGKILLed child can leave its own pinned dir behind.
+  killed by SIGINT/SIGTERM (`tests/preload.test.ts`; the child is a one-test file, so no other module listens); a
+  SIGKILLed child leaks everything it had not yet removed — its tracked dirs as well as its pinned agent dir.
 
-`tempRoot()` is the one way to name the temp root (e.g. to assert a path is under it).
+`tempRoot()` names the temp root for assertions only (e.g. `startsWith(tempRoot())`); building a path from it is flagged.
 
 ### Setting env vars in tests
 
