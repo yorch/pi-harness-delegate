@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -280,4 +281,48 @@ test('makeTempDir: a relative TMPDIR is refused, so a chdir can never repoint a 
   } finally {
     removeTempDir(cwd);
   }
+});
+
+/**
+ * Run a child `bun test` (from the repo root, so bunfig.toml's preload applies) on a one-test file, with its
+ * own temp root. With `lockRoot` the child's test makes the root read-only after creating a tracked dir, so
+ * the end-of-run sweep cannot remove that dir (unlinking an entry needs write permission on its parent).
+ */
+function runChildWithTempRoot(lockRoot: boolean): { code: number | null; output: string } {
+  const outer = makeTempDir('tmp-hygiene-child-');
+  const root = join(outer, 'root');
+  mkdirSync(root);
+  const file = join(outer, 'child.test.ts');
+  const helper = JSON.stringify(join(import.meta.dirname, 'helpers', 'tmp.ts'));
+  writeFileSync(
+    file,
+    [
+      "import { test } from 'node:test';",
+      "import { chmodSync } from 'node:fs';",
+      `import { makeTempDir, tempRoot } from ${helper};`,
+      `test('child', () => { makeTempDir('tracked-'); if (${lockRoot}) chmodSync(tempRoot(), 0o555); });`,
+    ].join('\n'),
+  );
+  try {
+    const run = spawnSync(process.execPath, ['test', file], {
+      cwd: join(import.meta.dirname, '..'),
+      env: { ...process.env, TMPDIR: root },
+      encoding: 'utf8',
+      timeout: 90_000,
+    });
+    return { code: run.status, output: run.stdout + run.stderr };
+  } finally {
+    chmodSync(root, 0o755);
+    removeTempDir(outer);
+  }
+}
+
+test('preload: a tracked dir that cannot be removed fails the run (non-zero exit)', { timeout: 120_000 }, t => {
+  if (process.platform === 'win32' || process.getuid?.() === 0)
+    return t.skip('needs POSIX permissions and a non-root user');
+  const control = runChildWithTempRoot(false);
+  assert.equal(control.code, 0, `control run (nothing stuck) must pass: ${control.output}`);
+  const stuck = runChildWithTempRoot(true);
+  assert.notEqual(stuck.code, 0, `a stuck tracked dir must fail the run: ${stuck.output}`);
+  assert.match(stuck.output, /temp dir leak \(tests\/helpers\/tmp\.ts\): could not remove .*tracked-/);
 });
