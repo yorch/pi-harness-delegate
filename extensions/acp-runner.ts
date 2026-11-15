@@ -150,6 +150,7 @@ export function runAcpHarness(opts: RunHarnessOptions, internals: AcpRunnerInter
       model: opts.model,
       maxBudgetUsd: opts.maxBudgetUsd,
       addDirs: opts.addDirs,
+      sessionPersistence: opts.sessionPersistence,
       resumeSessionId: opts.resumeSessionId,
     });
 

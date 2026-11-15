@@ -26,6 +26,11 @@ export interface HarnessConfig {
    *  `Harness.supportsTransports` by `resolveTransport()` instead, so misconfiguring it fails the
    *  run with a clear message rather than being silently ignored. */
   transport?: Transport;
+  /** Whether the harness keeps a session it can be resumed from. Only claude acts on it today;
+   *  `false` restores `--no-session-persistence`, which makes the printed session id
+   *  unresumable — the reason the default is now to persist. Non-boolean values are dropped at
+   *  load time by `sanitizeHarnessConfig`, like every other per-harness field. */
+  sessionPersistence?: boolean;
 }
 
 export interface DelegateConfig {
@@ -87,10 +92,14 @@ export function legacyOutputsDir(): string {
 }
 
 /** Drops a malformed `transport` (anything but 'stdout'/'acp', including absent) before it's
- *  stored — the rest of `HarnessConfig`'s fields are spread through as-is by `loadConfig()`. */
+ *  stored — the rest of `HarnessConfig`'s fields are spread through as-is by `loadConfig()`.
+ *  `sessionPersistence` is the one other field validated here: a non-boolean ("false", 0, null)
+ *  is dropped rather than coerced, so a typo leaves the harness default instead of silently
+ *  turning persistence off — or, worse, on. */
 function sanitizeHarnessConfig(v: HarnessConfig): HarnessConfig {
   const out = { ...v };
   if (out.transport !== 'stdout' && out.transport !== 'acp') delete out.transport;
+  if (typeof out.sessionPersistence !== 'boolean') delete out.sessionPersistence;
   return out;
 }
 
@@ -498,6 +507,34 @@ export function resolveTransport(cfg: DelegateConfig, harnessName: string, harne
   }
   return transport;
 }
+
+/**
+ * Whether a run should keep a session it can be resumed from: `true`, or `false` when the user
+ * opted out, or `undefined` for "the harness's own default". Only a harness that declares
+ * `supportsSessionPersistenceToggle` may be configured at all — setting
+ * `harnesses.<name>.sessionPersistence` for codex/opencode/amp/devin fails fast here rather than
+ * being silently ignored, because a user setting it for privacy would otherwise believe those
+ * sessions are not kept while they are. Same shape and timing as `resolveTransport`.
+ */
+export function resolveSessionPersistence(
+  cfg: DelegateConfig,
+  harnessName: string,
+  harness: Harness,
+): boolean | undefined {
+  const configured = cfg.harnesses[harnessName]?.sessionPersistence;
+  if (configured === undefined) return undefined;
+  if (harness.supportsSessionPersistenceToggle !== true) {
+    throw new Error(
+      `delegate.harnesses.${harnessName}.sessionPersistence is set, but ${harnessName} has no persistence toggle — only ${SESSION_PERSISTENCE_HARNESSES.join(', ')} can turn it off. Remove the setting.`,
+    );
+  }
+  return configured;
+}
+
+/** Harnesses whose runner can act on `sessionPersistence`. Named here only to keep the error
+ *  message above honest as more harnesses gain the flag; the real gate is the per-harness
+ *  `supportsSessionPersistenceToggle` declaration. */
+const SESSION_PERSISTENCE_HARNESSES = ['claude'];
 
 export function getMaxConcurrent(cfg: DelegateConfig, harness?: string): number {
   if (typeof cfg.maxConcurrent === 'number') return cfg.maxConcurrent;

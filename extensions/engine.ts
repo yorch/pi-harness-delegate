@@ -31,6 +31,7 @@ import {
   loadConfig,
   resolveModelForHarness,
   resolveRunTimeoutMs,
+  resolveSessionPersistence,
   resolveTransport,
 } from './config.ts';
 import {
@@ -598,6 +599,11 @@ export async function delegate(
   // not spawn the process and surface a cryptic native failure. See config.ts's resolveTransport.
   const transport = resolveTransport(config, harnessName, harness);
 
+  // Same fail-closed rule for the persistence toggle: only claude can turn it off, so setting it
+  // for codex/opencode/amp must not be silently ignored — a user setting it for privacy would
+  // believe those sessions are not kept, while they are. See resolveSessionPersistence.
+  const sessionPersistence = resolveSessionPersistence(config, harnessName, harness);
+
   if (needsDanger && opts.allowDangerous !== true) {
     const why =
       nativeClass === 'unlisted'
@@ -719,6 +725,7 @@ export async function delegate(
       timeoutMs,
       resumeSessionId: opts.sessionId,
       addDirs,
+      sessionPersistence,
       onStream: (t: string) => {
         streamedFull += t;
         opts.onStream?.(t);
@@ -822,6 +829,15 @@ export async function delegate(
     stoppedByHost: result.budgetExceeded === true,
   });
 
+  // A `--no-session-persistence` claude run still prints a session id, but the CLI cannot load it:
+  // its own `--help` says sessions "will not be saved to disk and cannot be resumed". Reporting that
+  // id would print a `--resume` hint nobody can use, store it in the run record, and let fan-out
+  // resume launch a `claude --resume` that dies with "No conversation found" — the very bug this
+  // option exists to avoid. Same honesty rule as an unmeasured cost: unavailable is null, never a
+  // plausible-looking value.
+  const reportedSessionId =
+    harnessName === 'claude' && !opts.sessionId && sessionPersistence === false ? null : result.sessionId;
+
   const file = saveOutput(
     harnessName,
     mode,
@@ -832,7 +848,7 @@ export async function delegate(
       nativePermission: nativePerm ?? undefined,
       model: actualModel,
       cwd: ctx.cwd,
-      sessionId: result.sessionId,
+      sessionId: reportedSessionId,
       resumed: Boolean(opts.sessionId),
       numTurns: result.numTurns,
       totalCostUsd: result.totalCostUsd,
@@ -855,7 +871,7 @@ export async function delegate(
       file,
       recordSource(file, {
         model: actualModel,
-        sessionId: result.sessionId,
+        sessionId: reportedSessionId,
         durationMs: result.durationMs,
         isError: result.isError,
         stopReason: result.stopReason,
@@ -890,7 +906,7 @@ export async function delegate(
       model: actualModel,
       numTurns: result.numTurns,
       totalCostUsd: result.totalCostUsd,
-      sessionId: result.sessionId,
+      sessionId: reportedSessionId,
       stopReason: result.stopReason,
       permissionDenials: result.permissionDenials,
       isError: result.isError,

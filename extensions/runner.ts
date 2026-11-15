@@ -15,6 +15,8 @@ export interface RunHarnessOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   resumeSessionId?: string;
+  /** Passed through to the harness's `buildArgs`; see `BuildArgsOpts.sessionPersistence`. */
+  sessionPersistence?: boolean;
   onStream?: (text: string) => void;
   onActivity?: (ev: import('./harnesses/types.ts').ActivityEvent) => void;
 }
@@ -88,6 +90,7 @@ export function runHarness(opts: RunHarnessOptions): Promise<HarnessResult> {
       maxBudgetUsd: opts.maxBudgetUsd,
       addDirs: opts.addDirs,
       resumeSessionId: opts.resumeSessionId,
+      sessionPersistence: opts.sessionPersistence,
     });
 
     const proc = spawn(opts.harness.binary, args, { cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'] });

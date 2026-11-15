@@ -9,7 +9,13 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { resolveVerifyPlan } from './activity.ts';
 import { resolveHarnessList } from './command.ts';
-import { type DelegateConfig, resolveModelForHarness, resolveRunTimeoutMs, resolveTransport } from './config.ts';
+import {
+  type DelegateConfig,
+  resolveModelForHarness,
+  resolveRunTimeoutMs,
+  resolveSessionPersistence,
+  resolveTransport,
+} from './config.ts';
 import { isProjectTrusted, mergeAddDirs, resolveRunPermission } from './engine.ts';
 import { detectAll, getHarness, HARNESS_NAMES, isKnownHarness, resolveHarnessName } from './harnesses/registry.ts';
 import { loadTemplates, quoteFull } from './templates.ts';
@@ -107,6 +113,15 @@ export function effectiveRunLines(
       transport = `INVALID (${err instanceof Error ? err.message : 'error'})`;
     }
     facts.push(['transport', `transport ${transport}`]);
+    // A steering field with a privacy consequence: it decides whether the run's prompt (repo content,
+    // PR diffs, fenced untrusted data) is written to a second store outside this extension's own
+    // 0600 outputs directory. Shown only when it is not the default, like the other opt-outs.
+    try {
+      if (resolveSessionPersistence(config, name, harness) === false)
+        facts.push(['persist', 'sessions NOT persisted (this run cannot be resumed afterwards)']);
+    } catch (err) {
+      facts.push(['persist', `INVALID (${err instanceof Error ? err.message : 'error'})`]);
+    }
     // the permission the run ACTUALLY has (escalated by an approved allowDangerous): the engine's own rule
     const perm = resolveRunPermission(harness, template, call.allowDangerous === true);
     if (perm.nativePermissionForRun !== undefined)

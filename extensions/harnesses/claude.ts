@@ -139,7 +139,14 @@ export const claudeHarness: Harness = {
       mode,
     ];
     if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
-    else args.push('--no-session-persistence');
+    // Default is now to PERSIST. The CLI documents this itself: `--no-session-persistence` means
+    // sessions "will not be saved to disk and cannot be resumed" (claude --help, 2.1.325), and yet
+    // the run still prints a `session_id`. Live-verified both ways: the flagged run's id fails
+    // `claude --resume <id>` with "No conversation found", while an unflagged one recalls the prior
+    // turn. So a fresh delegation was reported as resumable while every follow-up on it failed. Persisting keeps `--resume`/`sessionId` and fan-out resume
+    // working, and is opt-out via `harnesses.claude.sessionPersistence: false` for anyone who does
+    // not want per-run session files under ~/.claude.
+    else if (opts.sessionPersistence === false) args.push('--no-session-persistence');
     if (opts.model) args.push('--model', opts.model);
     if (opts.maxBudgetUsd !== undefined) args.push('--max-budget-usd', String(opts.maxBudgetUsd));
     for (const dir of opts.addDirs ?? []) args.push('--add-dir', dir);
@@ -161,6 +168,8 @@ export const claudeHarness: Harness = {
   // `auto` (a classifier auto-approves actions), and `dontAsk` — its effective reach is whatever the
   // user's allow rules grant, which this extension can't see, so it fails closed.
   safeNativePermissions: ['plan', 'acceptEdits', 'manual', 'default'],
+  // The only harness whose runner acts on `sessionPersistence` (see buildArgs above).
+  supportsSessionPersistenceToggle: true,
   // `plan` is claude's read-only mode. `manual`/`default` are not listed: under `-p` they deny what
   // would need approval, but that is a consequence of the user's allow rules, not a no-write mode.
   readonlyNativePermissions: ['plan'],

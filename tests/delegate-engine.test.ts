@@ -1664,3 +1664,97 @@ test('delegate: a per-call allowDangerous escalation does not relabel the native
     });
   });
 });
+
+test('delegate: claude persists by default and the opt-out reaches the argv, with no resumable id reported', async () => {
+  const { delegate } = await import('../extensions/engine.ts');
+  const { readFileSync } = await import('node:fs');
+  const run = async (settings: Record<string, unknown>, cwd: string) => {
+    let argv: string[] = [];
+    let result: Awaited<ReturnType<typeof delegate>> | undefined;
+    await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+      result = await delegate(
+        fakePi(async () => ({ stdout: '', stderr: '', code: 0 })),
+        fakeCtx(cwd),
+        {
+          harness: 'claude',
+          mode: 'tinker',
+          task: 'x',
+        },
+      );
+      argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+    });
+    return { argv, result: result as NonNullable<typeof result>, settings };
+  };
+
+  // Default: no flag, so the CLI keeps a session its printed id can actually be resumed from.
+  await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
+    const { argv, result } = await run({}, cwd);
+    assert.ok(!argv.includes('--no-session-persistence'), 'default run persists');
+    assert.equal(result.details.sessionId, 'sess-1', 'the reported id is the one the CLI printed');
+  });
+
+  // Opt-out: the flag reaches the argv (this is the config -> engine -> runner -> buildArgs path), and
+  // the id the CLI still prints is NOT reported, since it cannot be resumed (claude --help).
+  await withSandbox(
+    { settings: { harnesses: { claude: { sessionPersistence: false } } }, templates: { tinker: EDIT_TEMPLATE } },
+    async ({ cwd }) => {
+      const { argv, result } = await run({}, cwd);
+      assert.ok(argv.includes('--no-session-persistence'), 'opt-out reaches the argv');
+      assert.equal(result.details.sessionId, null, 'an unresumable session id is never reported');
+    },
+  );
+
+  // A resumed run always persists: --resume and --no-session-persistence would contradict each other.
+  await withSandbox(
+    { settings: { harnesses: { claude: { sessionPersistence: false } } }, templates: { tinker: EDIT_TEMPLATE } },
+    async ({ cwd }) => {
+      const { argv } = await (async () => {
+        let out: string[] = [];
+        await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+          await delegate(
+            fakePi(async () => ({ stdout: '', stderr: '', code: 0 })),
+            fakeCtx(cwd),
+            {
+              harness: 'claude',
+              mode: 'tinker',
+              task: 'x',
+              sessionId: 'sess-prior',
+            },
+          );
+          out = readFileSync(argsFile, 'utf8').trim().split('\n');
+        });
+        return { argv: out };
+      })();
+      assert.ok(argv.includes('--resume'), 'resumed run passes --resume');
+      assert.ok(!argv.includes('--no-session-persistence'), 'never both flags');
+    },
+  );
+});
+
+test('resolveSessionPersistence: claude accepts the toggle, a harness without it is refused', async () => {
+  const { loadConfig, resolveSessionPersistence } = await import('../extensions/config.ts');
+  const { getHarness } = await import('../extensions/harnesses/registry.ts');
+  const claude = getHarness('claude');
+  const codex = getHarness('codex');
+  assert.ok(claude && codex, 'claude and codex are registered');
+  assert.equal(claude.supportsSessionPersistenceToggle, true);
+  assert.notEqual(codex.supportsSessionPersistenceToggle, true, 'codex has no persistence toggle');
+
+  await withSandbox({ settings: { harnesses: { claude: { sessionPersistence: false } } } }, async () => {
+    const cfg = await loadConfig();
+    assert.equal(resolveSessionPersistence(cfg, 'claude', claude), false, 'the opt-out resolves as configured');
+  });
+
+  // Setting it for a harness that cannot act on it is an error, never a silent no-op: a user who
+  // set it for privacy would otherwise believe those sessions are not kept while they are.
+  await withSandbox({ settings: { harnesses: { codex: { sessionPersistence: false } } } }, async () => {
+    const cfg = await loadConfig();
+    assert.throws(() => resolveSessionPersistence(cfg, 'codex', codex), /codex has no persistence toggle/);
+  });
+
+  // Unset stays undefined, so the harness default applies and nothing is passed on the argv.
+  await withSandbox({}, async () => {
+    const cfg = await loadConfig();
+    assert.equal(resolveSessionPersistence(cfg, 'claude', claude), undefined);
+  });
+});
