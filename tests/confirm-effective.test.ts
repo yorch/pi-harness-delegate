@@ -491,3 +491,30 @@ test('command resume plan: the verify line follows the tier the resumed run will
       });
     });
 });
+
+test('effective: the persistence row tells the truth for a fresh run, a resumed run, and a harness that refuses it', async () => {
+  const tplBody = tpl('tinker', 'permission: edit');
+  // Fresh run under the opt-out: nothing is kept, and the dialog has to say so before the prompt
+  // (repo content, diffs) would otherwise land in a second store.
+  const off = await withSandbox(
+    { settings: { harnesses: { claude: { sessionPersistence: false } } }, userTemplates: { tinker: tplBody } },
+    async ({ cwd }) => effectiveRunLines(fakeCtx(cwd), await loadConfig(), ['claude'], 'tinker', {}).join('\n'),
+  );
+  assert.match(off, /sessions NOT persisted/, off);
+
+  // ... but a resumed run persists regardless (--resume wins over the opt-out), so the same row must
+  // not claim otherwise: that is the one case where a stale message would be actively misleading.
+  const resumed = await withSandbox(
+    { settings: { harnesses: { claude: { sessionPersistence: false } } }, userTemplates: { tinker: tplBody } },
+    async ({ cwd }) =>
+      effectiveRunLines(fakeCtx(cwd), await loadConfig(), ['claude'], 'tinker', { resumes: true }).join('\n'),
+  );
+  assert.match(resumed, /persisted anyway .*resumes an existing session/, resumed);
+  assert.doesNotMatch(resumed, /sessions NOT persisted/, resumed);
+
+  // Default (no setting): no row at all — this is not a steering field to clutter every dialog with.
+  const dflt = await withSandbox({ userTemplates: { tinker: tplBody } }, async ({ cwd }) =>
+    effectiveRunLines(fakeCtx(cwd), await loadConfig(), ['claude'], 'tinker', {}).join('\n'),
+  );
+  assert.doesNotMatch(dflt, /persist/i, dflt);
+});

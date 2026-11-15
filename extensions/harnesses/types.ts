@@ -73,6 +73,11 @@ export interface BuildArgsOpts {
   addDirs?: string[];
   resumeSessionId?: string;
   resumeId?: string;
+  /** Whether the harness may keep a transcript it can be resumed from. Undefined means "use the
+   *  harness's own default"; only claude acts on it today (`false` restores
+   *  `--no-session-persistence`, whose session id the CLI cannot resume). Set from
+   *  `harnesses.<name>.sessionPersistence` by the engine. */
+  sessionPersistence?: boolean;
 }
 
 export interface DetectResult {
@@ -107,8 +112,8 @@ export interface Harness {
    *  never heard of — is treated as danger (fail closed) by `isNativeDangerPermission` in registry.ts.
    *  Omitted -> no native value is considered safe. Covers both transports' vocabularies. */
   safeNativePermissions?: readonly string[];
-  /** The subset of `safeNativePermissions` that is genuinely read-only (no writes, no command
-   *  execution) on this harness. A native escape-hatch value listed here runs as the normalized
+  /** The subset of `safeNativePermissions` that is genuinely read-only (no writes, no
+   *  command execution) on this harness. A native escape-hatch value listed here runs as the normalized
    *  `readonly` tier — recorded as `readonly` and, crucially, never lets a `verify:` command execute
    *  host-side (see `resolveVerifyPlan`). Conservative by design: only list a mode whose read-only
    *  behavior is documented for a non-interactive run; anything else stays `edit`. Must be spelled
@@ -125,6 +130,11 @@ export interface Harness {
   supportsTransports?: Transport[];
   /** Default transport when config doesn't override. Omitted -> 'stdout'. */
   transport?: Transport;
+  /** True when this harness's `buildArgs` actually acts on `BuildArgsOpts.sessionPersistence`.
+   *  Only claude does today. `resolveSessionPersistence` (config.ts) refuses a configured
+   *  `harnesses.<name>.sessionPersistence` for any harness that does not declare this — better a
+   *  clear error than a privacy setting that silently does nothing. */
+  supportsSessionPersistenceToggle?: boolean;
   /** Build args to spawn the ACP server (e.g. ['acp']), for a harness whose `supportsTransports`
    *  includes 'acp'. Devin (ACP-only) has no separate stdout buildArgs, so it reuses `buildArgs` for
    *  this and doesn't need to declare `buildAcpArgs` — acp-runner.ts's caller falls back to `buildArgs`

@@ -150,6 +150,9 @@ export function runAcpHarness(opts: RunHarnessOptions, internals: AcpRunnerInter
       model: opts.model,
       maxBudgetUsd: opts.maxBudgetUsd,
       addDirs: opts.addDirs,
+      // Forwarded for symmetry with runner.ts. Inert today: claude is stdout-only, and any other
+      // harness with a persisted-by-default ACP transport refuses the setting before it gets here.
+      sessionPersistence: opts.sessionPersistence,
       resumeSessionId: opts.resumeSessionId,
     });
 

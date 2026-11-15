@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { DelegateCommandArgs } from '../extensions/command.ts';
@@ -1407,5 +1408,34 @@ test('planRerun: the will-apply resolution is told whether --allow-dangerous was
     );
     assert.deepEqual(plan.errors, []);
     assert.deepEqual(calls, [allow], `allowDangerous=${allow}`);
+  }
+});
+
+test("currentHistoryView: a numeric rerun indexes this directory's listing, never one shown in another", async () => {
+  // Regression: the cache was one process-global slot, so a listing shown in project A (or by another
+  // test file running concurrently, as CI does) made `rerun 1` in project B resolve to A's rows —
+  // refused as a different directory, with no dialog at all. The bug was order-dependent: it only
+  // showed up when a history test happened to run first.
+  const { currentHistoryView, showHistory } = await import('../extensions/history.ts');
+  const root = mkdtempSync(join(tmpdir(), 'hist-views-'));
+  const projectA = join(root, 'project-a');
+  const projectB = join(root, 'project-b');
+  mkdirSync(projectA, { recursive: true });
+  mkdirSync(projectB, { recursive: true });
+  // A minimal ctx of its own: the local `ui()` helper is built for confirm scripting, not for this.
+  const ctxFor = (cwd: string) =>
+    ({
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: { notify: () => {}, setStatus: () => {}, custom: async () => undefined },
+    }) as never;
+  try {
+    await showHistory(ctxFor(projectA), {});
+    const viewA = currentHistoryView(projectA);
+    assert.ok(currentHistoryView(projectA) === viewA, "this directory's own view is what it indexes");
+    assert.ok(currentHistoryView(projectB) !== viewA, "another directory's view is never indexed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

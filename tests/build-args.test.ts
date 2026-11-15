@@ -71,12 +71,27 @@ test('buildArgs table: claude', () => {
       assert.equal(flagValue(args, '--resume'), SESSION, l);
       assert.ok(!args.includes('--no-session-persistence'), l);
     } else {
-      assert.ok(args.includes('--no-session-persistence'), l);
+      // Persisting is the default: a `--no-session-persistence` run prints a session id that
+      // `claude --resume` cannot load, so the fresh-run id was advertised and unusable.
+      assert.ok(!args.includes('--no-session-persistence'), `${l}: a fresh run must persist to be resumable`);
       assert.ok(!args.includes('--resume'), l);
     }
     assert.equal(flagValue(args, '--model'), c.model ? MODEL : undefined, l);
     assert.deepEqual(addDirValues(args), c.addDirs ? DIRS : [], l);
   }
+});
+
+test('claude: sessionPersistence=false restores --no-session-persistence; undefined and true persist', () => {
+  const base = { prompt: PROMPT, cwd: '/repo', permission: 'readonly' as const };
+  // The opt-out, for anyone who does not want a per-run session file under ~/.claude.
+  assert.ok(claudeHarness.buildArgs({ ...base, sessionPersistence: false }).includes('--no-session-persistence'));
+  // Explicit on, and the default (field absent): both persist, so the reported id stays resumable.
+  assert.ok(!claudeHarness.buildArgs({ ...base, sessionPersistence: true }).includes('--no-session-persistence'));
+  assert.ok(!claudeHarness.buildArgs({ ...base }).includes('--no-session-persistence'));
+  // Resuming always wins: --resume and the no-persistence flag together would contradict.
+  const resumed = claudeHarness.buildArgs({ ...base, sessionPersistence: false, resumeSessionId: SESSION });
+  assert.equal(flagValue(resumed, '--resume'), SESSION);
+  assert.ok(!resumed.includes('--no-session-persistence'));
 });
 
 test('buildArgs table: codex (never --ask-for-approval/--thread-id; no --add-dir/--sandbox on resume)', () => {

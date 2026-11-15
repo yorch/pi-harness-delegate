@@ -110,6 +110,22 @@ test('config: legacy claudeDelegate migration also sanitizes transport', async (
   assert.equal(cfg.harnesses.claude?.transport, undefined);
 });
 
+test('config: sessionPersistence parses booleans and drops anything else', async () => {
+  const on = await loadConfigFromSettings({ delegate: { harnesses: { claude: { sessionPersistence: true } } } });
+  assert.equal(on.harnesses.claude?.sessionPersistence, true);
+  const off = await loadConfigFromSettings({ delegate: { harnesses: { claude: { sessionPersistence: false } } } });
+  assert.equal(off.harnesses.claude?.sessionPersistence, false);
+  // Coercion would be worse than dropping: "false" must never silently mean persist, and null
+  // must never silently mean don't. Both fall back to the harness default (undefined).
+  for (const bad of ['false', 'true', 0, 1, null, {}, []]) {
+    const cfg = await loadConfigFromSettings({
+      delegate: { harnesses: { claude: { sessionPersistence: bad, model: 'sonnet' } } },
+    });
+    assert.equal(cfg.harnesses.claude?.sessionPersistence, undefined, JSON.stringify(bad));
+    assert.equal(cfg.harnesses.claude?.model, 'sonnet', 'other fields on the same object still pass through');
+  }
+});
+
 test('resolveTransport: config override wins, falling back to the harness default, falling back to stdout', async () => {
   const { resolveTransport } = await import('../extensions/config.ts');
   const { devinHarness } = await import('../extensions/harnesses/devin.ts');
