@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { isProjectTrusted, warnIfProjectTemplatesSkipped } from '../extensions/engine.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 /** isProjectTrusted is the only trust anchor (pi's own store, outside the project) — it must fail
  *  closed on anything other than an explicit `true` from the host. */
@@ -30,7 +30,7 @@ test('isProjectTrusted: fails closed when the host API is missing, throws, or sa
 });
 
 function tmpProject(withTemplates: boolean): string {
-  const cwd = mkdtempSync(join(tmpdir(), 'trust-test-'));
+  const cwd = makeTempDir('trust-test-');
   if (withTemplates) {
     const dir = join(cwd, '.pi', 'delegate', 'templates');
     mkdirSync(dir, { recursive: true });

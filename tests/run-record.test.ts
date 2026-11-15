@@ -6,7 +6,6 @@ import {
   lstatSync,
   lutimesSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -15,7 +14,6 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
 import { pruneOutputs, SIDECAR_TMP_MAX_AGE_MS, writeTranscript } from '../extensions/activity.ts';
@@ -40,6 +38,7 @@ import {
   writeRunRecord,
 } from '../extensions/run-record.ts';
 import { CLAUDE_RESULT, fakeCtx, fakePi, tpl, withFakeBinaries, withSandbox } from './helpers/sandbox.ts';
+import { makeTempDir, removeTempDir } from './helpers/tmp.ts';
 import { UNSAFE } from './helpers/unsafe.ts';
 
 const baseSource = (): RunRecordSource => ({
@@ -620,7 +619,8 @@ test('pruneOutputs: crash-orphaned sidecar temp files are removed after an hour 
     old(`${STAMP(4)}.json.4242.XYZ.tmp`); // wrong random part
     old(`${STAMP(5)}.json.tmp`);
     old('my-notes.tmp');
-    const target = join(tmpdir(), `tmp-target-${process.pid}`);
+    const targetDir = makeTempDir('tmp-target-');
+    const target = join(targetDir, 'target');
     writeFileSync(target, 'precious');
     const ancient = (now - SIDECAR_TMP_MAX_AGE_MS - 60_000) / 1000;
     symlinkSync(target, join(dir, `${STAMP(6)}.json.4242.0123456789ab.tmp`));
@@ -634,7 +634,7 @@ test('pruneOutputs: crash-orphaned sidecar temp files are removed after an hour 
       assert.equal(readFileSync(target, 'utf8'), 'precious', 'a symlink is never followed');
       assert.ok(lstatSync(join(dir, `${STAMP(6)}.json.4242.0123456789ab.tmp`)).isSymbolicLink());
     } finally {
-      rmSync(target, { force: true });
+      removeTempDir(targetDir);
     }
   });
 });
@@ -643,7 +643,7 @@ test('a symlinked outputs directory: its target keeps its permissions (record an
   await withSandbox({}, async () => {
     const dir = outputsDir('claude');
     mkdirSync(join(dir, '..'), { recursive: true });
-    const target = mkdtempSync(join(tmpdir(), 'outputs-target-'));
+    const target = makeTempDir('outputs-target-');
     chmodSync(target, 0o755);
     symlinkSync(target, dir);
     const warnings: string[] = [];

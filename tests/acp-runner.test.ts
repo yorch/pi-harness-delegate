@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { acpView, runAcpHarness } from '../extensions/acp-runner.ts';
 import { devinHarness } from '../extensions/harnesses/devin.ts';
 import type { Harness } from '../extensions/harnesses/types.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 import { readPid, waitForNoProcessWithArg, waitForProcessExit } from './helpers/wait.ts';
 
 /**
@@ -118,8 +118,9 @@ function fakeHarness(mode: string, pidFile?: string): Harness {
 }
 
 function tmpPidFile(name: string): string {
-  // its own fresh mkdtemp dir — unique by construction, no clock/random collision
-  return join(mkdtempSync(join(tmpdir(), `acp-runner-test-${name}-`)), 'agent.pid');
+  // its own fresh temp dir — unique by construction; not removed here (the file must outlive the run so the
+  // test can read the pid), the preload's end-of-run sweep of makeTempDir dirs removes it
+  return join(makeTempDir(`acp-runner-test-${name}-`), 'agent.pid');
 }
 
 test('acpView: falls back to stdout-shaped fields for an ACP-only harness (Devin needs zero changes)', () => {

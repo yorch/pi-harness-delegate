@@ -14,6 +14,7 @@ import {
   resolveHarnessName,
 } from '../extensions/harnesses/registry.ts';
 import { withEnv } from './helpers/env.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 test('claude harness parses stream deltas and result', () => {
   const state = { streamedText: '', activities: [], result: null };
@@ -283,13 +284,11 @@ test('classifyNativePermission: case variants of danger tokens stay danger, neve
 });
 
 test('every bundled template classifies the same: no native permission, danger only where declared', async () => {
-  const { mkdtempSync, rmSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
+  const { rmSync } = await import('node:fs');
   const { loadTemplates } = await import('../extensions/templates.ts');
   const { isTemplateDanger } = await import('../extensions/harnesses/registry.ts');
   // isolate from the user's own ~/.pi/agent templates and the repo's own .pi
-  const agentDir = mkdtempSync(join(tmpdir(), 'bundled-tpl-'));
+  const agentDir = makeTempDir('bundled-tpl-');
   try {
     await withEnv({ PI_CODING_AGENT_DIR: agentDir }, () => {
       for (const name of HARNESS_NAMES) {

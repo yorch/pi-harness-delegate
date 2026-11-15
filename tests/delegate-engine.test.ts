@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { unwrap } from './helpers/dialog.ts';
 import { withEnv } from './helpers/env.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 /**
  * Exercises `delegate()` (the shared engine in index.ts) directly with a fake `pi`/`ctx`, so the
@@ -21,7 +21,7 @@ async function withSandbox<T>(
   opts: { maxConcurrent?: number; templates?: Record<string, string>; settings?: Record<string, unknown> },
   fn: (s: Sandbox) => Promise<T>,
 ): Promise<T> {
-  const root = mkdtempSync(join(tmpdir(), 'delegate-engine-'));
+  const root = makeTempDir('delegate-engine-');
   const agentDir = join(root, 'agent');
   const cwd = join(root, 'project');
   mkdirSync(agentDir, { recursive: true });
@@ -381,8 +381,8 @@ async function withFakeBinaries<T>(
   fn: (argsFile: string) => Promise<T>,
   opts: { sleepAfterSec?: number } = {},
 ): Promise<T> {
-  const { chmodSync, mkdtempSync } = await import('node:fs');
-  const binDir = mkdtempSync(join(tmpdir(), 'fake-bin-'));
+  const { chmodSync } = await import('node:fs');
+  const binDir = makeTempDir('fake-bin-');
   const argsFile = join(binDir, 'args.txt');
   const body = stdoutLines.map(l => `printf '%s\\n' '${l.replace(/'/g, `'\\''`)}'`).join('\n');
   const script = `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE"\nprintf '%s\\n' "$@" > "$FAKE_ARGS_FILE.$(basename "$0")"\n${body}\n${opts.sleepAfterSec ? `exec sleep ${opts.sleepAfterSec}\n` : ''}`;
@@ -1292,7 +1292,7 @@ test('delegate: legacy `sandbox: workspace-write` runs as edit and its verify ru
  */
 async function withFakeAcpAgent<T>(name: string, fn: (modeFile: string) => Promise<T>): Promise<T> {
   const { chmodSync } = await import('node:fs');
-  const binDir = mkdtempSync(join(tmpdir(), 'fake-acp-'));
+  const binDir = makeTempDir('fake-acp-');
   const modeFile = join(binDir, 'modes.txt');
   const agent = join(binDir, 'agent.js');
   writeFileSync(

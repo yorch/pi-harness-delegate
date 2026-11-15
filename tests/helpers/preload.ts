@@ -26,9 +26,11 @@
  * The pinned dir is removed when the process ends: from a `bun:test` `afterAll` (end of `bun test`, pass
  * or fail — bun 1.3.14, the pinned version, never emits 'exit' there), on 'exit' (bun 1.4.x, and any
  * `process.exit()`), and on SIGINT/SIGTERM/SIGHUP, which otherwise kill bun without running either. The signal is
- * re-raised after cleanup, so Ctrl-C still stops the run with the conventional 128+n status — unless
- * something else also listens for that signal (then the signal doesn't end the run, so the dir is left
- * for the end-of-run cleanup; see `registerPinnedDirCleanup`).
+ * re-raised after cleanup, so Ctrl-C stops the run with the conventional 128+n status — but only when
+ * nothing else listens for that signal. In a full `bun test` run every one of these signals has a second
+ * listener, so our handler steps aside and the signal does NOT stop the run (pre-existing: a SIGINT mid-run
+ * still finished every test and exited 0); the end-of-run `afterAll` cleans up instead. A signal followed by
+ * SIGKILL leaks whatever was not yet removed (see `registerPinnedDirCleanup`).
  *
  * Runtime backstop for the `process.env.X = prev` restore bug (`tests/env-hygiene.test.ts` is the
  * primary, static guard): after every test, any env var whose value is exactly `"undefined"` or `"null"`,
@@ -58,11 +60,25 @@ import {
   registerPinnedDirCleanup,
   showEnvValue,
 } from './preload-state.ts';
+import { closeTempDirs, sweepTempDirs } from './tmp.ts';
 
 const outerAgentDir = process.env.PI_CODING_AGENT_DIR;
 const pinnedAgentDir = mkdtempSync(join(tmpdir(), PRELOAD_AGENT_DIR_PREFIX));
-const removePinned = registerPinnedDirCleanup(pinnedAgentDir);
-afterAll(removePinned); // once, after the last file: bun 1.3.14 never emits 'exit' at the end of `bun test`
+// Also sweeps every dir tests registered via `makeTempDir` (tests/helpers/tmp.ts): same once-only cleanup,
+// so the end-of-run hook, 'exit' and the signals all remove them.
+const removePinned = registerPinnedDirCleanup(pinnedAgentDir, undefined, () => {
+  closeTempDirs(); // nothing new may be created once the sweep has run (see closeTempDirs)
+  stuckTempDirs = sweepTempDirs();
+});
+let stuckTempDirs: string[] = [];
+afterAll(() => {
+  // once, after the last file: bun 1.3.14 never emits 'exit' at the end of `bun test`
+  removePinned();
+  if (stuckTempDirs.length === 0) return;
+  // A tracked dir that cannot be removed would silently pile up in $TMPDIR run after run: fail loudly.
+  process.exitCode = 1;
+  throw new Error(`temp dir leak (tests/helpers/tmp.ts): could not remove ${stuckTempDirs.join(', ')}`);
+});
 restoreEnv('PI_CODING_AGENT_DIR', pinnedAgentDir);
 markPreloaded({ pinnedAgentDir, outerAgentDir });
 

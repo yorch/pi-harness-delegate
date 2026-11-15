@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { DelegateConfig } from '../extensions/config.ts';
 import { withEnv } from './helpers/env.ts';
+import { makeTempDir } from './helpers/tmp.ts';
 
 function withAgentDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = mkdtempSync(join(tmpdir(), 'concurrency-test-'));
+  const dir = makeTempDir('concurrency-test-');
   return withEnv({ PI_CODING_AGENT_DIR: dir }, () => fn(dir)).finally(() => {
     rmSync(dir, { recursive: true, force: true });
   });
