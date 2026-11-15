@@ -969,7 +969,7 @@ export default function (pi: ExtensionAPI) {
     // full history); no selector means the newest run that has a record
     const picked = selectRecord(
       selector,
-      selector !== undefined && !isRunId(selector) ? currentHistoryView() : [],
+      selector !== undefined && !isRunId(selector) ? currentHistoryView(ctx.cwd) : [],
       forcedHarness,
     );
     if (!picked.ok) {

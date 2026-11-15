@@ -135,12 +135,21 @@ export function historyLine(e: HistoryEntry): string {
   return `${displayText(e.harness, 24)} ${displayText(e.mode, 64)} · ${status} · ${formatCost(e.cost)} · ${e.sessionId ? displayText(e.sessionId, 40) : '-'}${e.runId ? ` · ${e.runId}` : ''}`;
 }
 
-/** The listing the user last saw this session — what a numeric `/delegate rerun <n>` indexes into. */
-let lastView: HistoryEntry[] | null = null;
+/**
+ * The listing the user last saw in a given working directory — what a numeric `/delegate rerun <n>`
+ * indexes into, and what its rows are described to the human as.
+ *
+ * Keyed by cwd, not one global slot: the cache outlives the run that set it, and a listing shown in
+ * one project used to be indexable from another. `rerun 1` would then resolve to a record from
+ * *that* directory and be refused ("refused in another directory"), or worse, rerun the wrong run
+ * after a `cd`. Keying it makes the number mean what the user saw *for the directory they are in*,
+ * and falls back to this directory's own unfiltered history when nothing has been shown there yet.
+ */
+const lastViews = new Map<string, HistoryEntry[]>();
 
-/** The last shown history view, or the full unfiltered history when none has been shown yet. */
-export function currentHistoryView(): HistoryEntry[] {
-  return lastView ?? applyHistoryFilter(readAllHistory(), {});
+/** The last shown history view for `cwd`, or this directory's full unfiltered history when none has been shown yet. */
+export function currentHistoryView(cwd: string): HistoryEntry[] {
+  return lastViews.get(cwd) ?? applyHistoryFilter(readAllHistory(), {});
 }
 
 /** One line naming how many run records were ignored and why (sanitized), or '' when none were. */
@@ -155,7 +164,7 @@ export async function showHistory(ctx: ExtensionContext, filter: HistoryFilter =
   const everything = readAllHistory();
   const ignored = describeIgnoredRecords(everything);
   const entries = applyHistoryFilter(everything, filter);
-  lastView = entries;
+  lastViews.set(ctx.cwd, entries);
   const filterLabel = describeHistoryFilter(filter);
   if (entries.length === 0) {
     const msg = filterLabel
