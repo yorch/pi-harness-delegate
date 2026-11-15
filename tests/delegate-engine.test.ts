@@ -1668,7 +1668,7 @@ test('delegate: a per-call allowDangerous escalation does not relabel the native
 test('delegate: claude persists by default and the opt-out reaches the argv, with no resumable id reported', async () => {
   const { delegate } = await import('../extensions/engine.ts');
   const { readFileSync } = await import('node:fs');
-  const run = async (settings: Record<string, unknown>, cwd: string) => {
+  const run = async (cwd: string) => {
     let argv: string[] = [];
     let result: Awaited<ReturnType<typeof delegate>> | undefined;
     await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
@@ -1683,12 +1683,12 @@ test('delegate: claude persists by default and the opt-out reaches the argv, wit
       );
       argv = readFileSync(argsFile, 'utf8').trim().split('\n');
     });
-    return { argv, result: result as NonNullable<typeof result>, settings };
+    return { argv, result: result as NonNullable<typeof result> };
   };
 
   // Default: no flag, so the CLI keeps a session its printed id can actually be resumed from.
   await withSandbox({ templates: { tinker: EDIT_TEMPLATE } }, async ({ cwd }) => {
-    const { argv, result } = await run({}, cwd);
+    const { argv, result } = await run(cwd);
     assert.ok(!argv.includes('--no-session-persistence'), 'default run persists');
     assert.equal(result.details.sessionId, 'sess-1', 'the reported id is the one the CLI printed');
   });
@@ -1698,7 +1698,7 @@ test('delegate: claude persists by default and the opt-out reaches the argv, wit
   await withSandbox(
     { settings: { harnesses: { claude: { sessionPersistence: false } } }, templates: { tinker: EDIT_TEMPLATE } },
     async ({ cwd }) => {
-      const { argv, result } = await run({}, cwd);
+      const { argv, result } = await run(cwd);
       assert.ok(argv.includes('--no-session-persistence'), 'opt-out reaches the argv');
       assert.equal(result.details.sessionId, null, 'an unresumable session id is never reported');
     },
@@ -1708,25 +1708,26 @@ test('delegate: claude persists by default and the opt-out reaches the argv, wit
   await withSandbox(
     { settings: { harnesses: { claude: { sessionPersistence: false } } }, templates: { tinker: EDIT_TEMPLATE } },
     async ({ cwd }) => {
-      const { argv } = await (async () => {
-        let out: string[] = [];
-        await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
-          await delegate(
-            fakePi(async () => ({ stdout: '', stderr: '', code: 0 })),
-            fakeCtx(cwd),
-            {
-              harness: 'claude',
-              mode: 'tinker',
-              task: 'x',
-              sessionId: 'sess-prior',
-            },
-          );
-          out = readFileSync(argsFile, 'utf8').trim().split('\n');
-        });
-        return { argv: out };
-      })();
+      let argv: string[] = [];
+      let resumed: Awaited<ReturnType<typeof delegate>> | undefined;
+      await withFakeBinaries(['claude'], [CLAUDE_RESULT], async argsFile => {
+        resumed = await delegate(
+          fakePi(async () => ({ stdout: '', stderr: '', code: 0 })),
+          fakeCtx(cwd),
+          {
+            harness: 'claude',
+            mode: 'tinker',
+            task: 'x',
+            sessionId: 'sess-prior',
+          },
+        );
+        argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+      });
       assert.ok(argv.includes('--resume'), 'resumed run passes --resume');
       assert.ok(!argv.includes('--no-session-persistence'), 'never both flags');
+      // The resumed run is persisted after all, so nulling its id would lose a usable session — and the
+      // opt-out must not silently turn a working follow-up into an unresumable run.
+      assert.equal(resumed?.details.sessionId, 'sess-1', 'a resumed run still reports its session id');
     },
   );
 });

@@ -302,6 +302,7 @@ export default function (pi: ExtensionAPI) {
         const steering = {
           ...steeringFromTool(rawParams),
           effective: effectiveRunLines(ctx, config, plan.harnesses, rawParams.mode ?? plan.mode, {
+            resumes: true, // a fan-out resume continues recorded sessions
             model: rawParams.model,
             budgetUsd: rawParams.maxBudgetUsd,
             timeoutSec: rawParams.timeoutSec,
@@ -345,6 +346,7 @@ export default function (pi: ExtensionAPI) {
             harnesses: target.harnesses,
             mode: target.mode,
             effective: effectiveRunLines(ctx, config, target.harnesses, target.mode, {
+              resumes: params.sessionId !== undefined,
               model: params.model,
               budgetUsd: params.maxBudgetUsd,
               timeoutSec: params.timeoutSec,
@@ -731,6 +733,7 @@ export default function (pi: ExtensionAPI) {
         const shown = formatFanoutResumePlan(parsed.sessionId, plan, 'command', {
           ...steeringFromCommand(parsed),
           effective: effectiveRunLines(ctx, config, plan.harnesses, parsed.mode ?? plan.mode, {
+            resumes: true, // a fan-out resume continues recorded sessions
             model: parsed.model,
             budgetUsd: parsed.budget,
             budgetNarrowOnly: parsed.storedBudget,
@@ -821,6 +824,7 @@ export default function (pi: ExtensionAPI) {
           harnesses: [harnessName],
           mode,
           effective: effectiveRunLines(ctx, config, [harnessName], mode, {
+            resumes: parsed.sessionId !== undefined,
             model: parsed.model,
             budgetUsd: parsed.budget,
             budgetNarrowOnly: parsed.storedBudget,

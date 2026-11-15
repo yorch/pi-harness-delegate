@@ -523,9 +523,12 @@ export function resolveSessionPersistence(
 ): boolean | undefined {
   const configured = cfg.harnesses[harnessName]?.sessionPersistence;
   if (configured === undefined) return undefined;
-  if (harness.supportsSessionPersistenceToggle !== true) {
+  // Only `false` asks for something the harness cannot do. `true` asks for the default, so refusing it
+  // would break a harness that persists anyway for no benefit — and would take every fan-out member
+  // with it.
+  if (configured === false && harness.supportsSessionPersistenceToggle !== true) {
     throw new Error(
-      `delegate.harnesses.${harnessName}.sessionPersistence is set, but ${harnessName} has no persistence toggle — only ${SESSION_PERSISTENCE_HARNESSES.join(', ')} can turn it off. Remove the setting.`,
+      `delegate.harnesses.${harnessName}.sessionPersistence is false, but ${harnessName} has no persistence toggle — only ${SESSION_PERSISTENCE_HARNESSES.join(', ')} can turn persistence off. Remove the setting (or set it to true).`,
     );
   }
   return configured;

@@ -836,7 +836,9 @@ export async function delegate(
   // option exists to avoid. Same honesty rule as an unmeasured cost: unavailable is null, never a
   // plausible-looking value.
   const reportedSessionId =
-    harnessName === 'claude' && !opts.sessionId && sessionPersistence === false ? null : result.sessionId;
+    harness.supportsSessionPersistenceToggle === true && !opts.sessionId && sessionPersistence === false
+      ? null
+      : result.sessionId;
 
   const file = saveOutput(
     harnessName,

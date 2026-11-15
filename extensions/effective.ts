@@ -39,6 +39,9 @@ export interface EffectiveCall {
   allowDangerous?: boolean;
   /** The task the call carries (the tool's): empty means the engine runs the template's `defaultTask`, which is then shown. */
   task?: string;
+  /** This call continues an existing session, and `--resume` wins over a persistence opt-out — so the
+   *  row must not claim nothing is written. Every call site that confirms a resumed run MUST say so. */
+  resumes?: boolean;
 }
 
 /** `text` quoted in full when it is short, else its first `max` characters, escaped, with the exact count left out. */
@@ -118,7 +121,12 @@ export function effectiveRunLines(
     // 0600 outputs directory. Shown only when it is not the default, like the other opt-outs.
     try {
       if (resolveSessionPersistence(config, name, harness) === false)
-        facts.push(['persist', 'sessions NOT persisted (this run cannot be resumed afterwards)']);
+        facts.push([
+          'persist',
+          call.resumes === true
+            ? 'sessions persisted anyway (this run resumes an existing session, so the opt-out does not apply)'
+            : 'sessions NOT persisted (this run cannot be resumed afterwards)',
+        ]);
     } catch (err) {
       facts.push(['persist', `INVALID (${err instanceof Error ? err.message : 'error'})`]);
     }
